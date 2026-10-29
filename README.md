@@ -10,7 +10,7 @@
 
 **ProsperoEden is an unofficial PlayStation 5 port of [Eden](https://github.com/eden-emulator/mirror)** - an accurate, high-performance emulator. All credit for the emulator core belongs to the Eden project and its contributors. ProsperoEden is not affiliated with or endorsed by the Eden team or Sony.
 
-This is an early alpha. Video, audio, controller input, and saves have been confirmed working. Compatibility and performance will vary between games. The current release is **v1.000.111**.
+This is an early alpha. Video, audio, controller input, and saves have been confirmed working. Compatibility and performance will vary between games. The current release is **v1.000.112**.
 
 ## Source code
 
@@ -75,7 +75,7 @@ Local-wireless multiplayer through Eden rooms is new in v1.000.110 and experimen
 > **Use [ShadowMountPlus 1.7beta4](https://github.com/drakmor/ShadowMountPlus/releases/tag/1.7beta4) or newer.** It mounts ProsperoEden from the folder (or drive) you copy it to, and it also mounts `/data` and USB and extended storage drives into the app's sandbox, so ProsperoEden reaches its data and your game files with nothing else to load. With an older ShadowMountPlus, ProsperoEden falls back to its bundled [Lapy](https://github.com/blackbearreloaded/PS5-Lapy-JB-Daemon) helper (see [Elevation credits](#elevation-credits)).
 
 1. Download and extract the release ZIP.
-2. Copy the included `PPSA99008` folder to `/data/homebrew/PPSA99008` on the PS5 (or to another folder ShadowMountPlus scans, such as `/mnt/usb0/homebrew/PPSA99008`).
+2. Copy the included `PPSA99016` folder to `/data/homebrew/PPSA99016` on the PS5 (or to another folder ShadowMountPlus scans, such as `/mnt/usb0/homebrew/PPSA99016`).
 3. Make sure your jailbreak environment's local ELF loader is listening on TCP port 9021 (most setups have it). [Updates from the menu](#updating) use it, and with a ShadowMountPlus older than 1.7beta4 ProsperoEden sends its bundled Lapy helper through it.
 4. Put your own legally dumped keys, firmware, and games in a **game files folder** (layout below). It can be anywhere the PS5 can read: internal storage, an M.2 or external drive, or a USB device.
 5. Launch **ProsperoEden**, open **Settings > Game files**, browse to that folder and select it. The default is `/data/prosperoeden`.
@@ -130,18 +130,18 @@ ProsperoEden keeps its own data in `/data/prosperoeden`, separately from the gam
 ├── backup/save-sync/                   # save data the save sync replaced, the last three per game
 ├── covers/                             # cached game covers
 ├── logs/                               # current and previous session logs, crash reports
-├── previous-version/PPSA99008-backup/  # the version the last self-update replaced
+├── previous-version/PPSA99016-backup/  # the version the last self-update replaced
 └── user/                               # every profile's saves, and emulator user data
     └── lossless/Lossless.dll           # optional: your copy, for frame generation
 ```
 
-The app itself stays in `/data/homebrew/PPSA99008`; see [Updating](#updating).
+The app itself stays in `/data/homebrew/PPSA99016`; see [Updating](#updating).
 
 ProsperoEden does not include keys, firmware, games, or other copyrighted console data. Dump these files from hardware and software you own. Do not download or redistribute them.
 
 This is the only place it keeps them. If ProsperoEden cannot get access to the console's storage when it starts, the home screen says so and no game can be started; your data is untouched, and closing ProsperoEden and opening it again is the first thing to try. Earlier versions kept a second set of settings and saves in the app's own sandbox in that case, which made saves and settings seem to disappear on consoles where access came and went.
 
-Keys, firmware and games that an early version kept inside the app's folder (`/data/homebrew/PPSA99008/assets`) are moved to `/data/prosperoeden` the first time this version starts, so that replacing the app cannot remove them.
+Keys, firmware and games that an early version kept inside the app's folder (`/data/homebrew/PPSA99016/assets`) are moved to `/data/prosperoeden` the first time this version starts, so that replacing the app cannot remove them.
 
 ### Updating
 
@@ -155,14 +155,14 @@ Once each time it opens, ProsperoEden asks [homebrew.page](https://homebrew.page
 
 If the download or the unpacking fails, the dialog says why and offers **Try again**; the app stays as it was. Without a network, or without an answer, nothing is shown. When ProsperoEden cannot install the release itself (no payload loader, or an install it cannot find), the menu says **Update available** at the top right for ten seconds instead, and the steps below still work:
 
-- **Folder install.** Copy the `PPSA99008` folder from the new release ZIP over `/data/homebrew/PPSA99008`, replacing the files it has, then start ProsperoEden. Files you put there yourself, such as `language.txt`, stay.
+- **Folder install.** Copy the `PPSA99016` folder from the new release ZIP over `/data/homebrew/PPSA99016`, replacing the files it has, then start ProsperoEden. Files you put there yourself, such as `language.txt`, stay.
 
 ### Going back to the previous version
 
-When ProsperoEden updates itself, the files of the version it replaces are kept in `/data/prosperoeden/previous-version/PPSA99008-backup`, until the next update replaces them in turn. If a new version misbehaves, you can put the previous one back:
+When ProsperoEden updates itself, the files of the version it replaces are kept in `/data/prosperoeden/previous-version/PPSA99016-backup`, until the next update replaces them in turn. If a new version misbehaves, you can put the previous one back:
 
 1. Close ProsperoEden.
-2. Copy everything inside `/data/prosperoeden/previous-version/PPSA99008-backup` over the app's folder (`/data/homebrew/PPSA99008`), replacing the files it has, for example over FTP.
+2. Copy everything inside `/data/prosperoeden/previous-version/PPSA99016-backup` over the app's folder (`/data/homebrew/PPSA99016`), replacing the files it has, for example over FTP.
 3. Start ProsperoEden. The About screen shows the version that is running.
 
 The update will be offered again the next time ProsperoEden opens; choose **Skip** to stay on the version you put back. Settings, saves and game files are not part of this: they stay as they are. An update done by hand, by copying a release over the app's folder, keeps no previous version.
@@ -347,7 +347,7 @@ The D-pad, the sticks and the [in-game shortcuts](#in-game-shortcuts) do not cha
 
 ### Language and accessibility
 
-The launcher follows the language the PS5 is set to: Arabic, Chinese (simplified and traditional), Czech, Danish, Dutch, Finnish, French, German, Greek, Hungarian, Indonesian, Italian, Japanese, Korean, Norwegian, Polish, Portuguese, Romanian, Russian, Spanish, Swedish, Thai, Turkish, Ukrainian and Vietnamese (with the regional variants the PS5 has for French, Portuguese and Spanish), and English otherwise. Arabic, Chinese, Greek, Japanese, Korean and Thai are drawn with the PS5's own system fonts. Arabic text runs right to left; the screens themselves are not mirrored. To use another one, put a file named `language.txt` holding its tag (for example `en-US` or `pt-BR`) in `/data/homebrew/PPSA99008`. The language *games* use is a separate setting, **Settings > Language**.
+The launcher follows the language the PS5 is set to: Arabic, Chinese (simplified and traditional), Czech, Danish, Dutch, Finnish, French, German, Greek, Hungarian, Indonesian, Italian, Japanese, Korean, Norwegian, Polish, Portuguese, Romanian, Russian, Spanish, Swedish, Thai, Turkish, Ukrainian and Vietnamese (with the regional variants the PS5 has for French, Portuguese and Spanish), and English otherwise. Arabic, Chinese, Greek, Japanese, Korean and Thai are drawn with the PS5's own system fonts. Arabic text runs right to left; the screens themselves are not mirrored. To use another one, put a file named `language.txt` holding its tag (for example `en-US` or `pt-BR`) in `/data/homebrew/PPSA99016`. The language *games* use is a separate setting, **Settings > Language**.
 
 **Settings > Accessibility** has three switches. **Larger text** draws the menu's small text about a third larger. **High contrast** uses solid panels, brighter text and an outlined highlight. **Reduce motion** stops the background drifting and the screens sliding, in the menu and on the loading screen. There is no screen reader.
 
@@ -355,8 +355,9 @@ The launcher follows the language the PS5 is set to: Arabic, Chinese (simplified
 
 Earlier versions read everything from `/data/homebrew/PPSA99008/assets/`. That folder keeps working until you choose a game files folder, and settings are migrated automatically on first launch. To move to the new layout, move `assets/keys`, `assets/firmware` and `assets/roms` into any folder, then select it in **Settings > Game files**. The release ZIP contains no user files, so copy its app files over your installation without deleting your own data.
 
-## Changes in v1.000.111
+## Changes in v1.000.112
 
+- **A new title ID: PPSA99016.** ProsperoEden used to be PPSA99008, the ID of the earlier ProsperoEden listed in the homebrew catalog, whose repository is gone. This version installs to `/data/homebrew/PPSA99016` as a title of its own. Your settings, saves, keys, firmware and covers are in `/data/prosperoeden` and are found as before. If you had the PPSA99008 version, it stays installed beside this one; delete its folder (`/data/homebrew/PPSA99008`) once this one works. Anything you kept inside that old folder (an early version's `assets`, a `block-list.txt`, a `language.txt`) is not moved: copy it to `/data/homebrew/PPSA99016`.
 - **Builds again now that the original repositories are gone.** The game and launcher are those of v1.000.110; only where the build fetches three of its inputs changed. The PS5 OpenGL SDK comes from [darkxex/ps5-opengl](https://github.com/darkxex/ps5-opengl), a mirror of the original, at its version 1.0.2 (1.0.0 is no longer published anywhere official; its headers and exported functions are the same). The Native App Boilerplate and the Lapy helper are fetched from [drakmor/ps5-native-app-boilerplate](https://github.com/drakmor/ps5-native-app-boilerplate) and [ArkSama/PS5-Lapy-JB-Daemon](https://github.com/ArkSama/PS5-Lapy-JB-Daemon), at the same commits as before.
 
 ## Changes in v1.000.110
