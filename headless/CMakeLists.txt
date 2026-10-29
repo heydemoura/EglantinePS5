@@ -2373,7 +2373,7 @@ if(EDEN_PS5_OPENGL)
     endif()
     # The pinned PS5 OpenGL 4.6 SDK release (tools/deps.json, make deps).
     set(gl46 "${PORT_ROOT}/.deps/ps5-opengl-sdk-1.0.2/sdk")
-    set(gl46_expected "d0c5accb58e07f1359fecfd9e4313df08acb86af71fb80052da3e9f06203fdc8")
+    set(gl46_expected "7fd5d7a1beb7bf5af42e6a6936b88b1266cba3f224d3a60c3a6a09285e339ae1")
     if(NOT EXISTS "${gl46}/lib/libps5_opengl_core33.a")
         message(FATAL_ERROR "Missing the PS5 OpenGL SDK in ${gl46}; run make deps")
     endif()
