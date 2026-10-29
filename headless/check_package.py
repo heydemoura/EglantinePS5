@@ -99,7 +99,7 @@ if __name__ == '__main__':
             if not p.startswith('../') or (ROOT / p).exists()]  # console tooling of a development layout
         frontend = json.loads((OUT / 'frontend.json').read_text())
         if frontend['renderer'] == 'opengl-4.6-compatibility':
-            sdk = ROOT / '.deps/ps5-opengl-sdk-1.0.0/sdk'
+            sdk = ROOT / '.deps/ps5-opengl-sdk-1.0.2/sdk'
             manifest = sdk / 'manifest.sha256'
             assert digest(manifest) == GL_SDK_MANIFEST_SHA256
             paths.append(manifest)
