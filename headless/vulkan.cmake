@@ -119,6 +119,7 @@ if(EDEN_PS5_FRAMEGEN)
         # these two (tools/prepare-vulkan-port.py), so the generated files replace the originals.
         "${PORT_BUILD_DIR}/vulkan_frame_gen.cpp"
         "${PORT_BUILD_DIR}/vulkan_lsfg_shaders.cpp"
+        renderer_vulkan/present/fsr3_frame_gen.cpp
         renderer_vulkan/present/frame_gen_pacer.cpp
         renderer_vulkan/present/lsfg_alpha.cpp
         renderer_vulkan/present/lsfg_beta.cpp

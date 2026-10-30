@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Names the functions in a ProsperoEden crash report (headless/crash_report.h).
+"""Names the functions in a EglantinePS5 crash report (headless/crash_report.h).
 
   symbolize-crash.py REPORT ELF
 
 REPORT is logs/crash-YYYYMMDD-HHMMSS.txt from a console. ELF is the unstripped executable of the
 build that wrote it: build/headless-native/llvm-pie.elf right after a build, and for a release
-the copy `make release` keeps (build/symbols/ProsperoEden-vX.Y.Z.elf). Every "eboot+0x..." in the
+the copy `make release` keeps (build/symbols/EglantinePS5-vX.Y.Z.elf). Every "eboot+0x..." in the
 report is an offset into that file's code; the report is printed again with the function, file
 and line after each one.
 
@@ -69,7 +69,7 @@ def main():
     start, at, size = sections(data)['.text']
     said = re.search(r'\(code size 0x([0-9a-f]+)\)', report)
     if not said:
-        sys.exit('not a ProsperoEden crash report: ' + sys.argv[1])
+        sys.exit('not a EglantinePS5 crash report: ' + sys.argv[1])
     if int(said.group(1), 16) != size:
         print(f'WARNING: the report is from a build with 0x{said.group(1)} bytes of code; this ELF has 0x{size:x}. '
               'The names below are wrong unless it is the same build.\n')

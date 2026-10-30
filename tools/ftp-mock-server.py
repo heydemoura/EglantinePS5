@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ProsperoEden - A small stand-in for the console's FTP server, for tools/check-remote.py.
+# EglantinePS5 - A small stand-in for the console's FTP server, for tools/check-remote.py.
 # Copyright (C) 2026 BlackBearReloaded
 # SPDX-License-Identifier: GPL-3.0-or-later
 """ftp-mock-server.py <port file>

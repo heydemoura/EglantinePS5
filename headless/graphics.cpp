@@ -555,10 +555,10 @@ GraphicsWindow::GraphicsWindow(bool use_vulkan) : vulkan(use_vulkan) {
         // that is refused leaves the one the launcher opened with.
         if (display != EGL_NO_DISPLAY &&
             !eglSetDisplayModePS5(display, Display::output_width.load(), Display::output_height.load()))
-            std::fprintf(stderr, "[ProsperoEden] OpenGL display: the output size was not set (0x%x)\n",
+            std::fprintf(stderr, "[EglantinePS5] OpenGL display: the output size was not set (0x%x)\n",
                          static_cast<unsigned>(eglGetError()));
         if (display != EGL_NO_DISPLAY && !eglSetDisplayRefreshPS5(display, Display::requested_hz.load()))
-            std::fprintf(stderr, "[ProsperoEden] OpenGL display: the refresh rate was not set (0x%x)\n",
+            std::fprintf(stderr, "[EglantinePS5] OpenGL display: the refresh rate was not set (0x%x)\n",
                          static_cast<unsigned>(eglGetError()));
 #endif
         Check(display != EGL_NO_DISPLAY && eglInitialize(display, nullptr, nullptr), "eglInitialize");

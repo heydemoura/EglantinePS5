@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Keep Lapy's startup exchange ahead of every ProsperoEden worker thread."""
+"""Keep Lapy's startup exchange ahead of every EglantinePS5 worker thread."""
 from pathlib import Path
 
 

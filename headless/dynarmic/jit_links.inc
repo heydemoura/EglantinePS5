@@ -1,4 +1,4 @@
-// ProsperoEden: direct branches between blocks go through the process's JitGroup (jit_group.h).
+// EglantinePS5: direct branches between blocks go through the process's JitGroup (jit_group.h).
 // The branch's 32-bit displacement is 4-byte aligned, so linking it when `next` gets compiled
 // (by any core) and unlinking it when `next` is invalidated are single atomic stores; while
 // unlinked it jumps to a stub that stores next's PC and returns to the dispatcher. Sites are

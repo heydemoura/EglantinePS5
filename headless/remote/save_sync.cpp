@@ -117,7 +117,7 @@ void Recover(const SyncPlaces& places, const std::string& title) {
     std::error_code status;
     if (!backup.empty() && !fs::exists(places.save, status) && fs::exists(backup, status) &&
         std::rename(backup.c_str(), places.save.c_str()) == 0)
-        std::fprintf(stderr, "[ProsperoEden] save sync: a replacement of %s did not end; the console's save data is back in its place\n", title.c_str());
+        std::fprintf(stderr, "[EglantinePS5] save sync: a replacement of %s did not end; the console's save data is back in its place\n", title.c_str());
     (void)std::remove(note.c_str());
 }
 

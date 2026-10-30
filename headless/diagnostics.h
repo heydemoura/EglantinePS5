@@ -10,7 +10,7 @@ namespace Eden {
 // Only concise lifecycle/error text belongs here, never key or ticket contents.
 inline void Report(const char* stage, const char* message) {
     char line[1024];
-    std::snprintf(line, sizeof(line), "[ProsperoEden] %s: %.900s\n", stage, message);
+    std::snprintf(line, sizeof(line), "[EglantinePS5] %s: %.900s\n", stage, message);
     std::fputs(line, stderr);
 #if defined(__PROSPERO__)
     // Written out within a second, or at once when so set (log_flusher.h); flushing here would

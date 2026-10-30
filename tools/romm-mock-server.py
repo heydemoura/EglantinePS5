@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ProsperoEden - A stand-in for a RomM server, for the cases a real one does not show on demand.
+# EglantinePS5 - A stand-in for a RomM server, for the cases a real one does not show on demand.
 # Copyright (C) 2026 BlackBearReloaded
 # SPDX-License-Identifier: GPL-3.0-or-later
 """romm-mock-server.py <port file>

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ProsperoEden - Turns raw generated sound effects into the launcher's cues.
+# EglantinePS5 - Turns raw generated sound effects into the launcher's cues.
 # Copyright (C) 2026 BlackBearReloaded
 # SPDX-License-Identifier: GPL-3.0-or-later
 """process-sfx.py <raw dir> <out dir>

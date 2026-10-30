@@ -23,6 +23,7 @@ code=r'''
 #include "common/bounded_threadsafe_queue.h"
 using u64=unsigned long long;
 using CommandData=int;
+namespace VideoCommon { struct GpuSplit { static GpuSplit& Get() { static GpuSplit split; return split; } void Stop() {} }; }
 struct Item { int command{}; u64 fence{}; bool block{}; };
 struct ThreadManager {
  struct { std::mutex write_lock; u64 last_fence{}; std::atomic<u64> signaled_fence{};

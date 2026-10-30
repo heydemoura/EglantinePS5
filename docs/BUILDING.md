@@ -1,6 +1,6 @@
-# Building ProsperoEden
+# Building EglantinePS5
 
-ProsperoEden builds on Linux (Ubuntu 26.04; WSL works). One command builds the release:
+EglantinePS5 builds on Linux (Ubuntu 26.04; WSL works). One command builds the release:
 
 ```bash
 make
@@ -9,15 +9,15 @@ make
 The first run fetches every dependency at its pinned revision, builds the RADV driver and
 Eden for the PS5, and writes the release files to `dist/`:
 
-- `ProsperoEden-vX.Y.Z.zip`: the `PPSA99008` folder to copy to `/data/homebrew/PPSA99008`;
+- `EglantinePS5-vX.Y.Z.zip`: the `PPSA98515` folder to copy to `/data/homebrew/PPSA98515`;
 - `SHA256SUMS` (the ZIP's checksum) and `release-notes.md`.
 
 The app package includes an exact-title one-shot helper built from the pinned upstream
 [PS5-Lapy-JB-Daemon](https://github.com/blackbearreloaded/PS5-Lapy-JB-Daemon) source. Its generated
 manifest, ELF hash, protocol hash, title and required retry feature are checked before packaging.
-At runtime a resident Lapy service gets the first bounded opportunity; otherwise ProsperoEden
+At runtime a resident Lapy service gets the first bounded opportunity; otherwise EglantinePS5
 sends the packaged helper to the local ELF loader on TCP port 9021. Without that loader or a
-resident service, ProsperoEden has no access to its data and says so; it keeps no second copy of it in its sandbox.
+resident service, EglantinePS5 has no access to its data and says so; it keeps no second copy of it in its sandbox.
 
 The pinned commit includes the donor-release and firmware 13.60 corrections merged in
 [PS5-Lapy-JB-Daemon PR #48](https://github.com/mpereiraesaa/PS5-Lapy-JB-Daemon/pull/48) and
@@ -27,7 +27,7 @@ target-lifetime and fail-closed accounting changes from
 The previous `54a095c` pin passed five automated launch/elevate/close cycles on both firmware 6.02
 and 12.70 with root `/data` access and balanced donors. The pinned `57fcc19` helper completed the
 target-exit stress and a full one-shot elevation on firmware 12.70; it still requires an attended
-ProsperoEden qualification run on firmware 6.02.
+EglantinePS5 qualification run on firmware 6.02.
 
 The first build takes a while (RADV and Eden are large). Later builds reuse everything that
 already exists: the dependencies, this checkout's build cache in
@@ -38,11 +38,12 @@ already exists: the dependencies, this checkout's build cache in
 | Target | What it does |
 |---|---|
 | `make` / `make release` | Release files in `dist/` |
-| `make package` | Only the app folder, `build/release/PPSA99008` |
-| `make install PS5_HOST=<address>` | Copy `build/release/PPSA99008` to a console over FTP (close ProsperoEden first) |
-| `make dev DEV_TITLE=<title ID>` | Development build, `build/dev/PPSA99008` (or `EDEN_DEV_PACKAGE_DIR`): profiling counters, `dev-settings.txt` switches, boots the given title |
+| `make package` | Only the app folder, `build/release/PPSA98515` |
+| `make install PS5_HOST=<address>` | Build the app, then copy `build/release/PPSA98515` to a console over FTP (only what changed is sent; the app may be open) |
+| `make dev DEV_TITLE=<title ID>` | Development build, `build/dev/PPSA98515` (or `EDEN_DEV_PACKAGE_DIR`): profiling counters, `dev-settings.txt` switches, boots the given title |
 | `make test` | Host (Linux) build of the emulator and its test suites |
 | `make deps` | Fetch missing dependencies at their pinned revisions |
+| `make update` | Move the Eglantine submodule to the newest commit of its default branch, list what came in, and check that the port's text anchors still match (`tools/prepare-vulkan-port.py --report`) |
 | `make deps-status` | List the dependencies, where they live and whether they match their pins |
 | `make prepare` | Everything besides Eden itself: build cache, FFmpeg, packaging tool, driver stub, RADV |
 | `make toolchain` | Check the host tools |
@@ -74,16 +75,19 @@ Every input is pinned in `tools/deps.json` and fetched by `make deps` (`tools/de
 it is missing: archives are checked against their SHA-256/SHA-512 before use and git
 repositories are fetched at their pinned commit. Nothing that already exists is modified, so a
 checkout you work in stays at whatever revision it has (`make deps-status` shows it).
-Downloads are cached in `~/.cache/prosperoeden-deps` (`PROSPEROEDEN_DEPS_CACHE`).
+Downloads are cached in `~/.cache/eglantineps5-deps` (`EGLANTINEPS5_DEPS_CACHE`).
 
 Inside this repository, in `.deps/`:
 
-- **Eden** at commit `67bada77f8a43a90da2e94e89b8e7da73c256989` (GitHub mirror archive), with
-  Eden's own hash-pinned packages, which its configure step downloads. ProsperoEden does not
-  modify Eden's files: the PS5 frontend in `headless/` replaces and derives sources at
-  configure time (`headless/inject.cmake`).
+- **Eglantine** (the `Eglantine/` submodule, a Switch 2 capable fork of Eden), at the commit the
+  submodule records; `git clone --recurse-submodules`, or `git submodule update --init` after a plain
+  clone. The build copies it into its cache (`tools/sync-eden-source.sh`) and uses Eden's own
+  hash-pinned packages, which its configure step downloads. EglantinePS5 does not modify the
+  submodule's files: the PS5 frontend in `headless/` replaces and derives sources at configure time
+  (`headless/inject.cmake`). To move to a newer Eglantine: `make update`, then `make test`, then commit
+  the submodule (`git add Eglantine`).
 - **FFmpeg** at the commit Eden pins, built with only the decoders games use.
-- **PS5 OpenGL 4.6 SDK 1.0.0** (release archive), for the launcher and the OpenGL renderer.
+- **PS5 OpenGL 4.6 SDK 1.0.2** (release archive), for the launcher and the OpenGL renderer.
 - **OpenSSL, zlib, libcurl and libpsl** from pacbrew v0.40.2.
 - **LLVM 18.1.8 compiler-rt** emulated-TLS sources and **fmt 12.1.0** headers.
 - **PS5-Lapy-JB-Daemon** at its pinned compatibility-fork commit, its pinned **ps5log** build input,
@@ -108,9 +112,9 @@ The `libSceAgcDriver` import facade both drivers link against is built from
 
 ## Launcher
 
-The launcher (`headless/prosperoeden`) draws with OpenGL through the PS5 OpenGL SDK and plays its
+The launcher (`headless/eglantineps5`) draws with OpenGL through the PS5 OpenGL SDK and plays its
 sounds through the console's audio output; it needs no other library. Its font atlas, artwork
-and sounds are committed in `headless/prosperoeden/ui`, so a build does not regenerate them.
+and sounds are committed in `headless/eglantineps5/ui`, so a build does not regenerate them.
 The tools that made them are in `tools/launcher`:
 
 - `assets.sh` bakes the font (`third_party/fonts/Montserrat-Medium.ttf`) and renders the art from
@@ -121,7 +125,7 @@ The tools that made them are in `tools/launcher`:
 - `preview.sh` draws every launcher screen on a PC (Mesa's software renderer, sample games) to
   PNG files or a video, with the same code, shaders and font as on the console.
 - `strings.py` keeps the translations: `extract` writes the template (`launcher.pot`) from the
-  text in the code, `new <tag>` starts a catalog in `headless/prosperoeden/ui/lang`, and `check`
+  text in the code, `new <tag>` starts a catalog in `headless/eglantineps5/ui/lang`, and `check`
   fails on missing or stale text, changed placeholders and characters the font does not have.
 - `text-check.sh` compares the launcher's right-to-left text code with ICU on generated lines
   and on every translation (needs `libicu-dev`).
@@ -151,19 +155,19 @@ sudo apt install --no-install-recommends $(grep -v '^#' tools/ci/ubuntu-packages
 ## Crash reports
 
 When the app crashes it writes `crash-YYYYMMDD-HHMMSS.txt` to its logs folder
-(`/data/prosperoeden/logs`), starts again and says on the home screen where the report is
+(`/data/eglantineps5/logs`), starts again and says on the home screen where the report is
 (`headless/crash_report.h`). At the next start that run's logs are moved beside the report
 (`-stderr.log`, `-heap.log`, `-eden_log.txt`); the five newest reports are kept.
 
 The report lists addresses as `eboot+0x...`. To get function names, files and lines:
 
 ```bash
-python3 tools/symbolize-crash.py crash-20261001-121314.txt build/symbols/ProsperoEden-v1.000.040.elf
+python3 tools/symbolize-crash.py crash-20261001-121314.txt build/symbols/EglantinePS5-v1.000.040.elf
 ```
 
 The second argument is the unstripped executable of the build that wrote the report:
 `build/headless-native/llvm-pie.elf` right after a build. `make release` copies it to
-`build/symbols/ProsperoEden-vX.Y.Z.elf`; keep that file with the release, it is not published.
+`build/symbols/EglantinePS5-vX.Y.Z.elf`; keep that file with the release, it is not published.
 
 `make test` checks the report on the host (`tools/check-crash-report.py`). A development build
 crashes on request, to try it on a console: write `segv`, `thread`, `abort` or `throw` to
@@ -181,7 +185,7 @@ runner image carries (.NET, Android, GHC, parts of the tool cache) for
 disk space, and builds with as many jobs as the runner has cores (`JOBS`, and `RADV_BUILD_JOBS`
 for RADV, whose build otherwise runs 24).
 
-Between runs it caches the downloads (`PROSPEROEDEN_DEPS_CACHE`, keyed on `tools/deps.json`),
+Between runs it caches the downloads (`EGLANTINEPS5_DEPS_CACHE`, keyed on `tools/deps.json`),
 ccache, and the built RADV driver with the SDK it is linked with (keyed on its pins and build
 scripts), so a later run compiles mostly what changed and takes about ten minutes. A run without
 these caches builds everything on four cores and takes about an hour. Should a build ever reach
@@ -201,8 +205,8 @@ dependencies are reused instead of fetched) for a build on your own machine.
   Run workflow): builds the release files, checks the ZIP (intact, `eboot.bin` present, every
   entry stored as 0777) and keeps `dist/` (the ZIP, `SHA256SUMS` and `release-notes.md`) as a
   7-day artifact. Nothing is published. A push to
-  `main` builds nothing: a build of `main` is a manual run. The artifact is `ProsperoEden`; for
-  a pull request it is `ProsperoEden-PR<number>-<commit>`, with the first seven characters of
+  `main` builds nothing: a build of `main` is a manual run. The artifact is `EglantinePS5`; for
+  a pull request it is `EglantinePS5-PR<number>-<commit>`, with the first seven characters of
   the pull request's own head commit. A newer push to a pull request, or a newer manual run on
   the same branch, cancels the run in progress.
 - **Tag `vX.Y.Z`** (by itself, when the tag is pushed): builds and checks them the same way, checks that the tag matches the package
@@ -211,7 +215,7 @@ dependencies are reused instead of fetched) for a build on your own machine.
   for a tag, 7 days otherwise.
 - A tag's or a manual run's ZIP is attested (signed build provenance): a release ZIP built by
   the workflow can be checked with
-  `gh attestation verify ProsperoEden-vX.Y.Z.zip -R blackbearreloaded/ProsperoEden` (GitHub
+  `gh attestation verify EglantinePS5-vX.Y.Z.zip -R blackbearreloaded/ProsperoEden` (GitHub
   CLI). This covers releases built by GitHub Actions from now on (after v1.000.090), not
   earlier ones.
 
@@ -230,5 +234,5 @@ To cut a release:
 2. Add the "Changes in" section to the README.
 3. Test the build on a console.
 4. Push a `vX.Y.Z` tag.
-5. Keep `build/symbols/ProsperoEden-vX.Y.Z.elf` from the build that was published (crash reports
-   are read with it): download the tag run's `ProsperoEden-symbols` artifact before it expires.
+5. Keep `build/symbols/EglantinePS5-vX.Y.Z.elf` from the build that was published (crash reports
+   are read with it): download the tag run's `EglantinePS5-symbols` artifact before it expires.

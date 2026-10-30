@@ -152,7 +152,7 @@ bool find_copies(const Environment &environment, const std::string &title, std::
     return true;
 }
 
-// ProsperoEden: ShadowMountPlus records where it mounted an app from in
+// EglantinePS5: ShadowMountPlus records where it mounted an app from in
 // <registered>/app/<TITLEID>/mount.lnk (a folder) or mount_img.lnk (an image). 1: path is
 // that folder; 0: no record; -1: the app is an image (its files can't be replaced one by one).
 int mounted_source(const Environment &environment, const std::string &title, std::string &path)
@@ -462,7 +462,7 @@ bool swap_entries(const std::string &target, const std::string &staged, const st
         !list_entries(staged, kChildren, new_names) || new_names.empty() ||
         mkdir(backup.c_str(), 0755) != 0)
         return false;
-    // ProsperoEden: only the entries the release replaces are moved aside (and deleted with the
+    // EglantinePS5: only the entries the release replaces are moved aside (and deleted with the
     // work folder). Whatever else the folder holds is the player's (language.txt, the earlier
     // versions' assets/ with keys, firmware and games) and stays where it is.
     std::vector<std::string> old_names;

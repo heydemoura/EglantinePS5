@@ -1,16 +1,6 @@
 {
-  "about": "Pinned inputs of the ProsperoEden build. `make deps` (tools/deps.py) fetches every missing item and leaves existing checkouts and files untouched. Paths are relative to this repository; ../ means next to it, the layout the build expects.",
+  "about": "Pinned inputs of the EglantinePS5 build. `make deps` (tools/deps.py) fetches every missing item and leaves existing checkouts and files untouched. Paths are relative to this repository; ../ means next to it, the layout the build expects.",
   "items": [
-    {
-      "name": "eden",
-      "about": "Eden emulator source at the pinned commit (GitHub mirror archive)",
-      "kind": "archive",
-      "url": "https://github.com/eden-emulator/mirror/archive/67bada77f8a43a90da2e94e89b8e7da73c256989.tar.gz",
-      "sha256": "d42b6fb492c65eb5e98ab72a786dff01fd64384d073a739b9c9ff475414366ee",
-      "save": ".deps/eden-67bada77.tar.gz",
-      "extract": ".deps",
-      "creates": ".deps/mirror-67bada77f8a43a90da2e94e89b8e7da73c256989/CMakeLists.txt"
-    },
     {
       "name": "ffmpeg",
       "about": "FFmpeg source as pinned by Eden's cpmfile.json, built for the PS5 decoders",
@@ -57,12 +47,12 @@
     },
     {
       "name": "opengl-sdk",
-      "about": "PS5 OpenGL 4.6 SDK 1.0.0 (launcher UI and the OpenGL renderer)",
+      "about": "PS5 OpenGL 4.6 SDK 1.0.2 (launcher UI and the OpenGL renderer)",
       "kind": "archive",
-      "url": "https://github.com/blackbearreloaded/ps5-opengl/releases/download/v1.0.0/ps5-opengl-sdk-1.0.0.tar.gz",
-      "sha256": "f93643c04c843d56143b00951df1f8042ea7706ae9f19e4e9abf158e1ead77c5",
+      "url": "https://github.com/darkxex/ps5-opengl/releases/download/v1.0.2/ps5-opengl-sdk-1.0.2.tar.gz",
+      "sha256": "30d8e51dd062739b629346102be5932728ba714bc50b1bdcdf08306c8843d9a4",
       "extract": ".deps",
-      "creates": ".deps/ps5-opengl-sdk-1.0.0/sdk/lib/libps5_opengl_core33.a"
+      "creates": ".deps/ps5-opengl-sdk-1.0.2/sdk/lib/libps5_opengl_core33.a"
     },
     {
       "name": "harfbuzz",
@@ -89,7 +79,7 @@
       "name": "lapy-owned-helper",
       "about": "Lapy one-shot elfldr owned-root helper with guarded target lifetime and balanced vnode ownership",
       "kind": "git",
-      "url": "https://github.com/blackbearreloaded/PS5-Lapy-JB-Daemon.git",
+      "url": "https://github.com/darkxex/PS5-Lapy-JB-Daemon.git",
       "commit": "57fcc19b7f57e46c823d6f2a6c6233ebf3288079",
       "path": ".deps/PS5-Lapy-JB-Daemon-57fcc19"
     },

@@ -68,6 +68,7 @@ code=r'''
 #include <mutex>
 #include <thread>
 using u32=unsigned;
+void DrainBack(){} // the GPU thread split's wait for its back thread (engines/puller.cpp)
 struct System{std::atomic_bool stop{};bool IsShuttingDown(){return stop;}};
 struct DMA {System system;std::mutex sync_mutex;std::condition_variable sync_cv;bool synced{};
 bool Wait(){

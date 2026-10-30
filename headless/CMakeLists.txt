@@ -750,24 +750,28 @@ endif()
 # Guest core idle: count each wait and how long it lasted, and spin on the
 # interrupt flag for a bounded time before sleeping on the condition variable, because waking a
 # sleeping host thread puts the host scheduler's latency on the guest's critical path.
-set(idle_old "void PhysicalCore::Idle() {\n    std::unique_lock lk{m_guard};\n    m_on_interrupt.wait(lk, [this] { return m_is_interrupted; });\n}")
-string(FIND "${physical_core_source}" "${idle_old}" idle_at)
-if(idle_at LESS 0)
+string(FIND "${physical_core_source}" "void PhysicalCore::Idle() {" idle_begin)
+string(FIND "${physical_core_source}" "bool PhysicalCore::IsInterrupted() const {" idle_end)
+if(idle_begin LESS 0 OR idle_end LESS idle_begin)
     message(FATAL_ERROR "Pinned PhysicalCore::Idle changed")
 endif()
+math(EXPR idle_length "${idle_end} - ${idle_begin}")
+string(SUBSTRING "${physical_core_source}" ${idle_begin} ${idle_length} idle_old)
 string(REPLACE "${idle_old}" [=[void PhysicalCore::Idle() {
     const long long start = ::Eden::Performance::NowNs();
     const unsigned spins = ::Eden::Performance::idle_spin_iterations.load(std::memory_order_relaxed);
-    for (unsigned i = 0; i < spins && !__atomic_load_n(&m_is_interrupted, __ATOMIC_ACQUIRE); ++i)
+    for (unsigned i = 0; i < spins && !m_is_interrupted.load(std::memory_order_acquire); ++i)
         __builtin_ia32_pause();
     bool slept;
     {
         std::unique_lock lk{m_guard};
         slept = !m_is_interrupted;
-        m_on_interrupt.wait(lk, [this] { return m_is_interrupted; });
+        m_on_interrupt.wait(lk, [this] { return m_is_interrupted.load(); });
     }
     ::Eden::Performance::CountIdle(m_core_index, ::Eden::Performance::NowNs() - start, slept);
-}]=] physical_core_source "${physical_core_source}")
+}
+
+]=] physical_core_source "${physical_core_source}")
 string(REPLACE "${prefetch_old}"
     "            } else {\n                interface->LogBacktrace(process);\n                if (prefetch_abort)\n                    ::Eden::RecordGuestFault(\"guest thread \" + Core::GetThreadName(thread).value_or(\"?\") +\n                                             \" jumped to an unmapped address\");\n            }\n            thread->RequestSuspend(kernel, SuspendType::Debug);"
     physical_core_source "${physical_core_source}")
@@ -926,19 +930,6 @@ write_derived("${PORT_BUILD_DIR}/deconstructed_rom_directory.cpp"
     "#include \"${EDEN_PORT_DIR}/load_address.h\"\n${aslr_source}")
 list(REMOVE_ITEM core_sources "loader/deconstructed_rom_directory.cpp")
 list(APPEND core_sources "${PORT_BUILD_DIR}/deconstructed_rom_directory.cpp")
-# GetPseudoDeviceId read the seed through the control data without checking that there is
-# any (a game without control data, such as a homebrew NRO): seed 0 then, as for other
-# NACP fields Eden defaults when the metadata is missing.
-file(READ "${PROJECT_SOURCE_DIR}/src/core/hle/service/am/service/application_functions.cpp" app_functions_source)
-set(app_functions_old "    auto const seed = res.first->raw.seed_for_pseudo_device_id;")
-string(FIND "${app_functions_source}" "${app_functions_old}" app_functions_at)
-if(app_functions_at LESS 0)
-    message(FATAL_ERROR "Pinned GetPseudoDeviceId changed")
-endif()
-string(REPLACE "${app_functions_old}" "    auto const seed = res.first != nullptr ? res.first->raw.seed_for_pseudo_device_id : u64_le{0};" app_functions_source "${app_functions_source}")
-write_derived("${PORT_BUILD_DIR}/application_functions.cpp" "${app_functions_source}")
-list(REMOVE_ITEM core_sources "hle/service/am/service/application_functions.cpp")
-list(APPEND core_sources "${PORT_BUILD_DIR}/application_functions.cpp")
 set_property(TARGET core PROPERTY SOURCES "${core_sources}")
 # Core's NS query service owns this implementation from frontend_common.
 target_sources(core PRIVATE "${PROJECT_SOURCE_DIR}/src/frontend_common/play_time_manager.cpp")
@@ -1014,7 +1005,7 @@ if(PS5_NATIVE)
 #error Review PS5 NSO layout-only loading before enabling NCE
 #endif
     if (!load_into_process) return load_base + final_size;
-    std::fprintf(stderr, "[ProsperoEden] NSO %s image_bytes=%llu bss_bytes=%u\n",
+    std::fprintf(stderr, "[EglantinePS5] NSO %s image_bytes=%llu bss_bytes=%u\n",
                  nso_file.GetName().c_str(), static_cast<unsigned long long>(final_size),
                  static_cast<unsigned>(last_segment_it->bss_size));
     Kernel::CodeSet codeset;
@@ -1105,7 +1096,7 @@ if(PS5_NATIVE)
             char build[17]{};
             for (int i = 0; i < 8; ++i)
                 std::snprintf(build + i * 2, 3, "%02X", static_cast<unsigned>(nso_header.build_id[i]));
-            std::fprintf(stderr, "[ProsperoEden] cheats: %zu entries for main (build ID %s) at %#llx (%llu bytes)\n",
+            std::fprintf(stderr, "[EglantinePS5] cheats: %zu entries for main (build ID %s) at %#llx (%llu bytes)\n",
                          cheats.size(), build, static_cast<unsigned long long>(load_base),
                          static_cast<unsigned long long>(image_size));
         }
@@ -1807,7 +1798,7 @@ if(npad_update_at LESS 0)
     message(FATAL_ERROR "Pinned NPad controller update changed")
 endif()
 string(REPLACE "${npad_update}"
-    "        auto& controller = controller_data[aruid_index][controller_idx];\n        if (controller.device == nullptr) {\n            continue;  // ProsperoEden: this applet resource is not activated yet\n        }\n        const auto is_connected = controller.device->IsConnected();"
+    "        auto& controller = controller_data[aruid_index][controller_idx];\n        if (controller.device == nullptr) {\n            continue;  // EglantinePS5: this applet resource is not activated yet\n        }\n        const auto is_connected = controller.device->IsConnected();"
     npad_source "${npad_source}")
 write_derived("${PORT_BUILD_DIR}/npad.cpp" "${npad_source}")
 get_target_property(npad_sources hid_core SOURCES)
@@ -1980,14 +1971,14 @@ if(EDEN_PS5_OPENGL)
         string(REPLACE "thread.get_stop_token()" "stop_source.get_token()" gpu_worker "${gpu_worker}")
         string(REPLACE "ThreadManager::~ThreadManager() = default;" "ThreadManager::~ThreadManager() { Stop(); }" gpu_worker "${gpu_worker}")
         # Eden's own shutdown of its std::jthread worker: the worker here is a pthread, ended by Stop.
-        set(worker_shutdown "void ThreadManager::NotifyShutdown() {\n    if (thread.joinable()) {\n        thread.request_stop();\n        thread.join();\n    }\n}")
+        set(worker_shutdown "void ThreadManager::NotifyShutdown() {\n    if (thread.joinable()) {\n        thread.request_stop();\n        thread.join();\n    }\n    VideoCommon::GpuSplit::Get().Stop();\n}")
         string(FIND "${gpu_worker}" "${worker_shutdown}" worker_shutdown_at)
         if(worker_shutdown_at LESS 0)
             message(FATAL_ERROR "Pinned GPU worker shutdown changed")
         endif()
-        string(REPLACE "${worker_shutdown}" "void ThreadManager::NotifyShutdown() { Stop(); }" gpu_worker "${gpu_worker}")
+        string(REPLACE "${worker_shutdown}" "void ThreadManager::NotifyShutdown() {\n    Stop();\n    VideoCommon::GpuSplit::Get().Stop();\n}" gpu_worker "${gpu_worker}")
         string(REPLACE "        CommandDataContainer next;" "        unsigned dispatches = 0;\n        CommandDataContainer next;" gpu_worker "${gpu_worker}")
-        set(dispatch_call "                scheduler.Push(system.GPU(), submit_list->channel, std::move(submit_list->entries));")
+        set(dispatch_call "                Profile::Scope scope{Profile::Zone::Push};\n                scheduler.Push(system.GPU(), submit_list->channel, std::move(submit_list->entries));")
         string(REPLACE "${dispatch_call}"
             "                const auto count = ++dispatches;\n                if (count <= 3) LOG_INFO(Render_OpenGL, \"EDEN_GPU_DISPATCH_BEGIN count={}\", count);\n${dispatch_call}\n                if (count <= 3) LOG_INFO(Render_OpenGL, \"EDEN_GPU_DISPATCH_END count={}\", count);" gpu_worker "${gpu_worker}")
         # A full queue must not retain a producer after its consumer stops.
@@ -2001,18 +1992,18 @@ if(EDEN_PS5_OPENGL)
             native_gpu_lifecycle "${native_gpu_lifecycle}")
         string(APPEND gpu_worker "\n${native_gpu_lifecycle}")
         # Animate only until guest presentation, on the renderer-owning worker.
-        set(hud_wait "            state.queue.PopWait(next, stop_token);")
+        set(hud_wait "                Profile::Scope scope{Profile::Zone::Idle};\n                state.queue.PopWait(next, stop_token);")
         string(FIND "${gpu_worker}" "${hud_wait}" hud_wait_offset)
         if(hud_wait_offset LESS 0)
             message(FATAL_ERROR "Pinned GPU queue wait changed")
         endif()
         string(PREPEND gpu_worker "namespace VideoCore { class RendererBase; }\nnamespace Eden { bool LoadingTick(VideoCore::RendererBase&, bool idle); }\n")
         string(REPLACE "${hud_wait}"
-            "            if (Eden::LoadingTick(renderer, false)) {\n                if (!state.queue.TryPop(next)) {\n                    Eden::LoadingTick(renderer, true);\n                    std::this_thread::sleep_for(std::chrono::milliseconds(1));\n                    continue;\n                }\n            } else {\n${hud_wait}\n            }" gpu_worker "${gpu_worker}")
+            "                if (Eden::LoadingTick(renderer, false)) {\n                    if (!state.queue.TryPop(next)) {\n                        Eden::LoadingTick(renderer, true);\n                        std::this_thread::sleep_for(std::chrono::milliseconds(1));\n                        continue;\n                    }\n                } else {\n${hud_wait}\n                }" gpu_worker "${gpu_worker}")
         if(EDEN_DEV_PROFILE)
             string(PREPEND gpu_worker "#include \"${EDEN_PORT_DIR}/performance.h\"\n")
             string(REPLACE "${hud_wait}"
-                "            { ::Eden::Performance::Timer idle_timer(::Eden::Performance::gpu_queue_wait);\n${hud_wait}\n            }"
+                "                { ::Eden::Performance::Timer idle_timer(::Eden::Performance::gpu_queue_wait);\n${hud_wait}\n                }"
                 gpu_worker "${gpu_worker}")
             string(REPLACE "${dispatch_call}"
                 "                { ::Eden::Performance::Timer dispatch_timer(::Eden::Performance::gpu_dispatch);\n${dispatch_call}\n                }"
@@ -2131,7 +2122,7 @@ if(PS5_NATIVE)
         "#elif defined(PS5_NATIVE)\n        eden_path = Eden::UserDir();\n        eden_path_cache = eden_path / CACHE_DIR;\n        eden_path_config = eden_path / CONFIG_DIR;\n#else\n        eden_path = GetCurrentDir() / PORTABLE_DIR;" paths_source "${paths_source}")
     string(REPLACE "#else\n        // In Ryujinx's infinite wisdom"
         "#elif defined(PS5_NATIVE)\n        GenerateLegacyPath(EmuPath::RyujinxDir, eden_path / RYUJINX_DIR);\n#else\n        // In Ryujinx's infinite wisdom" paths_source "${paths_source}")
-    # Eden's user folder follows the storage layout (storage_paths.h: /data/prosperoeden/user with
+    # Eden's user folder follows the storage layout (storage_paths.h: /data/eglantineps5/user with
     # filesystem access, the sandbox's download0 without).
     set(paths_source "#include \"${EDEN_PORT_DIR}/storage_paths.h\"
 ${paths_source}")
@@ -2152,6 +2143,9 @@ ${paths_source}")
         message(FATAL_ERROR "Pinned TSC frequency detection changed")
     endif()
     string(REPLACE "${old_tsc_fallback}" "        }" features_source "${features_source}")
+    # Eglantine measures the TSC of CPUs without leaf 0x15 itself, for frequency 0 only; the block
+    # below covers every frequency under 1 GHz, so that one goes (tools/check-tsc-fallback.py).
+    string(REPLACE "    // AMD CPUs have no leaf 0x15 (Zen 4 stops at 0x10): measure their invariant TSC too, or every\n    // guest clock read (CNTPCT, which games read thousands of times a frame) goes through the\n    // host's much slower QueryPerformanceCounter.\n    if (caps.invariant_tsc && caps.tsc_frequency == 0) {\n        caps.tsc_frequency = X64::EstimateRDTSCFrequency();\n    }\n\n" "" features_source "${features_source}")
     string(REPLACE "    if (max_std_fn >= 0x16) {"
         "    if (caps.invariant_tsc && caps.tsc_frequency < 1'000'000'000ULL) {\n        caps.tsc_frequency = X64::EstimateRDTSCFrequency();\n    }\n\n    if (max_std_fn >= 0x16) {" features_source "${features_source}")
     write_derived("${PORT_BUILD_DIR}/cpu_features.cpp" "${features_source}")
@@ -2480,14 +2474,14 @@ if(EDEN_PS5_OPENGL)
         message(FATAL_ERROR "PS5 graphics requires the native OpenGL build")
     endif()
     # The pinned PS5 OpenGL 4.6 SDK release (tools/deps.json, make deps).
-    set(gl46 "${PORT_ROOT}/.deps/ps5-opengl-sdk-1.0.0/sdk")
-    set(gl46_expected "d0c5accb58e07f1359fecfd9e4313df08acb86af71fb80052da3e9f06203fdc8")
+    set(gl46 "${PORT_ROOT}/.deps/ps5-opengl-sdk-1.0.2/sdk")
+    set(gl46_expected "7fd5d7a1beb7bf5af42e6a6936b88b1266cba3f224d3a60c3a6a09285e339ae1")
     if(NOT EXISTS "${gl46}/lib/libps5_opengl_core33.a")
         message(FATAL_ERROR "Missing the PS5 OpenGL SDK in ${gl46}; run make deps")
     endif()
     file(SHA256 "${gl46}/lib/libps5_opengl_core33.a" gl46_hash)
     if(EDEN_DEV_PROFILE)
-        target_compile_definitions(eden-headless PRIVATE EDEN_DEV_GL_VERSION="${gl46_hash}-sdk-1.0.0")
+        target_compile_definitions(eden-headless PRIVATE EDEN_DEV_GL_VERSION="${gl46_hash}-sdk-1.0.2")
     endif()
     if(NOT gl46_hash STREQUAL gl46_expected)
         message(FATAL_ERROR "Frozen OpenGL 4.6 runtime changed")
@@ -2506,10 +2500,10 @@ if(EDEN_PS5_OPENGL)
     target_compile_definitions(eden-headless PRIVATE EDEN_PS5_OPENGL=1)
     target_link_libraries(eden-headless PRIVATE PS5OpenGL::OpenGL glad)
 endif()
-    # Launcher UI: its own small OpenGL renderer, mixer and screens (headless/prosperoeden/pe),
+    # Launcher UI: its own small OpenGL renderer, mixer and screens (headless/eglantineps5/pe),
     # all gone before a game starts.
     if(PS5_NATIVE)
-        set(launcher_dir "${EDEN_PORT_DIR}/prosperoeden")
+        set(launcher_dir "${EDEN_PORT_DIR}/eglantineps5")
         target_sources(eden-headless PRIVATE
             "${launcher_dir}/runtime_shims.cpp"
             "${launcher_dir}/radio_input.c")
@@ -2563,14 +2557,14 @@ endif()
                 "${EDEN_PORT_DIR}/remote/romm/romm_saves.cpp"
                 "${EDEN_PORT_DIR}/remote/romm/romm_source.cpp")
             # The save data's zips (remote/save_archive.h): miniz, as the self-update helper has it.
-            add_library(prosperoeden-miniz STATIC
+            add_library(eglantineps5-miniz STATIC
                 "${PORT_ROOT}/third_party/miniz/miniz.c"
                 "${PORT_ROOT}/third_party/miniz/miniz_tdef.c"
                 "${PORT_ROOT}/third_party/miniz/miniz_tinfl.c"
                 "${PORT_ROOT}/third_party/miniz/miniz_zip.c")
-            target_include_directories(prosperoeden-miniz PUBLIC "${PORT_ROOT}/third_party/miniz")
-            target_compile_options(prosperoeden-miniz PRIVATE -w)
-            target_link_libraries(eden-headless PRIVATE prosperoeden-miniz)
+            target_include_directories(eglantineps5-miniz PUBLIC "${PORT_ROOT}/third_party/miniz")
+            target_compile_options(eglantineps5-miniz PRIVATE -w)
+            target_link_libraries(eden-headless PRIVATE eglantineps5-miniz)
             # Their MD5 is OpenSSL's (linked below for the update check), as is the SHA-256 a
             # download's contents are checked with (remote/stream_check.h). Its include folder, for
             # these files only: the prefix it is in has older FFmpeg headers as well.

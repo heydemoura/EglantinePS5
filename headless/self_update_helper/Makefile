@@ -1,5 +1,5 @@
 # ps5-native-app-boilerplate - The self-update helper, built as a payload for the console's loader.
-# ProsperoEden: copied from the boilerplate's examples/self-update-helper; only the source folders
+# EglantinePS5: copied from the boilerplate's examples/self-update-helper; only the source folders
 # below differ (the engine is in headless/update_check, miniz in third_party/miniz).
 # Copyright (C) 2026 BlackBearReloaded
 # SPDX-License-Identifier: GPL-3.0-or-later

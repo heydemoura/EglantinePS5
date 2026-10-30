@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// ProsperoEden - A download's bytes to the console's FTP server; see ftp.h.
+// EglantinePS5 - A download's bytes to the console's FTP server; see ftp.h.
 // Copyright (C) 2026 BlackBearReloaded
 
 #include "ftp.h"

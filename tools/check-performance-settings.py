@@ -48,7 +48,7 @@ assert 'bool block_list = false;' in store and 'bool block_list = true;' not in 
 assert 'if (std::filesystem::exists(Eden::AppFile("block-list.txt"))) Eden::JitList::enabled = true;' in release
 
 # Settings > Performance in the launcher: its seven switches are the general values.
-services = (root / 'headless/prosperoeden/eden_services.cpp').read_text()
+services = (root / 'headless/eglantineps5/eden_services.cpp').read_text()
 load = services.split('pe::ui::Preferences EdenServices::preferences() {', 1)[1].split('\n}\n', 1)[0]
 save = services.split('bool EdenServices::set_preferences(', 1)[1].split('\n}\n', 1)[0]
 assert 'const Eden::PerformanceSettings speed = Eden::LoadPerformance(0);' in load

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ProsperoEden - Draw the launcher's screens on a PC (Mesa surfaceless EGL) to PNG files.
+# EglantinePS5 - Draw the launcher's screens on a PC (Mesa surfaceless EGL) to PNG files.
 # Copyright (C) 2026 BlackBearReloaded
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
@@ -14,8 +14,8 @@
 
 set -euo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
-source_dir="$root/headless/prosperoeden"
-build=${PROSPEROEDEN_LAUNCHER_BUILD:-"$HOME/.cache/prosperoeden-launcher"}
+source_dir="$root/headless/eglantineps5"
+build=${EGLANTINEPS5_LAUNCHER_BUILD:-"$HOME/.cache/eglantineps5-launcher"}
 cxx=${HOST_CXX:-c++}
 mkdir -p "$build/obj"
 python3 -B "$root/tools/deps.py" fetch harfbuzz

@@ -1,4 +1,4 @@
-# ProsperoEden: register-allocator bookkeeping in the x64 JIT emitters (compile time only).
+# EglantinePS5: register-allocator bookkeeping in the x64 JIT emitters (compile time only).
 # Upstream releases all 102 host locations after every IR instruction (EndOfAllocScope) and scans
 # all of them for every value lookup (ValueLocation): together about a quarter of block compile
 # time on the console. The allocator now records the locations changed since the last scope end
@@ -41,7 +41,7 @@ macro(eden_reg_alloc_sources)
 #include <utility>
 ]==] eden_ra_header "${eden_ra_header}")
     string(REPLACE "${eden_ra_scope}" [==[    inline void EndOfAllocScope() noexcept {
-        // ProsperoEden: only the locations changed since the last scope end (reg_alloc.cmake).
+        // EglantinePS5: only the locations changed since the last scope end (reg_alloc.cmake).
 #ifdef EDEN_REGALLOC_VERIFY
         EdenVerifyReleased();
 #endif
@@ -62,7 +62,7 @@ macro(eden_reg_alloc_sources)
     }
 ]==] eden_ra_header "${eden_ra_header}")
     string(REPLACE "${eden_ra_members}" [==[    size_t reserved_stack_space = 0;
-    // ProsperoEden: locations changed since the last EndOfAllocScope, and locations that held
+    // EglantinePS5: locations changed since the last EndOfAllocScope, and locations that held
     // values at that point; no other location can hold a value (reg_alloc.cmake).
     static constexpr size_t eden_location_words = (NonSpillHostLocCount + SpillCount + 63) / 64;
     std::array<u64, eden_location_words> eden_touched{};
@@ -98,7 +98,7 @@ macro(eden_reg_alloc_sources)
 ]==])
     eden_reg_alloc_require("${eden_ra_source}" "${eden_ra_lookup}" "reg_alloc.cpp ValueLocation")
     string(REPLACE "${eden_ra_lookup}" [==[std::optional<HostLoc> RegAlloc::ValueLocation(const IR::Inst* value) const noexcept {
-    // ProsperoEden: only locations that held values at the last scope end or changed since (no
+    // EglantinePS5: only locations that held values at the last scope end or changed since (no
     // other one can hold a value), in upstream's ascending order (reg_alloc.cmake).
     std::optional<HostLoc> found;
     for (size_t word = 0; word < eden_live.size() && !found; ++word) {

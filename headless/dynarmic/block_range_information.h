@@ -6,7 +6,7 @@
  * SPDX-License-Identifier: 0BSD
  */
 
-// ProsperoEden: the guest code ranges of compiled blocks, bucketed by 4 KiB guest page. Upstream
+// EglantinePS5: the guest code ranges of compiled blocks, bucketed by 4 KiB guest page. Upstream
 // keeps an interval map of hash sets, whose insertion splits intervals and copies their sets
 // wherever a new block overlaps compiled ones (most do), on every block compilation.
 

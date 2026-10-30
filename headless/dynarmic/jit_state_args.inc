@@ -1,5 +1,5 @@
 
-// ProsperoEden: callback arguments that differ between JITs sharing generated code (each A64
+// EglantinePS5: callback arguments that differ between JITs sharing generated code (each A64
 // core's callbacks object and JIT) are loaded from the JIT state register at the registered
 // offset instead of being embedded (jit_group.h). Other arguments stay immediates.
 namespace {

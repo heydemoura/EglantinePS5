@@ -15,7 +15,7 @@ int main() {
     char folder[] = "/tmp/eden-profiles-XXXXXX";
     assert(mkdtemp(folder));
     const std::string file = std::string(folder) + "/nand/avators/profiles.dat";
-    const std::string settings = std::string(folder) + "/prosperoeden.json";
+    const std::string settings = std::string(folder) + "/eglantineps5.json";
 
     // A console that has run games already: the file Eden wrote, with one user called "Eden", its
     // icon data, and a hole before a second entry (Eden skips empty entries).

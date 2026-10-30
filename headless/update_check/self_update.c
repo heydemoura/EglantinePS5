@@ -182,7 +182,7 @@ static int same_digest(const char *left, const char *right)
     return difference == 0;
 }
 
-/* ProsperoEden: whether a top-level member is the literal true (the catalog's own JSON, whose
+/* EglantinePS5: whether a top-level member is the literal true (the catalog's own JSON, whose
    bytes the signed manifest vouches for). */
 static int member_true(const char *json, size_t length, const char *key)
 {
@@ -306,7 +306,7 @@ static self_update_check_result check_at(const self_update_platform *platform, c
         return SELF_UPDATE_NOT_INSTALLABLE;
     if (!member_number(body, body_length, "size", &offer->size))
         offer->size = 0; /* null: the catalog doesn't know it */
-    /* ProsperoEden: the release notes, covered by the same signature (null or missing: none). */
+    /* EglantinePS5: the release notes, covered by the same signature (null or missing: none). */
     if (update_check_json_string(body, body_length, "release_notes", offer->notes, sizeof(offer->notes)) != 1)
         offer->notes[0] = '\0';
     offer->notes_truncated = member_true(body, body_length, "release_notes_truncated");

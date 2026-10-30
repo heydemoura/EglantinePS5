@@ -1,4 +1,4 @@
-# ProsperoEden: one compiled-code namespace per guest process for the A64 JITs
+# EglantinePS5: one compiled-code namespace per guest process for the A64 JITs
 # (headless/dynarmic/jit_group.h). Each macro edits a source already read into the caller's
 # variable, just before the caller writes the derived file.
 
@@ -22,7 +22,7 @@ macro(eden_shared_jit_emitter_header)
         "#include \"dynarmic/backend/x64/emit_x64.h\"\n#include \"dynarmic/backend/x64/jit_group.h\""
         emitter_header "${emitter_header}")
     string(REPLACE "    A64::Jit* jit_interface = nullptr;"
-        "    A64::Jit* jit_interface = nullptr;\n    // ProsperoEden: the process's shared blocks (the JIT sets it), and the guest range and\n    // unlinked branch sites of the last Emit, registered by the JIT.\n    JitGroup* eden_group = nullptr;\n    u64 eden_range_first = 0;\n    u64 eden_range_last = 0;\n    std::vector<JitGroup::PendingSite> eden_pending_sites;"
+        "    A64::Jit* jit_interface = nullptr;\n    // EglantinePS5: the process's shared blocks (the JIT sets it), and the guest range and\n    // unlinked branch sites of the last Emit, registered by the JIT.\n    JitGroup* eden_group = nullptr;\n    u64 eden_range_first = 0;\n    u64 eden_range_last = 0;\n    std::vector<JitGroup::PendingSite> eden_pending_sites;"
         emitter_header "${emitter_header}")
 endmacro()
 
@@ -42,7 +42,7 @@ macro(eden_shared_jit_emitter)
         eden_shared_jit_require("${emitter}" "${${anchor}}" "A64 emitter (${anchor})")
     endforeach()
     string(REPLACE "${eden_register}"
-        "    // ProsperoEden: the JIT publishes the block in its JitGroup (a64_interface.cpp).\n    eden_range_first = descriptor.PC();\n    eden_range_last = end_location.PC() - 1;\n    const BlockDescriptor bdesc{entrypoint, size};"
+        "    // EglantinePS5: the JIT publishes the block in its JitGroup (a64_interface.cpp).\n    eden_range_first = descriptor.PC();\n    eden_range_last = end_location.PC() - 1;\n    const BlockDescriptor bdesc{entrypoint, size};"
         emitter "${emitter}")
     string(REPLACE "${eden_dispatch}"
         "        code.mov(r8, qword[code.ABI_JIT_PTR + offsetof(A64JitState, eden_fast_dispatch)]);"
@@ -133,7 +133,7 @@ macro(eden_shared_jit_sources)
     set(eden_jitstate_anchor "    std::array<u64, RSB_SIZE> rsb_codeptrs;\n")
     eden_shared_jit_require("${eden_jitstate}" "${eden_jitstate_anchor}" "A64 JIT state")
     string(REPLACE "${eden_jitstate_anchor}" "${eden_jitstate_anchor}
-    // ProsperoEden: what generated code reads instead of embedding it, so that any core can run
+    // EglantinePS5: what generated code reads instead of embedding it, so that any core can run
     // code another core compiled (jit_group.h): this core's callbacks and JIT object, TPIDR
     // registers, exclusive monitor slots, configuration and fast dispatch table.
     void* eden_callbacks = nullptr;

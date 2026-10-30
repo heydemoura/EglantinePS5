@@ -8,7 +8,7 @@
 // 0x8C-byte "IMEN" entry per save, whose key holds the program ID (entry offset 0x0C) and the save
 // type (0x2C: 1 account, 3 device) and whose value starts with the save ID (0x4C). Eden's desktop
 // app links such folders (common/fs/ryujinx_compat.cpp reads the same index but drops the type);
-// the PS5 has no Ryujinx beside ProsperoEden, so the launcher copies a game's saves in instead.
+// the PS5 has no Ryujinx beside EglantinePS5, so the launcher copies a game's saves in instead.
 //
 // Import from a save folder: <folder>/<title ID>/ filled by hand with what an emulator shows as the
 // game's save directory (the account save), or holding account/ and device/ as Export writes them.
@@ -198,7 +198,7 @@ inline bool CopyTree(const fs::path& from, const fs::path& to) {
     return true;
 }
 
-// Copies each save into ProsperoEden's folder for its kind (account_folder or device_folder, that is
+// Copies each save into EglantinePS5's folder for its kind (account_folder or device_folder, that is
 // .../save/0000000000000000/<user ID or zeros>/<title ID>). What is already there is first moved
 // to backup_root/<name>-account or -device, so nothing is lost; a failed copy puts it back.
 // replaced, when given, tells whether there was a save to move away.

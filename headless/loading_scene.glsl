@@ -11,8 +11,8 @@
 // the progress in thousandths, the shaders built and their total, and the seconds the step has
 // lasted.
 
-const vec3 kLime = vec3(0.72, 0.95, 0.05);
-const vec3 kGreen = vec3(0.16, 0.70, 0.30);
+const vec3 kLime = vec3(0.89, 0.23, 0.38);  // the rose's petal-tip pink
+const vec3 kGreen = vec3(0.48, 0.12, 0.24); // deep rose
 const int kLineBrand = 0; // then the four steps: kLine[step]
 const int kLineLoading = 5;
 const int kLineSeconds = 6;

@@ -1,4 +1,4 @@
-// ProsperoEden - Offline SDF font atlas baker (host tool).
+// EglantinePS5 - Offline SDF font atlas baker (host tool).
 // Copyright (C) 2026 BlackBearReloaded
 // SPDX-License-Identifier: GPL-3.0-or-later
 //

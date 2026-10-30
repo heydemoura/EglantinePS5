@@ -18,7 +18,7 @@ body:
   - type: input
     id: eden
     attributes:
-      label: "ProsperoEden version"
+      label: "EglantinePS5 version"
     validations:
       required: true
   - type: input

@@ -1,4 +1,4 @@
-// ProsperoEden: Jit::Impl with one compiled-code namespace per guest process (inserted into
+// EglantinePS5: Jit::Impl with one compiled-code namespace per guest process (inserted into
 // a64_interface.cpp in place of upstream's Impl; see headless/dynarmic/jit_group.h).
 //
 // Each core compiles into its own region, in parallel, and publishes the block in its process's

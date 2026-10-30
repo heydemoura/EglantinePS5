@@ -1,4 +1,4 @@
-# ProsperoEden - Runs RomM's library scan as its web interface does, for tools/check-romm.py.
+# EglantinePS5 - Runs RomM's library scan as its web interface does, for tools/check-romm.py.
 # Copyright (C) 2026 BlackBearReloaded
 # SPDX-License-Identifier: GPL-3.0-or-later
 """scan.py <user> <password>, inside the RomM container (it has socketio and aiohttp)

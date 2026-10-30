@@ -1,12 +1,13 @@
 # Third-party notices
 
-ProsperoEden is licensed under GPL-3.0-or-later (see [LICENSE](LICENSE)). It
+EglantinePS5 is licensed under GPL-3.0-or-later (see [LICENSE](LICENSE)). It
 builds on the following projects, each under its own license.
 
 ## Emulator
 
-- **[Eden](https://github.com/eden-emulator/mirror)**, GPL-3.0-or-later. The emulator core, built
-  from the commit pinned in `UPSTREAM.json`, together with the dependencies Eden
+- **[Eglantine](https://github.com/Djihads80/Eglantine)**, GPL-3.0-or-later, a fork of
+  **[Eden](https://github.com/eden-emulator/mirror)**. The emulator core, built from the commit the
+  `Eglantine` submodule records, together with the dependencies Eden
   fetches and pins itself: Dynarmic, Boost, fmt, xbyak, zstd, lz4, Opus, SDL3,
   simpleini, sirit, SPIRV-Headers, Vulkan-Headers, Vulkan-Utility-Libraries,
   Vulkan Memory Allocator, ENet, frozen, cpp-httplib, nlohmann/json, and the time
@@ -54,16 +55,16 @@ builds on the following projects, each under its own license.
 - **[PS5-Lapy-JB-Daemon](https://github.com/ArkSama/PS5-Lapy-JB-Daemon)** by
   ArkSama, with the cooperative owned-root design from
   **[mpereiraesaa's fork](https://github.com/mpereiraesaa/PS5-Lapy-JB-Daemon)** and the pinned
-  **[ProsperoEden compatibility fork](https://github.com/blackbearreloaded/PS5-Lapy-JB-Daemon)**.
+  **[EglantinePS5 compatibility fork](https://github.com/blackbearreloaded/PS5-Lapy-JB-Daemon)**.
   Lapy is MIT licensed; its shared protocol header is LGPL-2.1-or-later.
-  ProsperoEden pins the fork, invokes its unmodified exact-title helper build,
+  EglantinePS5 pins the fork, invokes its unmodified exact-title helper build,
   verifies its generated manifest and bundles the helper ELF with its license.
 - **[ps5log](https://github.com/mpereiraesaa/ps5-agc-gears/tree/1ae1f9182abd2770c131b97419034fb85173c2dc/native/ps5log)**,
   GPL-3.0-or-later. The pinned single-header logging client used as an upstream
   Lapy helper build input.
 - **[ProsperoPuzzles](https://github.com/blackbearreloaded/ProsperoPuzzles)**,
   GPL-3.0-or-later. The launcher's drawing, text, animation and sound code
-  (`headless/prosperoeden/pe`) started there.
+  (`headless/eglantineps5/pe`) started there.
 - **Montserrat** by Julieta Ulanovsky and contributors, SIL Open Font License
   1.1 (`third_party/fonts`). The launcher's font is baked from Montserrat Medium.
 - **[HarfBuzz](https://github.com/harfbuzz/harfbuzz)**, "Old MIT" license (its
@@ -80,5 +81,5 @@ builds on the following projects, each under its own license.
 
 ## Thanks
 
-ProsperoEden exists thanks to the Eden maintainers and contributors, Mihawk,
+EglantinePS5 exists thanks to the Eglantine and Eden maintainers and contributors, Mihawk,
 mpereiraesaa, John Törnblom, SvenGDK, and the whole PS5 homebrew community.

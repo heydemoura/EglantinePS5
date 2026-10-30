@@ -1,6 +1,6 @@
-# ProsperoEden local wireless multiplayer over the internet
+# EglantinePS5 local wireless multiplayer over the internet
 
-Implementation and validation plan for [ProsperoEden issue #98](https://github.com/blackbearreloaded/ProsperoEden/issues/98).
+Implementation and validation plan for [EglantinePS5 issue #98](https://github.com/blackbearreloaded/ProsperoEden/issues/98).
 
 Prepared: 2026-10-10. Implementation is based on upstream `main` at `dfda802`, on
 `feature/ldn-rooms`. See [implementation status](MULTIPLAYER_IMPLEMENTATION.md) for
@@ -9,10 +9,10 @@ future follow-up and is excluded from this work.
 
 ## 1. Outcome and scope
 
-Let a PS5 running ProsperoEden join an existing Eden room, launch a supported game, and play through the game's **local wireless** mode with another PS5 or desktop/Android Eden user. Each player runs an independent game instance and keeps their own save. The room carries discovery and game packets. It does not stream video or synchronize emulator save states.
+Let a PS5 running EglantinePS5 join an existing Eden room, launch a supported game, and play through the game's **local wireless** mode with another PS5 or desktop/Android Eden user. Each player runs an independent game instance and keeps their own save. The room carries discovery and game packets. It does not stream video or synchronize emulator save states.
 
 Updated scope: deliver ordinary direct-room connectivity. Tailscale is configured outside
-ProsperoEden and its payload-specific tests are optional follow-up work, not release gates.
+EglantinePS5 and its payload-specific tests are optional follow-up work, not release gates.
 The Tailscale sections and matrix rows below remain reference material for that follow-up.
 
 The same room client can use these endpoints:
@@ -22,7 +22,7 @@ The same room client can use these endpoints:
 
 The first release needs direct connection, nickname, optional room password, room status, member information, leave, and useful failure messages. Use an existing PC/Linux room server. Public room browsing and hosting a server on the PS5 can follow separately.
 
-This plan does not implement Nintendo online services, PSN integration, a Tailscale client inside ProsperoEden, general guest internet access, rollback netplay, or compatibility with physical Switch consoles. Native game LAN mode is a separate validation track; success in local wireless does not establish LAN-mode support. Other emulator families are not advertised as compatible without specific tests.
+This plan does not implement Nintendo online services, PSN integration, a Tailscale client inside EglantinePS5, general guest internet access, rollback netplay, or compatibility with physical Switch consoles. Native game LAN mode is a separate validation track; success in local wireless does not establish LAN-mode support. Other emulator families are not advertised as compatible without specific tests.
 
 The approach follows [Eden's multiplayer model](https://github.com/eden-emulator/mirror/blob/master/docs/user/Multiplayer.md): join a room first, then use the game's local wireless mode. Game and emulator versions must be recorded and compatibility tested, rather than inferred from a shared brand name or room protocol version.
 
@@ -50,7 +50,7 @@ A source finding is not proof of the installed binary's behavior.
 
 - Upstream `src/CMakeLists.txt` adds the `network` library unconditionally. `src/network/CMakeLists.txt` links `common`, `enet::enet`, and Boost headers. `ENABLE_WEB_SERVICE` adds optional web functionality.
 - The native build passes `YUZU_ROOM=OFF`, `YUZU_ROOM_STANDALONE=OFF`, and `ENABLE_WEB_SERVICE=OFF`. The first two disable dedicated-room functionality/executables; they do **not** by themselves remove the room client library. The earlier assertion that the room code is simply not built was too broad. Confirm final link retention and generated build inputs rather than flipping these switches indiscriminately.
-- `Network::Init()` in `src/network/network.cpp` initializes ENet and creates the global room/member objects. No call to this room initializer or its `Network::Shutdown()` counterpart was found in the inspected ProsperoEden `headless` sources. Upstream's Qt frontend supplies that lifecycle.
+- `Network::Init()` in `src/network/network.cpp` initializes ENet and creates the global room/member objects. No call to this room initializer or its `Network::Shutdown()` counterpart was found in the inspected EglantinePS5 `headless` sources. Upstream's Qt frontend supplies that lifecycle.
 - `Network::NetworkInstance` in the emulator core manages the separate internal socket lifecycle. It does not substitute for room initialization. The similar names must not lead to double initialization or cleanup.
 - `LANDiscovery::SendPacket()` sends through a connected `RoomMember`. It does not contain a roomless UDP LAN-broadcast fallback. Thus the pinned implementation's local wireless path should be tested with a room even when both machines are in one home. The initial issue's proposed serverless local-wireless step is not established by this source.
 - Guest BSD socket creation selects `Network::ProxySocket` when the room member reports connected. Guest socket traffic and LDN discovery are separate packet classes carried by the room.
@@ -92,9 +92,9 @@ Paths in this table are relative to the development repository. Upstream paths a
 | Small room controller | Proposed `headless/multiplayer.h` and `.cpp` | Own frontend callback handles, serialize join/leave operations, expose copied state to the launcher, and request normal session shutdown after connection loss. |
 | Build integration | `headless/CMakeLists.txt`, `headless/inject.cmake`, `tools/build-headless-native.sh` | Add controller sources; verify ENet's native target and linkage; make only demonstrated platform adaptations. |
 | Saved settings | `headless/settings_store.h` | Add last room host/port and nickname using existing JSON load/atomic-write behavior. |
-| Launcher service boundary | `headless/prosperoeden/pe/ui/services.hpp`, `headless/prosperoeden/eden_services.h` and `.cpp` | Expose connect, cancel, leave, and snapshot operations through the existing service pattern. |
-| Launcher UI | `headless/prosperoeden/pe/ui/launcher.hpp`, `launcher.cpp`, `settings.cpp`; proposed `multiplayer.cpp` if warranted | Add Multiplayer navigation, connection form, room/member view, and error/status presentation. Reuse established widgets and text entry facilities where available. |
-| Host UI preview | `headless/prosperoeden/host/fake_services.hpp` and `.cpp` | Supply deterministic disconnected/joining/joined/error fixtures for visual and navigation checks. |
+| Launcher service boundary | `headless/eglantineps5/pe/ui/services.hpp`, `headless/eglantineps5/eden_services.h` and `.cpp` | Expose connect, cancel, leave, and snapshot operations through the existing service pattern. |
+| Launcher UI | `headless/eglantineps5/pe/ui/launcher.hpp`, `launcher.cpp`, `settings.cpp`; proposed `multiplayer.cpp` if warranted | Add Multiplayer navigation, connection form, room/member view, and error/status presentation. Reuse established widgets and text entry facilities where available. |
+| Host UI preview | `headless/eglantineps5/host/fake_services.hpp` and `.cpp` | Supply deterministic disconnected/joining/joined/error fixtures for visual and navigation checks. |
 | Guest LDN/network behavior | Upstream `src/core/hle/service/ldn/*`, `sockets/bsd.cpp`, `nifm/nifm.cpp`, `src/core/internal_network/*` | Preserve working upstream behavior. Add narrowly scoped corrections only when source evidence or tests require them. |
 | Protocol validation | Upstream `src/network/packet.*`, `room_member.cpp`, LDN receiver, proxy decompression | Validate the newly exposed remote-input path before internet testing. |
 | Documentation | This plan; later a user guide under `docs/` | Publish exact tested versions, supported titles, direct-connect setup, Tailscale forwarding, and limits. |
@@ -146,7 +146,7 @@ Gate: the PC reference works and its versions/configuration are recorded. If it 
 
 ### Phase 1 — Qualify native UDP and ENet
 
-Use a minimal diagnostic from the same app execution context as ProsperoEden; a privileged payload test alone does not prove app-sandbox access.
+Use a minimal diagnostic from the same app execution context as EglantinePS5; a privileged payload test alone does not prove app-sandbox access.
 
 Check:
 
@@ -244,7 +244,7 @@ Gate: at least one pinned PS5 payload successfully carries room discovery, gamep
 
 Tailscale is a routed overlay, not a shared Ethernet broadcast domain. Do not depend on a game's LAN broadcast discovery crossing it. With rooms, the discovery broadcasts are encapsulated inside the room protocol and sent to one known server endpoint. This is why the room design fits Tailscale without a broadcast bridge. See [Tailscale's networking model](https://tailscale.com/docs/concepts/tailscale-osi).
 
-Both linked PS5 projects run a node/proxy inside their own process. Neither supplies a system-wide Tailscale interface to ProsperoEden. A `100.x.x.x` address appearing in a dashboard does not mean the game app can dial it directly.
+Both linked PS5 projects run a node/proxy inside their own process. Neither supplies a system-wide Tailscale interface to EglantinePS5. A `100.x.x.x` address appearing in a dashboard does not mean the game app can dial it directly.
 
 ### 7.2 Primary candidate: holdmysocks/ps5-tailscale
 
@@ -256,11 +256,11 @@ Recommended topology:
 
 ```mermaid
 flowchart LR
-    P[ProsperoEden room client] <-->|UDP to 127.0.0.1:24872| L[PS5 payload local forward]
+    P[EglantinePS5 room client] <-->|UDP to 127.0.0.1:24872| L[PS5 payload local forward]
     L <-->|Encrypted tailnet path| R[PC or Linux Eden room server]
     R <-->|Tailnet UDP| C[Desktop Eden]
     R <-->|Tailnet UDP| L2[Second PS5 local forward]
-    L2 <--> P2[Second ProsperoEden]
+    L2 <--> P2[Second EglantinePS5]
 ```
 
 Configuration procedure, after ordinary room connectivity works:
@@ -282,25 +282,25 @@ Configuration procedure, after ordinary room connectivity works:
 ```
 
 4. Replace `eden-room-pc` with the real tailnet device name or address. Preserve existing forward entries and all other payload settings. Prefer the dashboard; follow its restart instructions for the selected release if editing configuration by hand.
-5. In ProsperoEden, enter host `127.0.0.1`, port `24872`, and the ordinary room nickname/password. The transport destination is local; the guest's virtual address still comes from the room.
+5. In EglantinePS5, enter host `127.0.0.1`, port `24872`, and the ordinary room nickname/password. The transport destination is local; the guest's virtual address still comes from the room.
 6. Desktop clients with normal Tailscale routing connect directly to `eden-room-pc:24872`. Each additional PS5 gets its own local forward to that same room. Devices then use the game's local wireless mode.
 
-If the local port is occupied, use another free local port such as 24873 and keep the target at 24872. Change the ProsperoEden connection port to match. No new protocol or guest networking setting is required.
+If the local port is occupied, use another free local port such as 24873 and keep the target at 24872. Change the EglantinePS5 connection port to match. No new protocol or guest networking setting is required.
 
 For this outbound-client topology, do not add the room port to the payload's inbound `udpPorts` merely to make it work; that setting serves the opposite direction. Do not use its HTTP proxy for ENet. While joined, guest interface queries must report the room-assigned virtual IPv4 address and subnet; the implementation now supplies this automatically. The native adapter remains the offline fallback. There is no kernel Tailscale interface to select.
 
 Checks required only for a future claim of validated PS5 Tailscale compatibility:
 
-- Cross-process loopback UDP from the actual ProsperoEden app to the payload works in the deployed sandbox/elevation configuration.
+- Cross-process loopback UDP from the actual EglantinePS5 app to the payload works in the deployed sandbox/elevation configuration.
 - The local relay preserves datagram boundaries, reply endpoint behavior, and stable flow mapping for an ENet session.
 - Two PS5s and a PC can coexist without nickname/virtual-IP/flow collisions.
 - Record whether each client-to-room leg is direct or relayed by Tailscale, using the payload dashboard/desktop tools. A successful room join does not prove a direct path or acceptable latency.
 - Spend more than two minutes in the lobby, then start gameplay; distinguish application inactivity from ENet keepalive traffic. Exercise a genuinely expired/recreated relay flow with a diagnostic where practical.
 - Test room traffic near observed maximum packet sizes and under modest loss/jitter. Record fragmentation/retransmission and queue-drop behavior; do not change MTU, queue sizes, or thread priority speculatively.
-- Stop/restart the payload or make the room endpoint unreachable while connected. ProsperoEden should report connection loss and recover through the launcher. Tailscale restart must not trigger an automatic live-game rejoin.
+- Stop/restart the payload or make the room endpoint unreachable while connected. EglantinePS5 should report connection loss and recover through the launcher. Tailscale restart must not trigger an automatic live-game rejoin.
 - Compare FPS/frame times and room round-trip time with the same scene using direct networking and the Tailscale forward. Check that the daemon's scheduling does not starve either game or relay.
 
-ProsperoEden should not read Tailscale auth keys, modify payload settings automatically, install a payload, or claim knowledge of tailnet status it cannot observe. A generic room endpoint is enough for initial support; document the forwarding setup. “Tailscale tested” is a compatibility result, not a new network mode in the core.
+EglantinePS5 should not read Tailscale auth keys, modify payload settings automatically, install a payload, or claim knowledge of tailnet status it cannot observe. A generic room endpoint is enough for initial support; document the forwarding setup. “Tailscale tested” is a compatibility result, not a new network mode in the core.
 
 ### 7.3 Secondary candidate: atreus04-GG/ps5tailscale
 
@@ -311,13 +311,13 @@ Investigation branch:
 1. Inspect the selected release's daemon/proxy implementation and libtailscale interface for outbound UDP dialing, datagram preservation, configurable loopback listeners, and reply routing.
 2. If an existing facility provides that contract, map it to the same single-room topology and run exactly the holdmysocks acceptance tests.
 3. If it does not, record the gap. A separate, narrow contribution to that payload could expose one configurable outbound UDP forward using its existing node. It would need per-client reply routing, cancellation, idle cleanup, bounded buffers, and no open LAN-wide listener by default.
-4. Treat that contribution as optional separate work. Do not block the ordinary room feature or the holdmysocks validation on it, and do not embed another Tailscale runtime in ProsperoEden to compensate.
+4. Treat that contribution as optional separate work. Do not block the ordinary room feature or the holdmysocks validation on it, and do not embed another Tailscale runtime in EglantinePS5 to compensate.
 
 Remote Play success, an inbound FTP connection, or a pingable PS5 tailnet address does not prove the required outbound ENet path. Rest-mode support is irrelevant to an actively running local-wireless game and is not a multiplayer acceptance criterion.
 
 ### 7.4 Fallback without a compatible PS5 payload
 
-An optional PC on the PS5's physical LAN can run Tailscale and a narrowly bound UDP forward to the remote room. ProsperoEden connects to that PC's LAN address/forward port. Validate it as a separate topology; a subnet router alone does not automatically give outbound tailnet routes to the PS5. This is a fallback for investigation, not a requirement for users of a qualified PS5 payload.
+An optional PC on the PS5's physical LAN can run Tailscale and a narrowly bound UDP forward to the remote room. EglantinePS5 connects to that PC's LAN address/forward port. Validate it as a separate topology; a subnet router alone does not automatically give outbound tailnet routes to the PS5. This is a fallback for investigation, not a requirement for users of a qualified PS5 payload.
 
 ## 8. Validation matrix and evidence
 

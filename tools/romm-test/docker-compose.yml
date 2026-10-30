@@ -1,4 +1,4 @@
-# ProsperoEden - A RomM with fake Switch games for tools/check-romm.py, reachable from this
+# EglantinePS5 - A RomM with fake Switch games for tools/check-romm.py, reachable from this
 # computer only, and the console's FTP server (ftpsrv) that writes the downloads. ROMM_VERSION picks
 # RomM's image, ROMM_PORT its port, ROMM_LIBRARY the folder of fake games; what RomM writes stays
 # in the project's volumes (docker compose down -v). FTP_PORT is ftpsrv's port and CHECK_WORK the
@@ -46,7 +46,7 @@ services:
     build:
       context: .
       dockerfile: ftpsrv.Dockerfile
-    image: prosperoeden-ftpsrv:23737c4
+    image: eglantineps5-ftpsrv:23737c4
     command: ["-p", "${FTP_PORT:?}"]
     # Its passive mode names ports of its own for the data: on this computer's network, as on the
     # console. It listens on all addresses there; the check only uses 127.0.0.1.

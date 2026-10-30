@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ProsperoEden - Host check of the download sources and the save sync without a real server.
+# EglantinePS5 - Host check of the download sources and the save sync without a real server.
 # Copyright (C) 2026 BlackBearReloaded
 # SPDX-License-Identifier: GPL-3.0-or-later
 """check-remote.py

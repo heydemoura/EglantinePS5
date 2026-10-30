@@ -59,8 +59,8 @@
 #include "dev_vulkan.h"
 #include "../src/fastmem.h"
 #include "crash_report.h"
-#include "prosperoeden/frontend.h"
-#include "prosperoeden/version.h"
+#include "eglantineps5/frontend.h"
+#include "eglantineps5/version.h"
 extern "C" void ps5_opengl_heap_snapshot(const char*, unsigned);
 extern "C" std::int64_t sceKernelGetDirectMemorySize();
 #else
@@ -132,13 +132,13 @@ public:
 
 #ifdef PS5_NATIVE
 // First start with filesystem access: copy what the sandbox kept (settings, covers, Eden's saves
-// and caches) into /data/prosperoeden. Only folders that do not exist yet are filled, and the
-// sandbox copy stays, so an older ProsperoEden still finds its data.
+// and caches) into /data/eglantineps5. Only folders that do not exist yet are filled, and the
+// sandbox copy stays, so an older EglantinePS5 still finds its data.
 static void MigrateSandboxData() {
-    const std::filesystem::path sandbox{"/mnt/sandbox/PPSA99008_000/download0"};
+    const std::filesystem::path sandbox{"/mnt/sandbox/PPSA98515_000/download0"};
     const std::pair<std::filesystem::path, std::string> moves[] = {
         {sandbox / "eden-headless-g7/user", Eden::UserDir()},
-        {sandbox / "prosperoeden/covers", Eden::CoversDir()},
+        {sandbox / "eglantineps5/covers", Eden::CoversDir()},
     };
     const auto options = std::filesystem::copy_options::recursive | std::filesystem::copy_options::skip_existing;
     for (const auto& [from, to] : moves) {
@@ -149,10 +149,10 @@ static void MigrateSandboxData() {
         Eden::Report("data migration", detail.c_str());
     }
     // Settings files (not the covers folder) go to config/.
-    if (!Eden::DirectoryExists(Eden::ConfigDir()) && Eden::DirectoryExists((sandbox / "prosperoeden").string())) {
+    if (!Eden::DirectoryExists(Eden::ConfigDir()) && Eden::DirectoryExists((sandbox / "eglantineps5").string())) {
         std::error_code error;
         std::filesystem::create_directories(Eden::ConfigDir(), error);
-        for (std::filesystem::directory_iterator it{sandbox / "prosperoeden", error}, end; !error && it != end; it.increment(error))
+        for (std::filesystem::directory_iterator it{sandbox / "eglantineps5", error}, end; !error && it != end; it.increment(error))
             if (it->is_regular_file())
                 std::filesystem::copy_file(it->path(), std::filesystem::path{Eden::ConfigDir()} / it->path().filename(),
                                            std::filesystem::copy_options::skip_existing, error);
@@ -163,10 +163,10 @@ static void MigrateSandboxData() {
 
 #ifdef PS5_NATIVE
 // Game files an early version kept inside the app's folder (assets/ with keys, firmware and
-// roms) move to /data/prosperoeden, where replacing the app cannot take them away: an update
+// roms) move to /data/eglantineps5, where replacing the app cannot take them away: an update
 // that replaces the whole folder left the app without its keys and games. Both are on /data, so
 // it is a rename of each folder. Nothing moves unless all of it can: a folder chosen in Settings,
-// or anything already in /data/prosperoeden, leaves everything where it is.
+// or anything already in /data/eglantineps5, leaves everything where it is.
 static void MoveGameFilesOutOfTheApp() {
     const std::string from = std::string{Eden::kInstallDir} + "/assets", to = Eden::kDefaultAssetsDir;
     const std::string saved = Eden::LoadSavedAssetsDir();
@@ -248,7 +248,7 @@ int main(int argc, char** argv) {
         Eden::BootTrace::Line("requesting filesystem access");
         // Filesystem access beyond the sandbox, first: every path below depends on it
         // (assets_dir.h). A resident upstream Lapy service gets the first opportunity; otherwise
-        // the packaged exact-title upstream helper is sent to the local elfldr. ProsperoEden
+        // the packaged exact-title upstream helper is sent to the local elfldr. EglantinePS5
         // contains no locally implemented kernel mutation code. If neither path works, the app
         // keeps its sandbox paths.
 #if defined(EDEN_DEV_PROFILE)
@@ -304,7 +304,7 @@ int main(int argc, char** argv) {
         Eden::Crash::Install(Eden::LogsDir(), Eden::kAppVersion, last_crash.restarted);
         Eden::BootTrace::Ready(Eden::LogsDir(), Eden::FilesystemAccess());
         Eden::BootTrace::Line("logs and crash handler ready (%s)", Eden::LogsDir().c_str());
-        for (const char* folder : {"/app0", Eden::kMountedAppDir, Eden::kInstallDir, "/mnt/sandbox/PPSA99008_000/app0"})
+        for (const char* folder : {"/app0", Eden::kMountedAppDir, Eden::kInstallDir, "/mnt/sandbox/PPSA98515_000/app0"})
             Eden::BootTrace::Line("app folder candidate %s: eboot %s, font %s", folder,
                                   Eden::FileExists(std::string{folder} + "/eboot.bin") ? "yes" : "no",
                                   Eden::FileExists(std::string{folder} + "/ui/fonts/montserrat-medium.pefont") ? "yes" : "no");
@@ -363,7 +363,7 @@ int main(int argc, char** argv) {
             const std::string note = Eden::LogFile("stop-limit.txt");
             if (std::remove(note.c_str()) == 0)
                 Eden::Report("exit", "The last game did not stop (or finish loading) within ten seconds of being "
-                                     "asked to, so ProsperoEden started again");
+                                     "asked to, so EglantinePS5 started again");
             Eden::StopLimit::Start(note);
         }
         report = std::fopen(Eden::LogFile("result.tsv").c_str(), "w");
@@ -533,11 +533,11 @@ int main(int argc, char** argv) {
             throw std::runtime_error("Development ROM not found");
         } else {
             Eden::BootTrace::Line("opening the launcher");
-            selected_game = SelectProsperoEdenGame(rooms, launch_error);
+            selected_game = SelectEglantinePS5Game(rooms, launch_error);
         }
 #else
         Eden::BootTrace::Line("opening the launcher");
-        selected_game = SelectProsperoEdenGame(rooms, launch_error);
+        selected_game = SelectEglantinePS5Game(rooms, launch_error);
 #endif
         Eden::BootTrace::Line("launcher closed: %s", selected_game.empty() ? "no game (quit)" : "a game was chosen");
         }
@@ -918,7 +918,8 @@ int main(int argc, char** argv) {
             static_assert(std::size(resolutions) == std::size(Eden::kResolutionKeys));
             static constexpr Settings::ScalingFilter filters[] = {
                 Settings::ScalingFilter::Bilinear, Settings::ScalingFilter::Fsr, Settings::ScalingFilter::Bicubic,
-                Settings::ScalingFilter::NearestNeighbor};
+                Settings::ScalingFilter::NearestNeighbor, Settings::ScalingFilter::Fsr3};
+            static_assert(std::size(filters) == std::size(Eden::kUpscalingFilterKeys));
             // Settings > Video, with what the game does differently (Library > Game settings > Video).
             const auto video = Eden::PreferencesFor(eden_game_title_id(guest));
             const int resolution = video.resolution;
@@ -960,6 +961,10 @@ int main(int argc, char** argv) {
                 const bool active = (override_rate >= 0 || override_multiplier >= 0 || video.frame_gen) &&
                                     video.backend == Eden::GraphicsBackend::Vulkan;
                 Settings::values.frame_gen.SetValue(active);
+                // AMD FSR 3 (Eglantine's own, nothing needed from the user) or Lossless Scaling's.
+                const bool lossless = video.frame_gen_type == 1;
+                Settings::values.frame_gen_type.SetValue(lossless ? Settings::FrameGenType::Lsfg
+                                                                  : Settings::FrameGenType::Fsr3);
                 Settings::values.frame_gen_target_rate.SetValue(
                     active ? static_cast<unsigned>(std::min(target, 240)) : 0u);
                 Settings::values.frame_gen_multiplier.SetValue(
@@ -980,12 +985,13 @@ int main(int argc, char** argv) {
                         "not a PE",   "no LSFG shaders in it",      "shader translation failed",
                         "shader cache unusable"};
                     Eden::Report("launch",
-                                 ("Frame generation: " +
+                                 ("Frame generation (" + std::string(lossless ? "Lossless Scaling" : "AMD FSR 3") + "): " +
                                   std::string(target > 0 ? std::to_string(target) + " Hz target"
                                                          : std::to_string(multiplier) + "x multiplier") +
-                                  "; " + folder.string() +
-                                  ": " + (status < std::size(kLosslessStates) ? kLosslessStates[status]
-                                                                             : "unknown") +
+                                  (lossless ? "; " + folder.string() + ": " +
+                                                  (status < std::size(kLosslessStates) ? kLosslessStates[status]
+                                                                                       : "unknown")
+                                            : std::string{}) +
                                   "; null descriptors " +
                                   (Eden::DevVulkan::disable_null_descriptor ? "off" : "on"))
                                      .c_str());
@@ -1269,7 +1275,7 @@ int main(int argc, char** argv) {
                 };
 #ifdef PS5_NATIVE
                 // While a game loads nothing else reads the controller, so Touchpad + L1 did nothing
-                // until the game ran: a load that hung could only be left by closing ProsperoEden.
+                // until the game ran: a load that hung could only be left by closing EglantinePS5.
                 // Now it is heard here too. The stop limit starts at the press (stop_limit.h): a
                 // load that finishes within it ends as a normal stop, one that does not ends with
                 // the app starting again at the launcher.
@@ -1754,7 +1760,7 @@ int main(int argc, char** argv) {
                     catch (const std::exception& error) {
                         // Out of graphics memory: seen with the resolution above 1x in a game that
                         // runs at 1x. The launcher shows this sentence in the player's language
-                        // (prosperoeden/eden_services.cpp, kLaunchErrors).
+                        // (eglantineps5/eden_services.cpp, kLaunchErrors).
                         const std::string what = error.what();
                         if (what.find("OUT_OF_DEVICE_MEMORY") != std::string::npos ||
                             what.find("OUT_OF_HOST_MEMORY") != std::string::npos)

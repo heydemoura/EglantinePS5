@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Pinned build inputs of ProsperoEden (tools/deps.json).
+"""Pinned build inputs of EglantinePS5 (tools/deps.json).
 
   tools/deps.py status          list every input, where it lives and whether it matches its pin
   tools/deps.py fetch [NAME...] fetch what is missing (all inputs, or the named ones)
@@ -9,7 +9,7 @@
 
 Nothing that already exists is modified: an existing checkout stays at whatever revision it
 has (status reports it), an existing file or folder is not downloaded again. Downloads are
-cached in $PROSPEROEDEN_DEPS_CACHE (default ~/.cache/prosperoeden-deps) and verified against
+cached in $EGLANTINEPS5_DEPS_CACHE (default ~/.cache/eglantineps5-deps) and verified against
 their pinned SHA-256/SHA-512 before use; git inputs are fetched at their pinned commit.
 """
 import hashlib
@@ -27,9 +27,9 @@ import zipfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MANIFEST = json.loads((ROOT / 'tools/deps.json').read_text())
-CACHE = pathlib.Path(os.environ.get('PROSPEROEDEN_DEPS_CACHE') or
+CACHE = pathlib.Path(os.environ.get('EGLANTINEPS5_DEPS_CACHE') or
                      pathlib.Path(os.environ.get('XDG_CACHE_HOME') or pathlib.Path.home() / '.cache')
-                     / 'prosperoeden-deps')
+                     / 'eglantineps5-deps')
 
 
 def fail(message):
@@ -80,7 +80,7 @@ def download(url, algorithm, expected, name):
     for attempt in range(1, 4):
         try:
             print(f'deps: downloading {url}', flush=True)
-            request = urllib.request.Request(url, headers={'User-Agent': 'prosperoeden-deps'})
+            request = urllib.request.Request(url, headers={'User-Agent': 'eglantineps5-deps'})
             with urllib.request.urlopen(request, timeout=120) as response, open(partial, 'wb') as out:
                 shutil.copyfileobj(response, out, 1 << 20)
             break

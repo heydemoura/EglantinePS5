@@ -34,7 +34,7 @@ int main() {
     CheckGameNames();
     char directory[] = "/tmp/eden-settings-XXXXXX";
     assert(mkdtemp(directory));
-    const std::string file = std::string(directory) + "/prosperoeden.json";
+    const std::string file = std::string(directory) + "/eglantineps5.json";
 
     // Defaults with no file.
     assert(Eden::LoadPreferences(file).volume == 100);
@@ -155,6 +155,23 @@ int main() {
     assert(Read(file).find("\"frame_gen\": true") != std::string::npos);
     video.frame_gen = false;
     assert(Eden::SavePreferences(video, file) && !Eden::LoadPreferences(file).frame_gen);
+    // The frame generation type: AMD FSR 3 by default (it needs nothing from the user), Lossless
+    // Scaling when chosen; the filter list's new AMD FSR 3 keeps the older entries' indexes.
+    assert(video.frame_gen_type == 0 && Eden::kFrameGenTypeKeys[video.frame_gen_type] == std::string("fsr3"));
+    assert(Read(file).find("\"frame_gen_type\": \"fsr3\"") != std::string::npos);
+    video.frame_gen_type = 1;
+    assert(Eden::SavePreferences(video, file) && Eden::LoadPreferences(file).frame_gen_type == 1);
+    assert(Read(file).find("\"frame_gen_type\": \"lsfg\"") != std::string::npos);
+    video.frame_gen_type = 2;
+    assert(!Eden::SavePreferences(video, file));
+    video.frame_gen_type = 0;
+    assert(Eden::SavePreferences(video, file));
+    assert(std::string(Eden::kUpscalingFilterKeys[1]) == "fsr" && std::string(Eden::kUpscalingFilterKeys[4]) == "fsr3");
+    video.upscaling_filter = 4;
+    assert(Eden::SavePreferences(video, file) && Eden::LoadPreferences(file).upscaling_filter == 4);
+    assert(Read(file).find("\"upscaling_filter\": \"fsr3\"") != std::string::npos);
+    video.upscaling_filter = 1;
+    assert(Eden::SavePreferences(video, file));
     // The target rate and the multiplier are stored as their keys, and "auto" is the default:
     // Eden leaves the ratio in charge unless a target is asked for (settings_store.h).
     assert(video.frame_gen_target == 0 && video.frame_gen_multiplier == 0);
@@ -227,6 +244,19 @@ int main() {
            Eden::LoadGameSettings(racer, file).frame_gen == -1);
     game.frame_gen = 2;
     assert(!Eden::SaveGameSettings(racer, game, file));
+
+    // A game's own frame generation type, on top of Settings' (-1 follows Settings).
+    assert(Eden::LoadGameSettings(racer, file).frame_gen_type == -1);
+    assert(Eden::PreferencesFor(racer, file).frame_gen_type == 0);
+    game = Eden::LoadGameSettings(racer, file);
+    game.frame_gen_type = 1;
+    assert(Eden::SaveGameSettings(racer, game, file));
+    assert(Eden::LoadGameSettings(racer, file).frame_gen_type == 1);
+    assert(Eden::PreferencesFor(racer, file).frame_gen_type == 1 && Eden::PreferencesFor(quest, file).frame_gen_type == 0);
+    game.frame_gen_type = 2;
+    assert(!Eden::SaveGameSettings(racer, game, file));
+    game.frame_gen_type = -1;
+    assert(Eden::SaveGameSettings(racer, game, file) && Eden::LoadGameSettings(racer, file).frame_gen_type == -1);
 
     // A game's own target rate and multiplier ride along the same path, and an index outside the
     // tables is refused the way the boolean above is.
@@ -408,7 +438,7 @@ int main() {
     // Migration from the text files of earlier versions, once, leaving them in place.
     char legacy[] = "/tmp/eden-legacy-XXXXXX";
     assert(mkdtemp(legacy));
-    const std::string folder = legacy, migrated = folder + "/prosperoeden.json";
+    const std::string folder = legacy, migrated = folder + "/eglantineps5.json";
     { std::ofstream(folder + "/settings.txt") << "2 0 70 0 1 0\n"; }
     { std::ofstream(folder + "/last-game.txt") << "Demo Racer [0100000000010000].nsp"; }
     { std::ofstream(folder + "/recent-games.txt") << "Demo Racer [0100000000010000].nsp\nTest Platformer.nsp\n"; }

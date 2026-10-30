@@ -55,8 +55,8 @@ int main() {
         subprocess.run([os.environ.get("CXX", "clang++"), "-std=c++20", "-I", str(root / "headless"),
                         str(logging_source), "-o", str(logging_check)], check=True)
         logged = subprocess.run([str(logging_check)], capture_output=True, text=True, check=True)
-        assert logged.stderr == ("[ProsperoEden] multiplayer: ordinary error\n"
-                                 "[ProsperoEden] multiplayer debug: enabled detail\n")
+        assert logged.stderr == ("[EglantinePS5] multiplayer: ordinary error\n"
+                                 "[EglantinePS5] multiplayer debug: enabled detail\n")
         if args.host_cache:
             bsd = (output / "bsd.cpp").read_text()
             destructor = bsd.split("BSD_USA::~BSD_USA() {", 1)[1].split(

@@ -94,7 +94,7 @@ void LoadPipelines(
     if (good <= 0 || error) {
         (void)Common::FS::RemoveFile(filename);
     }
-    std::fprintf(stderr, "[ProsperoEden] shader cache: %s is damaged after %lld bytes; %s\n",
+    std::fprintf(stderr, "[EglantinePS5] shader cache: %s is damaged after %lld bytes; %s\n",
                  Common::FS::PathToUTF8String(filename).c_str(), static_cast<long long>(good < 0 ? 0 : good),
                  good > 0 && !error ? "the entries before that are kept" : "the file is removed");
 }

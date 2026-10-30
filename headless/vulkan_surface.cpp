@@ -11,7 +11,7 @@ vk::SurfaceKHR CreateSurface(const vk::Instance& instance,
                             const Core::Frontend::EmuWindow::WindowSystemInfo& window_info) {
     if (window_info.type != Core::Frontend::WindowSystemType::PS5)
         throw vk::Exception(VK_ERROR_INITIALIZATION_FAILED);
-    std::fprintf(stderr, "[ProsperoEden] Vulkan instance ready; creating native surface\n");
+    std::fprintf(stderr, "[EglantinePS5] Vulkan instance ready; creating native surface\n");
     const auto& dispatch = instance.Dispatch();
     const auto proc = [&](const char* name) {
         auto function = dispatch.vkGetInstanceProcAddr(*instance, name);
@@ -19,7 +19,7 @@ vk::SurfaceKHR CreateSurface(const vk::Instance& instance,
         return function;
     };
     const auto check = [](VkResult result, int line = __builtin_LINE()) {
-        std::fprintf(stderr, "[ProsperoEden] Vulkan surface line=%d result=%d\n", line, static_cast<int>(result));
+        std::fprintf(stderr, "[EglantinePS5] Vulkan surface line=%d result=%d\n", line, static_cast<int>(result));
         if (result != VK_SUCCESS) throw vk::Exception(result);
     };
     // ponytail: the native driver exposes one GPU/display/plane; enumerate all
@@ -29,7 +29,7 @@ vk::SurfaceKHR CreateSurface(const vk::Instance& instance,
     check(reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(proc("vkEnumeratePhysicalDevices"))(
         *instance, &count, &physical));
     if (count != 1) {
-        std::fprintf(stderr, "[ProsperoEden] Vulkan surface enumeration count=%u\n", count);
+        std::fprintf(stderr, "[EglantinePS5] Vulkan surface enumeration count=%u\n", count);
         throw vk::Exception(VK_ERROR_INITIALIZATION_FAILED);
     }
     VkDisplayPropertiesKHR display{};
@@ -37,7 +37,7 @@ vk::SurfaceKHR CreateSurface(const vk::Instance& instance,
     check(reinterpret_cast<PFN_vkGetPhysicalDeviceDisplayPropertiesKHR>(
         proc("vkGetPhysicalDeviceDisplayPropertiesKHR"))(physical, &count, &display));
     if (count != 1) {
-        std::fprintf(stderr, "[ProsperoEden] Vulkan surface enumeration count=%u\n", count);
+        std::fprintf(stderr, "[EglantinePS5] Vulkan surface enumeration count=%u\n", count);
         throw vk::Exception(VK_ERROR_INITIALIZATION_FAILED);
     }
     const auto get_modes = reinterpret_cast<PFN_vkGetDisplayModePropertiesKHR>(
@@ -66,7 +66,7 @@ vk::SurfaceKHR CreateSurface(const vk::Instance& instance,
     }
     Eden::Display::output_millihertz.store(static_cast<int>(mode.parameters.refreshRate));
     if (mode.parameters.refreshRate >= 119000) Eden::Display::settle.store(true);
-    std::fprintf(stderr, "[ProsperoEden] Vulkan display: %u modes, asked for %d Hz, using %.2f Hz\n", count,
+    std::fprintf(stderr, "[EglantinePS5] Vulkan display: %u modes, asked for %d Hz, using %.2f Hz\n", count,
                  Eden::Display::requested_hz.load(), mode.parameters.refreshRate / 1000.0);
     const VkDisplaySurfaceCreateInfoKHR info{
         .sType = VK_STRUCTURE_TYPE_DISPLAY_SURFACE_CREATE_INFO_KHR,

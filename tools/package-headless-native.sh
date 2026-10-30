@@ -9,11 +9,11 @@ scratch=$(cat "$root/.local/headless-cache")
 template="$root/../ps5-native-app-boilerplate"
 builder="$root/build/host/ps5-native-tool"
 out="$root/build/headless-native"
-app="${EDEN_PACKAGE_DIR:-$root/dist/headless/PPSA99008}"
+app="${EDEN_PACKAGE_DIR:-$root/dist/headless/PPSA98515}"
 # A separate clean staging directory lets driver candidates omit private game
 # assets without deleting or copying the existing development installation.
 if [[ -n ${EDEN_PACKAGE_DIR:-} ]]; then
-    [[ $(realpath -m "$app") == "$root"/build/*/PPSA99008 ]] || exit 2
+    [[ $(realpath -m "$app") == "$root"/build/*/PPSA98515 ]] || exit 2
     [[ ${1:-} != --game ]] || exit 2
 fi
 test -x "$builder"
@@ -24,7 +24,7 @@ cp "$scratch/native-local/bin/eden-headless.map" "$out/link.map"
 cp "$scratch/native-local/CMakeCache.txt" "$out/CMakeCache.txt"
 stub_flags=(--stub-dir "$scratch/sdk/target/lib")
 if grep -qx 'EDEN_PS5_OPENGL:BOOL=ON' "$out/CMakeCache.txt"; then
-    gl46="$root/.deps/ps5-opengl-sdk-1.0.0/sdk"
+    gl46="$root/.deps/ps5-opengl-sdk-1.0.2/sdk"
     stub_flags=()
     for stub in "$scratch/sdk/target/lib/"*.so; do
         case "${stub##*/}" in libSceAgc.so|libSceAgcDriver.so) continue ;; esac
@@ -59,7 +59,7 @@ python3 "$root/tools/validate-loader-elf.py" "$root/build/self-update/self-updat
 cp "$root/build/self-update/self-updater.elf" "$app/self-updater.elf"
 cp "$root/sce_sys/"{param.json,icon0.png,pic0.dds,pic1.dds,snd0.at9} "$app/sce_sys/"
 rm -rf "$app/ui"
-cp -a "$root/headless/prosperoeden/ui" "$app/ui"
+cp -a "$root/headless/eglantineps5/ui" "$app/ui"
 # The switches the runner reads from the app folder (headless/main.cpp). Only a development
 # package gets them: the profile title otherwise takes its timed input replay instead of the
 # controller, and a release build never parses the file.
@@ -76,9 +76,9 @@ if game:
     assert (app / 'game-assets.json').is_file()
     assert (app / 'assets/keys/prod.keys').is_file()
 value = json.loads((app / 'sce_sys/param.json').read_text())
-assert (value['titleId'], value['conceptId']) == ('PPSA99008', '99008')
-assert value['contentId'] == 'UP9000-PPSA99008_00-PROSPEROEDEN0001'
-assert value['localizedParameters']['en-US']['titleName'] == 'ProsperoEden'
+assert (value['titleId'], value['conceptId']) == ('PPSA98515', '98515')
+assert value['contentId'] == 'UP9000-PPSA98515_00-EGLANTINEPS50001'
+assert value['localizedParameters']['en-US']['titleName'] == 'EglantinePS5'
 assert value['pubtools']['loudnessSnd0'] == '-28.00'
 # The app version has one home, sce_sys/param.json: the program was built with the same value.
 assert re.fullmatch(r'\d{2}\.\d{3}\.\d{3}', value['contentVersion']), value['contentVersion']

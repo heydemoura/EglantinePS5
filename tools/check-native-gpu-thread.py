@@ -11,12 +11,14 @@ generated = cache / 'native-local/headless/gpu_thread.cpp'
 source = (upstream / 'video_core/gpu_thread.cpp').read_text()
 worker = generated.read_text()
 body = source.split('thread = std::jthread([&](std::stop_token stop_token) {', 1)[1].split('\n    });', 1)[0]
-dispatch_call = '                scheduler.Push(system.GPU(), submit_list->channel, std::move(submit_list->entries));'
+dispatch_call = ('                Profile::Scope scope{Profile::Zone::Push};\n'
+                 '                scheduler.Push(system.GPU(), submit_list->channel, std::move(submit_list->entries));')
+idle_call = ('                Profile::Scope scope{Profile::Zone::Idle};\n'
+             '                state.queue.PopWait(next, stop_token);')
 development = 'EDEN_DEV_PROFILE:BOOL=ON' in (cache / 'native-local/CMakeCache.txt').read_text()
 for call, timer, indent in (
     (dispatch_call, 'dispatch_timer(::Eden::Performance::gpu_dispatch)', '                '),
-    ('            state.queue.PopWait(next, stop_token);',
-     'idle_timer(::Eden::Performance::gpu_queue_wait)', '            '),
+    (idle_call, 'idle_timer(::Eden::Performance::gpu_queue_wait)', '                '),
 ):
     wrapped = indent + '{ ::Eden::Performance::Timer ' + timer + ';\n' + call + '\n' + indent + '}'
     assert worker.count(wrapped) == int(development)
@@ -29,17 +31,17 @@ dispatch_trace = ('                const auto count = ++dispatches;\n'
                   f'                if ({trace_when}) LOG_INFO(Render_OpenGL, "EDEN_GPU_DISPATCH_END count={{}}", count);')
 assert worker.count(dispatch_trace) == 1
 untraced = worker.replace(dispatch_trace, dispatch_call).replace('        unsigned dispatches = 0;\n', '')
-loading_wait = """            if (Eden::LoadingTick(renderer, false)) {
-                if (!state.queue.TryPop(next)) {
-                    Eden::LoadingTick(renderer, true);
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                    continue;
-                }
-            } else {
-            state.queue.PopWait(next, stop_token);
-            }"""
+loading_wait = """                if (Eden::LoadingTick(renderer, false)) {
+                    if (!state.queue.TryPop(next)) {
+                        Eden::LoadingTick(renderer, true);
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                        continue;
+                    }
+                } else {
+""" + idle_call + """
+                }"""
 assert untraced.count(loading_wait) == 1
-untraced = untraced.replace(loading_wait, '            state.queue.PopWait(next, stop_token);')
+untraced = untraced.replace(loading_wait, idle_call)
 assert body in untraced, 'GPU worker semantics changed beyond dispatch markers and startup animation wait'
 
 assert 'stop_source.get_token()' in worker and 'thread.get_stop_token()' not in worker
@@ -203,5 +205,5 @@ with tempfile.TemporaryDirectory(prefix='eden-gpu-thread-') as folder:
                     '-o', str(temp / 'check')], check=True)
     subprocess.run([str(temp / 'check')], check=True, timeout=15)
     failed = subprocess.run([str(temp / 'check'), 'throw'], capture_output=True, text=True, timeout=15)
-    assert failed.returncode != 0 and '[ProsperoEden] GPU worker: injected worker failure' in failed.stderr
+    assert failed.returncode != 0 and '[EglantinePS5] GPU worker: injected worker failure' in failed.stderr
 print('Native GPU stack, stop/wake/join, creation failures and blocked-command teardown ordering/rejection PASS')

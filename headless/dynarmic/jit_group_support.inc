@@ -1,4 +1,4 @@
-// ProsperoEden: JitGroup membership (jit_group.h) and the prelude callbacks of a JIT whose code
+// EglantinePS5: JitGroup membership (jit_group.h) and the prelude callbacks of a JIT whose code
 // every core of its process may run.
 extern "C" void eden_state_arg_add(u64 value, u32 offset);  // callback.cpp
 extern "C" void eden_state_arg_remove(u64 value);

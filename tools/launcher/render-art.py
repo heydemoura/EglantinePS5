@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# ProsperoEden - Launcher art from the source images (run by tools/launcher/assets.sh).
+# EglantinePS5 - Launcher art from the source images (run by tools/launcher/assets.sh).
 # Copyright (C) 2026 BlackBearReloaded
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Writes headless/prosperoeden/ui/art:
+"""Writes headless/eglantineps5/ui/art:
 
   backdrop.tga       the dusk artwork behind every screen, darkened towards the left where the
                      text sits, 2048x1152 (larger than the 1920x1080 screen: it drifts slowly)
@@ -21,7 +21,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
 
 ROOT = Path(__file__).resolve().parents[2]
-ART = ROOT / "headless/prosperoeden/ui/art"
+ART = ROOT / "headless/eglantineps5/ui/art"
 
 
 def save_tga(image, name):

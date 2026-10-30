@@ -51,7 +51,7 @@ inline void NameThread(const char* name) noexcept {
 }
 
 // How the launcher is told of a report: its launch error is this, followed by the report's path
-// (prosperoeden/eden_services.cpp).
+// (eglantineps5/eden_services.cpp).
 inline constexpr std::string_view kNotice = "crash-report:";
 
 // What the previous run left behind.

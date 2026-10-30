@@ -39,7 +39,7 @@ open the saved Private room form. Expected: responsive input, nonempty room list
 private configuration and clean shutdown. Reject on blank/stalled UI, request error, accidental
 join, unexpected settings mutation, crash, or teardown failure.
 
-Target: 192.168.4.30 only, FW 6.02, PPSA99008; FTP 2121, klog 3232, controller loader 9021.
+Target: 192.168.4.30 only, FW 6.02, PPSA98515; FTP 2121, klog 3232, controller loader 9021.
 Use the environment lock, commit the exact candidate, freeze/hash packages, and remotely verify.
 Development input/capture may be enabled for a bounded <=210s test with `launcher=first`; do
 not launch a game or join unrelated public rooms. Back up and restore development markers.
@@ -92,7 +92,7 @@ remains deferred, and the separate reported connectivity issue is not fixed by t
 User authorized .40 only, conditional on idle state. Application source is `2699b69`, including
 upstream `f331835`, public/private selection and persistent connection-error explanations.
 Normal and diagnostic packages are frozen separately from the same application source.
-Target PPSA99008 at 192.168.4.40, using FTP 2121, klog 3232 and title controller 9021.
+Target PPSA98515 at 192.168.4.40, using FTP 2121, klog 3232 and title controller 9021.
 Require idle state immediately before deployment and launch; never close a pre-existing title.
 
 Acceptance: render Multiplayer selection, fetch and refresh the public directory, return to
@@ -111,7 +111,7 @@ This used a numeric IPv4 address; it does not qualify console hostname lookup. N
 The observation limit ended the run before a separate Leave-button or failure-message scenario.
 Error presentation remains host-preview tested; public-list scrolling was not exercised here.
 
-The launcher exited normally and ShadowMount reported PPSA99008 PID 566 stopped. This target
+The launcher exited normally and ShadowMount reported PPSA98515 PID 566 stopped. This target
 does not provide the separate runtime-layer-release receipt used by the .30 runner. Cleanup
 initially rejected ftpsrv's successful `226 File deleted` reply; a bounded cleanup accepted
 that response, removed remaining temporary capture state and verified all 66 normal-package

@@ -1,4 +1,4 @@
-# ProsperoEden - ftpsrv (https://github.com/ps5-payload-dev/ftpsrv), the FTP server the console runs
+# EglantinePS5 - ftpsrv (https://github.com/ps5-payload-dev/ftpsrv), the FTP server the console runs
 # to write the downloads, built for Linux (its Makefile.linux) for tools/check-romm.py.
 FROM debian:12-slim AS build
 ARG FTPSRV_COMMIT=23737c4738d15b9b9b036665bbf008d8fd6d82d2

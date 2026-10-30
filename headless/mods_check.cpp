@@ -229,7 +229,7 @@ void check_cheats(const fs::path& base) {
 }
 
 void check_settings(const fs::path& base) {
-    const std::string settings = (base / "prosperoeden.json").string();
+    const std::string settings = (base / "eglantineps5.json").string();
     const std::uint64_t game = 0x0100ABCD00001000ULL, other = 0x0100FFFF00002000ULL;
     require(Eden::LoadDisabledMods(game, settings).empty(), "nothing switched off at first");
     require(Eden::SaveGameSettings(game, {1, 4, 1}, settings), "game settings");

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Everything the launcher remembers, in one JSON file (config/prosperoeden.json):
+// Everything the launcher remembers, in one JSON file (config/eglantineps5.json):
 //
 //   {
 //     "version": 1,
@@ -67,8 +67,10 @@ inline constexpr const char* kResolutionLabels[] = {"0.5x (faster, softer)", "0.
                                                     "4x (slowest)"};
 static_assert(std::size(kResolutionLabels) == std::size(kResolutionKeys));
 inline constexpr int kNativeResolution = 2;
-inline constexpr const char* kUpscalingFilterKeys[] = {"bilinear", "fsr", "bicubic", "nearest"};
-inline constexpr const char* kUpscalingFilterLabels[] = {"Bilinear", "AMD FSR", "Bicubic", "Nearest"};
+// New filters are appended: a saved index keeps its meaning.
+inline constexpr const char* kUpscalingFilterKeys[] = {"bilinear", "fsr", "bicubic", "nearest", "fsr3"};
+inline constexpr const char* kUpscalingFilterLabels[] = {"Bilinear", "AMD FSR", "Bicubic", "Nearest", "AMD FSR 3"};
+static_assert(std::size(kUpscalingFilterLabels) == std::size(kUpscalingFilterKeys));
 // Settings > Video: the refresh rate of the output while a game runs. 120 Hz is asked of the
 // display (display_refresh.h); one that cannot show it stays at 60 Hz.
 inline constexpr const char* kRefreshKeys[] = {"60", "120"};
@@ -81,6 +83,11 @@ inline constexpr int kRefreshHz[] = {60, 120};
 inline constexpr const char* kFrameGenTargetKeys[] = {"auto", "60", "90", "120", "144", "240"};
 inline constexpr int kFrameGenTargetHz[] = {0, 60, 90, 120, 144, 240};
 static_assert(std::size(kFrameGenTargetKeys) == std::size(kFrameGenTargetHz));
+// What makes the frames: Eglantine's own FSR 3 frame generation, or Lossless Scaling's (it needs
+// the user's own Lossless.dll). Eglantine's default is FSR 3, which needs nothing from the user.
+inline constexpr const char* kFrameGenTypeKeys[] = {"fsr3", "lsfg"};
+inline constexpr const char* kFrameGenTypeLabels[] = {"AMD FSR 3", "Lossless Scaling"};
+static_assert(std::size(kFrameGenTypeLabels) == std::size(kFrameGenTypeKeys));
 inline constexpr const char* kFrameGenMultiplierKeys[] = {"2", "3", "4"};
 inline constexpr int kFrameGenMultiplierValue[] = {2, 3, 4};
 static_assert(std::size(kFrameGenMultiplierKeys) == std::size(kFrameGenMultiplierValue));
@@ -113,7 +120,8 @@ struct Preferences {
     int upscaling_filter = 0;            // index into kUpscalingFilterKeys
     int refresh = 0;                     // index into kRefreshKeys
     int output = 0;                      // index into kOutputKeys
-    bool frame_gen = false;              // Lossless Scaling frame generation (Vulkan only)
+    bool frame_gen = false;              // frame generation (Vulkan only)
+    int frame_gen_type = 0;              // index into kFrameGenTypeKeys (0 is AMD FSR 3)
     int frame_gen_target = 0;            // index into kFrameGenTargetKeys (0 is "auto")
     int frame_gen_multiplier = 0;        // index into kFrameGenMultiplierKeys (0 is 2x)
     bool vibration = true;
@@ -142,7 +150,7 @@ inline bool ValidRomFilename(std::string_view name) {
     return extension == ".nsp" || extension == ".xci";
 }
 
-inline std::string SettingsFile() { return ConfigFile("prosperoeden.json"); }
+inline std::string SettingsFile() { return ConfigFile("eglantineps5.json"); }
 
 namespace Settings {
 using Json = nlohmann::json;
@@ -345,6 +353,8 @@ inline Preferences LoadPreferences(const std::string& file = SettingsFile()) {
     result.output = KeyIndex(Settings::String(document, Json::json_pointer("/video/output_resolution")),
                              kOutputKeys, int(std::size(kOutputKeys)), result.output);
     result.frame_gen = Settings::Bool(document, Json::json_pointer("/video/frame_gen"), result.frame_gen);
+    result.frame_gen_type = KeyIndex(Settings::String(document, Json::json_pointer("/video/frame_gen_type")),
+                                     kFrameGenTypeKeys, int(std::size(kFrameGenTypeKeys)), result.frame_gen_type);
     result.frame_gen_target = KeyIndex(
         Settings::String(document, Json::json_pointer("/video/frame_gen_target")), kFrameGenTargetKeys,
         int(std::size(kFrameGenTargetKeys)), result.frame_gen_target);
@@ -368,6 +378,7 @@ inline bool SavePreferences(const Preferences& value, const std::string& file = 
         value.upscaling_filter < 0 || value.upscaling_filter >= int(std::size(kUpscalingFilterKeys)) ||
         value.refresh < 0 || value.refresh >= int(std::size(kRefreshKeys)) ||
         value.output < 0 || value.output >= int(std::size(kOutputKeys)) ||
+        value.frame_gen_type < 0 || value.frame_gen_type >= int(std::size(kFrameGenTypeKeys)) ||
         value.language < 0 || value.language >= int(std::size(kLanguageKeys)) ||
         !ValidMapping(value.mapping)) return false;
     Settings::Json document = Settings::Load(file);
@@ -379,6 +390,7 @@ inline bool SavePreferences(const Preferences& value, const std::string& file = 
     document["video"]["refresh_rate"] = kRefreshKeys[value.refresh];
     document["video"]["output_resolution"] = kOutputKeys[value.output];
     document["video"]["frame_gen"] = value.frame_gen;
+    document["video"]["frame_gen_type"] = kFrameGenTypeKeys[value.frame_gen_type];
     document["video"]["frame_gen_target"] = kFrameGenTargetKeys[value.frame_gen_target];
     document["video"]["frame_gen_multiplier"] = kFrameGenMultiplierKeys[value.frame_gen_multiplier];
     document["audio"]["volume"] = value.volume;
@@ -431,7 +443,8 @@ struct GameSettings {
     int upscaling_filter = -1;  // index into kUpscalingFilterKeys
     int refresh = -1;           // index into kRefreshKeys
     int hud = -1;               // FPS overlay
-    int frame_gen = -1;         // Lossless Scaling frame generation (Vulkan only)
+    int frame_gen = -1;         // frame generation (Vulkan only)
+    int frame_gen_type = -1;    // index into kFrameGenTypeKeys
     int frame_gen_target = -1;  // index into kFrameGenTargetKeys
     int frame_gen_multiplier = -1;  // index into kFrameGenMultiplierKeys
     int volume = -1;            // game volume, 0 to 100
@@ -472,6 +485,8 @@ inline GameSettings LoadGameSettings(uint64_t title_id, const std::string& file 
     result.upscaling_filter = KeyIndex(key("upscaling_filter"), kUpscalingFilterKeys,
                                        int(std::size(kUpscalingFilterKeys)), -1);
     result.refresh = KeyIndex(key("refresh_rate"), kRefreshKeys, int(std::size(kRefreshKeys)), -1);
+    result.frame_gen_type = KeyIndex(key("frame_gen_type"), kFrameGenTypeKeys,
+                                     int(std::size(kFrameGenTypeKeys)), -1);
     result.frame_gen_target = KeyIndex(key("frame_gen_target"), kFrameGenTargetKeys,
                                        int(std::size(kFrameGenTargetKeys)), -1);
     result.frame_gen_multiplier = KeyIndex(key("frame_gen_multiplier"), kFrameGenMultiplierKeys,
@@ -511,6 +526,7 @@ inline bool SaveGameSettings(uint64_t title_id, const GameSettings& value, const
         value.upscaling_filter >= int(std::size(kUpscalingFilterKeys)) ||
         value.refresh >= int(std::size(kRefreshKeys)) || value.language >= int(std::size(kLanguageKeys)) ||
         value.controller >= int(std::size(kControllerKeys)) ||
+        value.frame_gen_type >= int(std::size(kFrameGenTypeKeys)) ||
         value.frame_gen_target >= int(std::size(kFrameGenTargetKeys)) ||
         value.frame_gen_multiplier >= int(std::size(kFrameGenMultiplierKeys)) ||
         value.volume > 100 || value.rng_seed < -1 || value.rng_seed > 0xffffffffLL ||
@@ -530,6 +546,7 @@ inline bool SaveGameSettings(uint64_t title_id, const GameSettings& value, const
     store("resolution", value.resolution, kResolutionKeys);
     store("upscaling_filter", value.upscaling_filter, kUpscalingFilterKeys);
     store("refresh_rate", value.refresh, kRefreshKeys);
+    store("frame_gen_type", value.frame_gen_type, kFrameGenTypeKeys);
     store("frame_gen_target", value.frame_gen_target, kFrameGenTargetKeys);
     store("frame_gen_multiplier", value.frame_gen_multiplier, kFrameGenMultiplierKeys);
     store("language", value.language, kLanguageKeys);
@@ -566,6 +583,7 @@ inline Preferences PreferencesFor(uint64_t title_id, const std::string& file = S
     if (game.refresh >= 0) result.refresh = game.refresh;
     if (game.hud >= 0) result.hud = game.hud == 1;
     if (game.frame_gen >= 0) result.frame_gen = game.frame_gen == 1;
+    if (game.frame_gen_type >= 0) result.frame_gen_type = game.frame_gen_type;
     if (game.frame_gen_target >= 0) result.frame_gen_target = game.frame_gen_target;
     if (game.frame_gen_multiplier >= 0) result.frame_gen_multiplier = game.frame_gen_multiplier;
     if (game.volume >= 0) result.volume = game.volume;

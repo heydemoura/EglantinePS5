@@ -3,12 +3,18 @@ from pathlib import Path
 import struct
 import subprocess
 import sys
-source, output = map(Path, sys.argv[1:])
+# --report: name every anchor that no longer matches (make update), instead of stopping at the first.
+report = '--report' in sys.argv
+source, output = map(Path, [a for a in sys.argv[1:] if a != '--report'])
 port = Path(__file__).resolve().parents[1] / 'headless'
+broken = []
 def adapt(relative, destination, replacements):
     text = (source / relative).read_text()
     for old, new in replacements:
         if text.count(old) != 1:
+            if report:
+                broken.append(f"{relative}: {old[:70]!r} (matches {text.count(old)})")
+                continue
             raise RuntimeError(f"Pinned Vulkan anchor changed: {relative}: {old[:60]}")
         text = text.replace(old, new)
     path = output / destination
@@ -95,61 +101,67 @@ void RasterizerVulkan::DispatchCompute() {"""),
     # command buffer submission: 4,096 exceeds the PS5 GPU watchdog timeout in shader-heavy
     # scenes (VK_ERROR_DEVICE_LOST in Xenoblade 2's cities). CHECK_MASK is the configurable
     # dispatch interval (dev-settings dispatch_draws=N); default 64 draws between hand-offs.
-    ('#ifdef __ANDROID__\n    static constexpr u32 DRAWS_TO_DISPATCH = 512;\n    static constexpr u32 CHECK_MASK = 3;\n#else\n    static constexpr u32 DRAWS_TO_DISPATCH = 4096;\n    static constexpr u32 CHECK_MASK = 7;\n#endif // __ANDROID__\n\n    static_assert(DRAWS_TO_DISPATCH % (CHECK_MASK + 1) == 0);\n',
+    ('#ifdef __ANDROID__\n    static constexpr u32 DRAWS_TO_DISPATCH = 512;\n    static constexpr u32 CHECK_MASK = 3;\n#else\n    // Every 32 draws (was 8): each dispatch woke the worker thread, and Switch 2 titles make\n    // ~55,000 draws a second. A full chunk is dispatched on its own (Scheduler::Record).\n    static constexpr u32 DRAWS_TO_DISPATCH = 4096;\n    static constexpr u32 CHECK_MASK = 31;\n#endif // __ANDROID__\n\n    static_assert(DRAWS_TO_DISPATCH % (CHECK_MASK + 1) == 0);\n',
      '    static constexpr u32 DRAWS_TO_DISPATCH = 512;\n    const u32 CHECK_MASK = ::Eden::Performance::dispatch_mask.load(std::memory_order_relaxed);\n\n'),
     # Where the ~4 us a draw spends goes: six phases under one running clock, each Mark taking the
     # gap since the previous one so they do not overlap. The Timer still wraps the whole function,
     # so a draw that returns early is charged for its unmarked tail and the sum of the six falls
     # short by that amount plus two clock reads per phase. control/scheduler.cpp aside, this is the
     # only place the dispatch's time can be spent - so its six numbers should add up to it.
-    ('''    FlushWork();
-    gpu_memory->FlushCaching();
-
-    GraphicsPipeline* const pipeline{pipeline_cache.CurrentGraphicsPipeline()};
-    if (!pipeline) {
-        return;
+    ('''    namespace Profile = VideoCommon::Nx2Profile;
+    {
+        Profile::Scope scope{Profile::Zone::FlushWork};
+        FlushWork();
+        gpu_memory->FlushCaching();
     }
-    std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
-    // update engine as channel may be different.
-    pipeline->SetEngine(maxwell3d, gpu_memory);
-    if (!pipeline->Configure(is_indexed))
-        return;
-
-    UpdateDynamicStates();
-
-    query_cache.NotifySegment(true);
-    HandleTransformFeedback();
-    query_cache.CounterEnable(VideoCommon::QueryType::ZPassPixelCount64, maxwell3d->regs.zpass_pixel_count_enable);
-    draw_func();''',
-     '''    const ::Eden::Performance::Timer rasterizer_draw_timer(::Eden::Performance::rasterizer_draw);
+''',
+     '''    namespace Profile = VideoCommon::Nx2Profile;
+    const ::Eden::Performance::Timer rasterizer_draw_timer(::Eden::Performance::rasterizer_draw);
     auto phase = ::Eden::Performance::MarkStart();
-    FlushWork();
-    gpu_memory->FlushCaching();
+    {
+        Profile::Scope scope{Profile::Zone::FlushWork};
+        FlushWork();
+        gpu_memory->FlushCaching();
+    }
     ::Eden::Performance::Mark(::Eden::Performance::draw_flush, phase);
-
-    GraphicsPipeline* const pipeline{pipeline_cache.CurrentGraphicsPipeline()};
+'''),
+    ('''        return pipeline_cache.CurrentGraphicsPipeline();
+    }()};
+''',
+     '''        return pipeline_cache.CurrentGraphicsPipeline();
+    }()};
     ::Eden::Performance::Mark(::Eden::Performance::draw_pipeline, phase);
-    if (!pipeline) {
+'''),
+    ('''    pipeline->SetEngine(maxwell3d, gpu_memory);
+    if (Profile::Scope scope{Profile::Zone::Configure}; !pipeline->Configure(is_indexed)) {
+        report_failure("configure failed");
         return;
     }
-    std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
-    // update engine as channel may be different.
-    pipeline->SetEngine(maxwell3d, gpu_memory);
+''',
+     '''    pipeline->SetEngine(maxwell3d, gpu_memory);
     // Waiting for both cache mutexes. SetEngine between them and here is two pointer assignments,
     // and the hold itself carries on through what follows: the phases below measure it.
     ::Eden::Performance::Mark(::Eden::Performance::draw_lock_wait, phase);
-    if (!pipeline->Configure(is_indexed))
+    if (Profile::Scope scope{Profile::Zone::Configure}; !pipeline->Configure(is_indexed)) {
+        report_failure("configure failed");
         return;
+    }
     ::Eden::Performance::Mark(::Eden::Performance::draw_config, phase);
-
-    UpdateDynamicStates();
-
-    query_cache.NotifySegment(true);
-    HandleTransformFeedback();
-    query_cache.CounterEnable(VideoCommon::QueryType::ZPassPixelCount64, maxwell3d->regs.zpass_pixel_count_enable);
+'''),
+    ('''    query_cache.CounterEnable(VideoCommon::QueryType::ZPassPixelCount64, maxwell3d->regs.zpass_pixel_count_enable);
+    {
+        Profile::Scope scope{Profile::Zone::DrawRecord};
+        draw_func();
+    }
+''',
+     '''    query_cache.CounterEnable(VideoCommon::QueryType::ZPassPixelCount64, maxwell3d->regs.zpass_pixel_count_enable);
     ::Eden::Performance::Mark(::Eden::Performance::draw_state, phase);
-    draw_func();
-    ::Eden::Performance::Mark(::Eden::Performance::draw_record, phase);'''),
+    {
+        Profile::Scope scope{Profile::Zone::DrawRecord};
+        draw_func();
+    }
+    ::Eden::Performance::Mark(::Eden::Performance::draw_record, phase);
+'''),
     # A forced release blocks the GPU thread until the fence thread has retired
     # every older fence. Time only that producer-side drain.
     ('    fence_manager.WaitPendingFences(force);',
@@ -207,8 +219,8 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func) {'''),
      '        }\n    });\n    SyncProbe(scheduler, "draw", probe_pipeline);\n}\n\nvoid RasterizerVulkan::DrawIndirect() {'),
     ('void RasterizerVulkan::DrawTexture() {', 'void RasterizerVulkan::DrawTexture() {\n    SCOPE_EXIT { SyncProbe(scheduler, "draw_texture", nullptr); };'),
     ('void RasterizerVulkan::Clear(u32 layer_count) {', 'void RasterizerVulkan::Clear(u32 layer_count) {\n    SCOPE_EXIT { SyncProbe(scheduler, "clear", nullptr); };'),
-    ('    ComputePipeline* const pipeline{pipeline_cache.CurrentComputePipeline()};\n    if (!pipeline) {\n        return;\n    }',
-     '    ComputePipeline* const pipeline{pipeline_cache.CurrentComputePipeline()};\n    if (!pipeline) {\n        return;\n    }\n'
+    ('    ComputePipeline* const pipeline{pipeline_cache.CurrentComputePipeline()};\n    if (!pipeline) {\n        if (kepler_compute->IsNativeMode()) throw Shader::RuntimeError("Native compute pipeline unavailable");\n        return;\n    }',
+     '    ComputePipeline* const pipeline{pipeline_cache.CurrentComputePipeline()};\n    if (!pipeline) {\n        if (kepler_compute->IsNativeMode()) throw Shader::RuntimeError("Native compute pipeline unavailable");\n        return;\n    }\n'
      '    SCOPE_EXIT { SyncProbe(scheduler, "dispatch", pipeline); };'),
 ])
 # Host conditional rendering (VK_EXT_conditional_rendering, dev_vulkan.h hcr_mode): count each
@@ -693,7 +705,7 @@ adapt('src/video_core/vulkan_common/vulkan_wrapper.h', 'include/video_core/vulka
         throw Exception(result);''', '''inline void Check(VkResult result, const char* file = __builtin_FILE(),
                   int line = __builtin_LINE(), const char* operation = __builtin_FUNCTION()) {
     if (result != VK_SUCCESS) {
-        std::fprintf(stderr, "[ProsperoEden] Vulkan failure: %s:%d (%s) VkResult=%d\\n",
+        std::fprintf(stderr, "[EglantinePS5] Vulkan failure: %s:%d (%s) VkResult=%d\\n",
                      file, line, operation, static_cast<int>(result));
         throw Exception(result);'''),
 ])
@@ -852,8 +864,10 @@ configure_phases = [
      '    buffer_cache.SetUniformBuffersState(enabled_uniform_buffer_masks, &uniform_buffer_sizes);\n'
      '    // Sampler and image tables synced, uniform-buffer state set.\n'
      '    ::Eden::Performance::Mark(::Eden::Performance::cfg_sync, since);'),
-    ('    texture_cache.FillImageViews(std::span(views.data(), views.size()), false, Spec::has_images);',
-     '    texture_cache.FillImageViews(std::span(views.data(), views.size()), false, Spec::has_images);\n'
+    ('        texture_cache.FillImageViews(std::span(views.data(), views.size()), false,\n'
+     '                                     Spec::has_images);\n    }\n',
+     '        texture_cache.FillImageViews(std::span(views.data(), views.size()), false,\n'
+     '                                     Spec::has_images);\n    }\n'
      '    // Every texture handle read out of guest memory, every sampler and view filled.\n'
      '    ::Eden::Performance::Mark(::Eden::Performance::cfg_read, since);\n'
      '    long long since_bind = ::Eden::Performance::MarkStart();'),
@@ -1125,11 +1139,11 @@ adapt('src/video_core/renderer_vulkan/present/frame_gen.h',
 adapt('src/video_core/renderer_vulkan/present/frame_gen.cpp', 'vulkan_frame_gen.cpp', [
     ('#include "video_core/vulkan_common/vulkan_device.h"',
      '#include "video_core/vulkan_common/vulkan_device.h"\n#include "diagnostics.h"'),
-    ("""    if (!shaders->IsValid()) {
+    ("""    if (!shaders->IsValid() && Settings::values.frame_gen_type.GetValue() != Settings::FrameGenType::Fsr3) {
         unavailable = true;
         return;
     }""",
-     """    if (!shaders->IsValid()) {
+     """    if (!shaders->IsValid() && Settings::values.frame_gen_type.GetValue() != Settings::FrameGenType::Fsr3) {
         Eden::Report("framegen", "LsfgShaders is not valid; see the lines above");
         unavailable = true;
         return;
@@ -1167,8 +1181,8 @@ adapt('src/video_core/control/scheduler.cpp', 'control_scheduler.cpp', [
      '        auto it = channels.find(channel);\n'
      '        ASSERT(it != channels.end());\n'
      '        channel_state = it->second;\n'
-     '        gpu.BindChannel(channel_state->bind_id);\n'
      '    }\n'
+     '    BindChannel(gpu, channel_state->bind_id);\n'
      '    // Process commands outside the lock to reduce contention.\n'
      '    // Multiple channels can prepare their commands in parallel.\n'
      '    channel_state->payload->dma_pusher.Push(std::move(entries));\n'
@@ -1178,8 +1192,8 @@ adapt('src/video_core/control/scheduler.cpp', 'control_scheduler.cpp', [
      '        auto it = channels.find(channel);\n'
      '        ASSERT(it != channels.end());\n'
      '        channel_state = it->second;\n'
-     '        gpu.BindChannel(channel_state->bind_id);\n'
      '    }\n'
+     '    BindChannel(gpu, channel_state->bind_id);\n'
      '    // Process commands outside the lock to reduce contention.\n'
      '    // Multiple channels can prepare their commands in parallel.\n'
      '    {\n'
@@ -1204,3 +1218,8 @@ for stage in ('vert', 'frag'):
 path = output / 'vulkan_hud_shaders.h'
 if not path.exists() or path.read_text() != shader_header:
     path.write_text(shader_header)
+if broken:
+    print(f"{len(broken)} anchor(s) of the Eden source changed; adapt them in tools/prepare-vulkan-port.py:", file=sys.stderr)
+    for line in broken:
+        print("  " + line, file=sys.stderr)
+    sys.exit(1)

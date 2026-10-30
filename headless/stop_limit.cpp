@@ -83,7 +83,7 @@ void End() noexcept {
 void RestartNow() noexcept {
 #ifdef PS5_NATIVE
     // No stdio here: a thread that is stuck in the stop may hold one of its locks.
-    sceKernelDebugOutText(0, "[ProsperoEden] shutdown: The game did not stop in time; starting ProsperoEden again\n");
+    sceKernelDebugOutText(0, "[EglantinePS5] shutdown: The game did not stop in time; starting EglantinePS5 again\n");
     const std::string& note = state().note; // set once, before any game
     if (!note.empty()) {
         const int fd = open(note.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0666);

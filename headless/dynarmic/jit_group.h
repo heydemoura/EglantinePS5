@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// ProsperoEden: compiled A64 blocks shared by the JITs of one guest process.
+// EglantinePS5: compiled A64 blocks shared by the JITs of one guest process.
 //
 // Every guest core keeps its own JIT (Jit::Impl), emitter and code region, and compiles into its
 // own region in parallel with the other cores; the blocks are published here by location and any

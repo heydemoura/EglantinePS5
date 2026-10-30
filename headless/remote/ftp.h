@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// ProsperoEden - A download's bytes to the drive through the console's own FTP server.
+// EglantinePS5 - A download's bytes to the drive through the console's own FTP server.
 // Copyright (C) 2026 BlackBearReloaded
 //
 // The app does not write a download's file itself: written from a title, gigabytes of it filled

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# ProsperoEden - The launcher's translation catalogs: template and checks.
+# EglantinePS5 - The launcher's translation catalogs: template and checks.
 # Copyright (C) 2026 BlackBearReloaded
 # SPDX-License-Identifier: GPL-3.0-or-later
 """strings.py extract          write tools/launcher/launcher.pot from the text marked in the code
-strings.py new <tag>          start headless/prosperoeden/ui/lang/<tag>.po from the template
-strings.py check              check every catalog in headless/prosperoeden/ui/lang
+strings.py new <tag>          start headless/eglantineps5/ui/lang/<tag>.po from the template
+strings.py check              check every catalog in headless/eglantineps5/ui/lang
 
 The code holds the English text: tr("...") where it is drawn, TR("...") in constant tables (and
 the setting labels of headless/settings_store.h). A catalog is a gettext .po file named after the
@@ -29,7 +29,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-LAUNCHER = ROOT / "headless/prosperoeden"
+LAUNCHER = ROOT / "headless/eglantineps5"
 CATALOGS = LAUNCHER / "ui/lang"
 TEMPLATE = ROOT / "tools/launcher/launcher.pot"
 FONT = LAUNCHER / "ui/fonts/montserrat-medium.pefont"
@@ -82,7 +82,6 @@ NOTES = {
     "STARTING": "Shown over a game's cover while it starts.",
     "Make it yours.": "Headline of the Settings screen.",
     "Your next adventure": "Headline when no game has been played yet.",
-    "PS5 EDITION  /  {0}": "{0} is the version, for example v1.000.030.",
     "{0}/ (NSP or XCI)": "{0} is a folder; NSP and XCI are file types.",
     "Docked": "Console mode: the console as if connected to a TV. Keep it short (about 9 letters).",
     "Handheld": "Console mode: the console as if held in the hands. Keep it short (about 9 letters).",
@@ -121,7 +120,7 @@ NOTES = {
     "Turn on or off": "Button hint: switch the highlighted mod on or off.",
     "Create the folder": "Button hint: make the folder a game's mods go in.",
     "Created {0}. Copy each mod's folder into it.": "{0} is a folder.",
-    "ProsperoEden stopped because of an error. A report was saved to {0}.":
+    "EglantinePS5 stopped because of an error. A report was saved to {0}.":
         "Shown on the home screen after the app crashed and started again; {0} is a file.",
     "Sandboxed (code {0}): app folder only": "The app can read only its own folder; {0} is a number.",
     "Full filesystem": "The app can read every folder of the console.",
@@ -267,9 +266,9 @@ def parse_po(path):
 
 
 def write_catalog(path, texts, translations, language):
-    lines = [f"# ProsperoEden launcher - {language}",
+    lines = [f"# EglantinePS5 launcher - {language}",
              "# English text is the key (msgid); msgstr is the translation. Keep {0} {1} as they are,",
-             "# keep UPPERCASE labels uppercase, and keep names (ProsperoEden, Eden, PS5, Vulkan, OpenGL,",
+             "# keep UPPERCASE labels uppercase, and keep names (EglantinePS5, Eden, PS5, Vulkan, OpenGL,",
              "# AMD FSR, DLC, NSP, XCI, prod.keys, Ryujinx) unchanged.",
              ""]
     for text in sorted(texts, key=str.lower):

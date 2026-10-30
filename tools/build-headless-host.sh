@@ -17,32 +17,19 @@ fi
 scratch=$(cat .local/headless-cache)
 [[ "$scratch" == "$cache_parent"/ps5-eden-headless.* && "$(cat "$scratch/owner")" == "$root" ]]
 eden="$scratch/source"
-# As in prepare-build.sh: a tree unpacked from another archive is another Eden revision.
-if [[ ! -f "$eden/CMakeLists.txt" || $(cat "$eden/.unpacked-from" 2>/dev/null) != eden-67bada77.tar.gz ]]; then
-    python3 - <<'PY'
-import hashlib, json, pathlib
-p = pathlib.Path('.deps/eden-67bada77.tar.gz')
-assert hashlib.sha256(p.read_bytes()).hexdigest() == json.loads(pathlib.Path('UPSTREAM.json').read_text())['archives'][p.name]
-PY
-    if [[ -d $eden/.cache ]]; then rm -rf "$scratch/source-cache" && mv "$eden/.cache" "$scratch/source-cache"; fi
-    rm -rf "$eden"
-    mkdir -p "$eden"
-    tar -xzf .deps/eden-67bada77.tar.gz --strip-components=1 -C "$eden"
-    if [[ -d $scratch/source-cache ]]; then mv "$scratch/source-cache" "$eden/.cache"; fi
-    printf '%s\n' eden-67bada77.tar.gz > "$eden/.unpacked-from"
-fi
-printf '%s\n' '67bada77f8a43a90da2e94e89b8e7da73c256989' > "$eden/GIT-COMMIT"
-printf '%s\n' 'ps5-headless' > "$eden/GIT-REFSPEC"
+# As in prepare-build.sh: the source is the Eglantine submodule.
+bash tools/sync-eden-source.sh "$eden"
 # FFmpeg links configure probes through the compiler driver, not raw ld.
 # Keep the derivative in our cache and regenerate its Makefile when it changes.
 python3 - "$eden" "$scratch/build" <<'PY'
-import pathlib, sys
-source = pathlib.Path('.deps/mirror-67bada77f8a43a90da2e94e89b8e7da73c256989/externals/ffmpeg/CMakeLists.txt')
+import os, pathlib, sys
+jobs = os.environ.get('EDEN_BUILD_JOBS') or str(os.cpu_count())
+source = pathlib.Path('Eglantine/externals/ffmpeg/CMakeLists.txt')
 text = source.read_text()
 for old, new in (
     ('--ld=${CMAKE_LINKER}', '--ld=${CMAKE_C_COMPILER}'),
     ('elseif (NOT (CMAKE_HOST_SYSTEM_PROCESSOR MATCHES CMAKE_SYSTEM_PROCESSOR\n    AND CMAKE_HOST_SYSTEM_NAME MATCHES CMAKE_SYSTEM_NAME))', 'elseif (CMAKE_CROSSCOMPILING)'),
-    ('set(FFmpeg_MAKE_ARGS -j${SYSTEM_THREADS})', 'set(FFmpeg_MAKE_ARGS -j6)'),
+    ('set(FFmpeg_MAKE_ARGS -j${SYSTEM_THREADS})', f'set(FFmpeg_MAKE_ARGS -j{jobs})'),
 ):
     assert text.count(old) == 1, old
     text = text.replace(old, new)
@@ -65,7 +52,7 @@ cmake -S "$eden" -B "$scratch/build" -G Ninja \
 python3 -B "$root/headless/check_slab_lifetime.py" \
     "$scratch/build/headless/include/core/hle/kernel/slab_helpers.h" \
     "$scratch/source/src/core/hle/kernel/slab_helpers.h"
-cmake --build "$scratch/build" --target eden-headless eden-romfs-check eden-devices-check eden-scalar-check eden-memory-check eden-ryujinx-check eden-mods-check eden-shader-cache-check eden-settings-check eden-patch-library-check eden-update-check eden-update-files-check eden-profiles-check eden-save-sync-check -j 6
+cmake --build "$scratch/build" --target eden-headless eden-romfs-check eden-devices-check eden-scalar-check eden-memory-check eden-ryujinx-check eden-mods-check eden-shader-cache-check eden-settings-check eden-patch-library-check eden-update-check eden-update-files-check eden-profiles-check eden-save-sync-check -j "${EDEN_BUILD_JOBS:-$(nproc)}"
 python3 -B "$root/tools/check-sparse-header.py" "$scratch/build"
 python3 -B "$root/tools/check-multiplayer-headers.py" "$scratch/build"
 python3 -B "$root/tools/check-heap-growth.py"

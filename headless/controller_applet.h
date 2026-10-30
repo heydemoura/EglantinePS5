@@ -128,7 +128,7 @@ public:
             Report("controllers", "This game only takes the handheld controller: it gets one in Docked mode "
                                   "too. If it refuses it, set its Console mode to Handheld in the Library");
         else if (!named && !parameters.allow_handheld)
-            Report("controllers", "This game names no controller that ProsperoEden provides: it gets a Pro Controller");
+            Report("controllers", "This game names no controller that EglantinePS5 provides: it gets a Pro Controller");
         callback(true);
     }
 

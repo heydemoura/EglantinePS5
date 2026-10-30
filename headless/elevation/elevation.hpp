@@ -1,5 +1,5 @@
 /*
- * ProsperoEden - PS5-Lapy-JB-Daemon cooperative elevation client.
+ * EglantinePS5 - PS5-Lapy-JB-Daemon cooperative elevation client.
  * Copyright (C) 2026 BlackBearReloaded
  * SPDX-License-Identifier: GPL-3.0-or-later
  */

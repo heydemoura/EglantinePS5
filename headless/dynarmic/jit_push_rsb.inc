@@ -1,4 +1,4 @@
-    // ProsperoEden: EmitX64::PushRSBHelper with the return target linked through the JitGroup
+    // EglantinePS5: EmitX64::PushRSBHelper with the return target linked through the JitGroup
     // (jit_group.h): `mov rcx, imm64` with the immediate 8-byte aligned, relinked atomically.
     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
     ASSERT(args[0].IsImmediate());

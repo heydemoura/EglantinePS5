@@ -55,7 +55,7 @@
                 auto map = runtime.DownloadStagingBuffer(image.unswizzled_size_bytes, true);
                 // Pin until CPU publication, even if later recording submits work.
                 gc_downloads.emplace_back(id, map);
-                const auto copies = FixSmallVectorADL(FullDownloadCopies(image.info));
+                const auto copies = FullDownloadCopies(image.info);
                 image.DownloadMemory(map, copies);
                 bytes += image.unswizzled_size_bytes;
                 usage -= ReclaimedBytes(image);
@@ -78,7 +78,7 @@
                 return entry.first == id;
             });
             if (it != gc_downloads.end()) {
-                const auto copies = FixSmallVectorADL(FullDownloadCopies(image.info));
+                const auto copies = FullDownloadCopies(image.info);
                 SwizzleImage(*gpu_memory, image.gpu_addr, image.info, copies,
                              it->second.mapped_span, swizzle_data_buffer);
                 runtime.FreeDeferredStagingBuffer(it->second);

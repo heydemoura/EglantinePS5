@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Build and verify the pinned upstream Lapy helper for ProsperoEden."""
+"""Build and verify the pinned upstream Lapy helper for EglantinePS5."""
 
 import hashlib
 import json
@@ -11,7 +11,7 @@ import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[1]
-TITLE = "PPSA99008"
+TITLE = "PPSA98515"
 LAPY = ROOT / ".deps/PS5-Lapy-JB-Daemon-57fcc19"
 PS5LOG = ROOT / ".deps/lapy-ps5log-1ae1f918"
 SDK = ROOT / ".deps/lapy-ps5-payload-sdk-v0.42"

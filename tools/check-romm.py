@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ProsperoEden - Check of the save sync and the RomM backends against real RomM servers in Docker.
+# EglantinePS5 - Check of the save sync and the RomM backends against real RomM servers in Docker.
 # Copyright (C) 2026 BlackBearReloaded
 # SPDX-License-Identifier: GPL-3.0-or-later
 """check-romm.py [RomM version ...]
@@ -162,7 +162,7 @@ def ask(url, path, body=None, user=None, method=None):
 
 def put_cover(url, rom_id, user):
     """Sets a game's cover in RomM (its artwork), as a player would in its web interface."""
-    boundary = "prosperoeden-check"
+    boundary = "eglantineps5-check"
     body = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"artwork\"; filename=\"cover.png\"\r\n"
             f"Content-Type: image/png\r\n\r\n").encode() + cover() + f"\r\n--{boundary}--\r\n".encode()
     request = urllib.request.Request(f"{url}/api/roms/{rom_id}", data=body, method="PUT")
@@ -210,7 +210,7 @@ def build(work):
 
 def run_version(version, binary, work):
     """Starts a RomM of `version`, checks against it, and takes it down; True when it passed."""
-    project = "prosperoeden-romm-check-" + re.sub(r"[^a-z0-9]", "", version.lower())
+    project = "eglantineps5-romm-check-" + re.sub(r"[^a-z0-9]", "", version.lower())
     library = work / f"library-{version}"
     for name, size in GAMES.items():
         path = library / "roms/switch" / name

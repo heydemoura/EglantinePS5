@@ -306,8 +306,8 @@ class RommSaves final : public SaveStore {
             device_ = Text(state, "device_id");
             return true;
         }
-        const Json payload = {{"name", "ProsperoEden (PS5)"}, {"platform", "ps5"}, {"client", "ProsperoEden"},
-                              {"hostname", "prosperoeden-" + ConsoleId(folder_)}, {"sync_mode", "api"},
+        const Json payload = {{"name", "EglantinePS5 (PS5)"}, {"platform", "ps5"}, {"client", "EglantinePS5"},
+                              {"hostname", "eglantineps5-" + ConsoleId(folder_)}, {"sync_mode", "api"},
                               {"allow_existing", true}};
         Client::Answer answer;
         if (!client_->Send("POST", "/api/devices", payload.dump(), &answer, error, stopped_)) return false;
@@ -361,9 +361,9 @@ bool PairStart(const nlohmann::json& settings, const std::string& folder, Pairin
     entry.erase("password");
     std::unique_ptr<Client> client = Client::Make(entry, "save-sync.json", error);
     if (!client) return false;
-    const Json payload = {{"client_device_identifier", "prosperoeden-" + ConsoleId(folder)},
-                          {"name", "ProsperoEden (PS5)"},
-                          {"client", "ProsperoEden"},
+    const Json payload = {{"client_device_identifier", "eglantineps5-" + ConsoleId(folder)},
+                          {"name", "EglantinePS5 (PS5)"},
+                          {"client", "EglantinePS5"},
                           {"platform", "ps5"},
                           {"requested_scopes", kScopes}};
     Client::Answer answer;
