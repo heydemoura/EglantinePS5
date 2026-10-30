@@ -209,7 +209,7 @@ void Launcher::layout_notes(Canvas &c)
     {
         y += 20.0f;
         NoteLine out;
-        out.text = tr("The rest is on the app's page on homebrew.page.");
+        out.text = tr("The rest is on the app's page on prosperostore.net.");
         out.y = y;
         out.height = std::round(text_size(theme::kSmall) * 1.6f);
         out.size = theme::kSmall;

@@ -43,7 +43,7 @@ ONE = re.compile(r'"((?:[^"\\]|\\.)*)"')
 # What a translator cannot tell from the text alone.
 NOTES = {
     "Update available": "Notification title: a newer release of this app is listed (not a game update).",
-    "Version {0} is on homebrew.page": "{0}: the newer release's number, for example 1.000.050; homebrew.page is a site's name and stays as it is.",
+    "Version {0} is on prosperostore.net": "{0}: the newer release's number, for example 1.000.050; prosperostore.net is a site's name and stays as it is.",
     "Version {0} is ready to install.": "Update dialog: a newer release of this app; {0} is its number, for example 1.000.060.",
     "Download size: {0}": "{0} is a size such as 36.4 MB.",
     "Your games, saves and settings are kept.": "Update dialog: installing the new app version keeps the player's files.",
@@ -57,7 +57,7 @@ NOTES = {
     "What's new": "Button on the update dialog: opens the new release's notes (what changes in it). Keep it short.",
     "What's new in version {0}": "Title of the release notes view; {0} is the new version, for example 1.000.080.",
     "Scroll": "Button hint: move through a long text (Up/Down).",
-    "The rest is on the app's page on homebrew.page.": "Shown at the end of release notes that were cut short; homebrew.page is a site's name and stays as it is.",
+    "The rest is on the app's page on prosperostore.net.": "Shown at the end of release notes that were cut short; prosperostore.net is a site's name and stays as it is.",
     "Select": "Button hint: choose the highlighted item (not the Select button).",
     "Back": "Button hint: go back one screen.",
     "Change": "Button hint: change the highlighted setting.",

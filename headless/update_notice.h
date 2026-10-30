@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Updates: once per launch the app asks the homebrew.page catalog whether a newer release of
+// Updates: once per launch the app asks the prosperostore.net catalog whether a newer release of
 // itself is listed, and can replace itself with it when the player says so.
 //
 // Both are the PS5 Native App Boilerplate's self-update kit (headless/update_check, see its

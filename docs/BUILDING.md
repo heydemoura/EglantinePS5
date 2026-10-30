@@ -223,7 +223,7 @@ A release is made by pushing the tag: the workflow builds, attests and publishes
 `SHA256SUMS`. Do not attach files to a release by hand. With no release for the tag, the workflow
 creates it. A release that already exists without a ZIP (notes written in advance, or a draft)
 gets the workflow's ZIP and `SHA256SUMS`, and keeps its title and notes. A release that already
-has a ZIP keeps its files (the catalog at homebrew.page records each release ZIP's checksum, so
+has a ZIP keeps its files (the catalog at prosperostore.net records each release ZIP's checksum, so
 a published ZIP is never replaced): the run ends successfully with a warning that those files
 were not published by it and may have no attestation.
 

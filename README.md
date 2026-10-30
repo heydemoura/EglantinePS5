@@ -63,7 +63,7 @@ Local-wireless multiplayer through Eden rooms is new in v1.000.000 and experimen
 - **Shader cache** - shaders compiled in earlier sessions are loaded when a game starts, so an effect stutters only the first time it appears.
 - **In-game shortcuts** - a performance overlay (Touchpad + R1), and Touchpad + L1 to end the game and return to the library. Leaving takes ten seconds at most, also while a game is still loading.
 - **Settings in one place** - a single JSON file under `/data/eglantineps5`, with game volume, mute, and detailed logging options. Logs keep the previous session.
-- **Updates from the menu** - when a newer release is listed on [homebrew.page](https://homebrew.page/ps5), EglantinePS5 offers to install it each time it opens; **Skip** keeps the current version; see [Updating](#updating).
+- **Updates from the menu** - when a newer release is listed on [prosperostore.net](https://prosperostore.net/app/PPSA98515/), EglantinePS5 offers to install it each time it opens; **Skip** keeps the current version; see [Updating](#updating).
 - **Crash reports** - if EglantinePS5 stops because of an error, it saves a report with that session's logs, starts again and shows where the report is.
 - **Controllers, audio, and saves** - up to four DualSense controllers (one per signed-in PS5 user) with rumble and motion controls, game audio, and save data work out of the box. A game that gives a player a single Joy-Con is played with the whole DualSense: the shapes are that Joy-Con's four buttons, the D-pad and either stick are its stick, and L1/R1 and L2/R2 are its shoulder buttons. When the game has the Joy-Con held sideways, the DualSense is still held as usual: the stick, the buttons and the motion sensors are turned to match.
 - **Controller type per game** - some games take a Pro Controller and then only work with another controller. In **Library > Game settings > Controls**, **Controller type** gives the game a Pro Controller, the Handheld controller, Dual Joy-Cons, a Left Joy-Con or a Right Joy-Con. Left on **Automatic**, the game gets what it takes, a Pro Controller first.
@@ -147,10 +147,10 @@ Keys, firmware and games that an early version kept inside the app's folder (`/d
 
 Close EglantinePS5 first. Your settings, saves, covers and logs are in `/data/eglantineps5`, outside the app, so an update keeps them. Afterwards the About screen shows the version that is running.
 
-Once each time it opens, EglantinePS5 asks [homebrew.page](https://homebrew.page/ps5) which release of it is listed there. The request carries the app's title ID and nothing else. If the listed release is newer than the one running, a dialog offers it, with its version and download size:
+Once each time it opens, EglantinePS5 asks [prosperostore.net](https://prosperostore.net/app/PPSA98515/) which release of it is listed there. The request carries the app's title ID and nothing else. If the listed release is newer than the one running, a dialog offers it, with its version and download size:
 
 - **Update now** downloads the release ZIP from its GitHub release, checks it against the SHA-256 in the catalog's signed list, and unpacks it beside the app. A ring shows how far it is and the time left; Circle cancels, and nothing has changed until the end. Then EglantinePS5 closes, the update helper (`self-updater.elf`, sent to the console's payload loader on port 9021) replaces the app's files, and the console shows a notification. Open EglantinePS5 again to use the new version. The version it replaced is kept; see [Going back to the previous version](#going-back-to-the-previous-version).
-- **What's new** (when the release has notes) shows what changes in it before you decide: the release notes as homebrew.page lists them. Up/Down scroll, L1/R1 jump a page, Cross updates and Circle goes back to the offer. Triangle opens them from the offer too.
+- **What's new** (when the release has notes) shows what changes in it before you decide: the release notes as prosperostore.net lists them. Up/Down scroll, L1/R1 jump a page, Cross updates and Circle goes back to the offer. Triangle opens them from the offer too.
 - **Skip** keeps the version you have. The dialog shows again the next time EglantinePS5 opens, not when you come back from a game.
 
 If the download or the unpacking fails, the dialog says why and offers **Try again**; the app stays as it was. Without a network, or without an answer, nothing is shown. When EglantinePS5 cannot install the release itself (no payload loader, or an install it cannot find), the menu says **Update available** at the top right for ten seconds instead, and the steps below still work:
@@ -416,7 +416,7 @@ A bug fix for v1.000.090. If you are on v1.000.090, update.
 
 ## Changes in v1.000.060
 
-- **Updates from the menu.** When a newer release is listed on homebrew.page, EglantinePS5 offers it each time it opens. **Update now** downloads and checks it, unpacks it beside the app, then closes so the update helper can replace its files; **Skip** keeps the current version until the next time it opens. Your saves, settings and own files in the app folder are kept. See [Updating](#updating).
+- **Updates from the menu.** When a newer release is listed on prosperostore.net, EglantinePS5 offers it each time it opens. **Update now** downloads and checks it, unpacks it beside the app, then closes so the update helper can replace its files; **Skip** keeps the current version until the next time it opens. Your saves, settings and own files in the app folder are kept. See [Updating](#updating).
 - **Lapy elevation included.** EglantinePS5 carries its own one-shot helper built from upstream Lapy and sends it over the local ELF loader on port 9021; loading Lapy separately is no longer needed.
 - **The elevation helper no longer crashes when EglantinePS5 starts.** Its start-up runs on one thread, and it is built from a corrected upstream release.
 
@@ -427,7 +427,7 @@ A bug fix for v1.000.090. If you are on v1.000.090, update.
 - **Settings per game.** A game's settings now have Video, Performance, Audio, Controls and Language; each value follows Settings until you choose another. See [Settings per game](#settings-per-game).
 - **Performance settings.** **Settings > Performance** has seven switches that trade accuracy for speed, for every game or for one. See [Performance settings](#performance-settings).
 - **Cheats chosen one by one.** A mod that lists several cheats shows each under it with its own switch, and only the chosen ones run. See [Mods](#mods).
-- **Update notice.** When a newer release is listed on homebrew.page, the menu says so at the top right for ten seconds. Nothing is downloaded or installed. See [Updating](#updating).
+- **Update notice.** When a newer release is listed on prosperostore.net, the menu says so at the top right for ten seconds. Nothing is downloaded or installed. See [Updating](#updating).
 - **Leaving a game takes ten seconds at most.** If a game has not stopped ten seconds after Touchpad + L1, or after it ended by itself, EglantinePS5 starts again and opens at the menu. Some games took minutes to close.
 - **Touchpad + L1 works while a game loads.** A load that hangs can be left; before, the only way out was closing EglantinePS5.
 - **A game's controller screen always gets an answer.** A game that takes only the handheld controller gets it in Docked mode too, and a game that names no controller gets a Pro Controller. Both used to leave the game waiting.

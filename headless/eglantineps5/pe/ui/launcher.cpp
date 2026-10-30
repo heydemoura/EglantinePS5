@@ -432,7 +432,7 @@ void Launcher::draw_update_notice(Canvas &c)
     list.line(cx + 8.0f, cy - 2.0f, cx, cy - 10.0f, 2.6f, theme::kLime);
     text_shrink(c, tr("Update available"), panel.x + 88.0f, baseline(panel.y + 18.0f, 34.0f, theme::kText24),
                 theme::kText24, theme::kTitle, panel.w - 112.0f);
-    text_shrink(c, fill(tr("Version {0} is on homebrew.page"), {update_version_}), panel.x + 88.0f,
+    text_shrink(c, fill(tr("Version {0} is on prosperostore.net"), {update_version_}), panel.x + 88.0f,
                 baseline(panel.y + 54.0f, 30.0f, theme::kSmall), theme::kSmall, theme::kCopy,
                 panel.w - 112.0f);
     // The time it has left.

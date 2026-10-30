@@ -34,7 +34,7 @@ enum class Key : std::uint8_t
     right,
 };
 
-// A newer release of the app, listed on homebrew.page.
+// A newer release of the app, listed on prosperostore.net.
 struct UpdateOffer
 {
     std::string version;      // its name: "v1.000.060"

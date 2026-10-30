@@ -284,7 +284,7 @@ jobs:
               --title "EglantinePS5 $GITHUB_REF_NAME" --notes-file dist/release-notes.md \
               "dist/EglantinePS5-$GITHUB_REF_NAME.zip" dist/SHA256SUMS
           elif grep -qi '\.zip$' <<< "$assets"; then
-            # A published ZIP is never replaced or deleted: the catalog at homebrew.page records
+            # A published ZIP is never replaced or deleted: the catalog at prosperostore.net records
             # each release ZIP's checksum.
             echo "::warning title=Release files not from this run::A release for $GITHUB_REF_NAME already has a ZIP; it was not replaced. Its files were not published by this run and may have no attestation."
           else

@@ -17,7 +17,7 @@ update_check_result Decide(const std::string& json, const char* installed) {
 std::string Answer(const char* status, const char* content_version, const char* version) {
     std::string json = std::string("{\"title_id\":\"PPSA98515\",\"status\":\"") + status + "\",\"content_version\":";
     json += content_version ? std::string("\"") + content_version + "\"" : std::string("null");
-    json += std::string(",\"version\":\"") + version + "\",\"page\":\"https://homebrew.page/ps5/eglantineps5\"}";
+    json += std::string(",\"version\":\"") + version + "\",\"page\":\"https://prosperostore.net/app/PPSA98515/\"}";
     return json;
 }
 } // namespace
@@ -31,7 +31,7 @@ int main() {
     // The request names the title and nothing else.
     char url[96];
     assert(update_check_url(url, sizeof(url), "PPSA98515") != 0);
-    assert(std::strcmp(url, "https://homebrew.page/api/v1/apps/PPSA98515.json") == 0);
+    assert(std::strcmp(url, "https://prosperostore.net/api/v1/apps/PPSA98515.json") == 0);
     assert(update_check_url(url, sizeof(url), "../PPSA98515") == 0);
 
     // A newer release is listed: its name is what the notification shows.

@@ -1969,10 +1969,10 @@ msgstr "Los datos guardados del perfil se sincronizan como {0} desde ahora."
 msgid "The profile's save data syncs with the server from now on."
 msgstr "Los datos guardados del perfil se sincronizan con el servidor desde ahora."
 
-#. Shown at the end of release notes that were cut short; homebrew.page is a site's name and stays as it is.
+#. Shown at the end of release notes that were cut short; prosperostore.net is a site's name and stays as it is.
 #: pe/ui/update.cpp
-msgid "The rest is on the app's page on homebrew.page."
-msgstr "El resto está en la página de la app en homebrew.page."
+msgid "The rest is on the app's page on prosperostore.net."
+msgstr "El resto está en la página de la app en prosperostore.net."
 
 #: pe/ui/save_sync.cpp
 msgid "The server does not have {0}."
@@ -2125,10 +2125,10 @@ msgstr "Usar esta carpeta"
 msgid "Version {0}"
 msgstr "Versión {0}"
 
-#. {0}: the newer release's number, for example 1.000.050; homebrew.page is a site's name and stays as it is.
+#. {0}: the newer release's number, for example 1.000.050; prosperostore.net is a site's name and stays as it is.
 #: pe/ui/launcher.cpp
-msgid "Version {0} is on homebrew.page"
-msgstr "La versión {0} está en homebrew.page"
+msgid "Version {0} is on prosperostore.net"
+msgstr "La versión {0} está en prosperostore.net"
 
 #. Update dialog: a newer release of this app; {0} is its number, for example 1.000.060.
 #: pe/ui/update.cpp
