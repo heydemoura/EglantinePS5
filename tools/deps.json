@@ -69,7 +69,7 @@
       "name": "boilerplate",
       "about": "PS5 Native App Boilerplate: Payload SDK v0.42, runtime libc.prx and the native packaging tool",
       "kind": "git",
-      "url": "https://github.com/blackbearreloaded/ps5-native-app-boilerplate.git",
+      "url": "https://github.com/drakmor/ps5-native-app-boilerplate.git",
       "commit": "dd44bbdc75437332ed22e3ba95126733419ef25a",
       "path": "../ps5-native-app-boilerplate",
       "setup": ["bash", "tools/setup-native-dependencies.sh"],
@@ -79,7 +79,7 @@
       "name": "lapy-owned-helper",
       "about": "Lapy one-shot elfldr owned-root helper with guarded target lifetime and balanced vnode ownership",
       "kind": "git",
-      "url": "https://github.com/darkxex/PS5-Lapy-JB-Daemon.git",
+      "url": "https://github.com/mpereiraesaa/PS5-Lapy-JB-Daemon.git",
       "commit": "57fcc19b7f57e46c823d6f2a6c6233ebf3288079",
       "path": ".deps/PS5-Lapy-JB-Daemon-57fcc19"
     },
