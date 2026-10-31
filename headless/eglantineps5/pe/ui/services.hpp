@@ -670,6 +670,14 @@ class Services
     };
     virtual std::string nfs_shares() { return {}; }
     virtual std::optional<NfsResult> edit_nfs_shares(const std::atomic<bool>& /*stop*/) { return std::nullopt; }
+    // A game on a network share is read before it starts (its folders listed, which takes a while the first time):
+    // whether this one is, and the reading itself, counting the folders and files it has seen. False when `stop` ended it.
+    virtual bool game_needs_prepare(const std::string& /*file*/) { return false; }
+    // `expected` is the files it will see, when an earlier reading of the same game knew (else it stays 0).
+    virtual bool prepare_game(const std::string& /*file*/, const std::atomic<bool>& /*stop*/,
+                              std::atomic<unsigned>& /*folders*/, std::atomic<unsigned>& /*files*/,
+                              std::atomic<unsigned>& /*expected*/)
+    { return true; }
     virtual bool can_launch_game() { return true; }
 
     // ---- images ----

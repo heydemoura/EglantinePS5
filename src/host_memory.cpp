@@ -527,20 +527,29 @@ void HostMemory::ClearBackingRegion(size_t offset, size_t length, u32 fill) {
         throw std::out_of_range("Backing clear range");
     if (length) std::memset(backing_base + offset, fill, length);
 }
-// Eden calls these only while a page table uses VirtualBasePointer() as its fastmem
-// arena. Without a window they are rejected rather than presented as no-ops.
+// Eden asks for these while a page table uses VirtualBasePointer() as its fastmem arena. Without a window (the
+// window is off on the console) there is no arena to change: the page table, which Eden has already updated, is what
+// serves the guest's memory, so the request has nothing left to do. It used to be an error; a Switch 2 program made
+// the session fail with it before it had started. The first one is written to the log.
+static void NoWindow(const char* what) noexcept {
+    static std::atomic<bool> told{false};
+    if (!told.exchange(true)) {
+        std::fprintf(stderr, "EDEN_HOST_MEMORY %s without a fastmem window: ignored\n", what);
+        std::fflush(stderr);
+    }
+}
 void HostMemory::Map(size_t virtual_offset, size_t host_offset, size_t length, MemoryPermission perms, bool) {
-    if (!impl || !impl->window) throw std::logic_error("Native aliases unavailable without a fastmem window");
+    if (!impl || !impl->window) return NoWindow("map");
     if (host_offset > backing_size || length > backing_size - host_offset)
         throw std::out_of_range("Backing map range");
     impl->window->Map(virtual_offset, host_offset, length, Access(perms));
 }
 void HostMemory::Unmap(size_t virtual_offset, size_t length, bool) {
-    if (!impl || !impl->window) throw std::logic_error("Native aliases unavailable without a fastmem window");
+    if (!impl || !impl->window) return NoWindow("unmap");
     impl->window->Unmap(virtual_offset, length);
 }
 void HostMemory::Protect(size_t virtual_offset, size_t length, MemoryPermission perms) {
-    if (!impl || !impl->window) throw std::logic_error("Native protection unavailable without a fastmem window");
+    if (!impl || !impl->window) return NoWindow("protect");
     impl->window->Protect(virtual_offset, length, Access(perms));
 }
 void HostMemory::EnableDirectMappedAddress() {

@@ -101,6 +101,10 @@
 #include "libnfs-raw-mount.h"
 #include "libnfs-private.h"
 
+/* EglantinePS5: the entries of listings received so far, for the progress of a big folder. */
+unsigned long long libnfs_entries_seen;
+
+
 static uint64_t
 specdata3_to_rdev(struct specdata3 *specdata)
 {
@@ -2805,6 +2809,7 @@ nfs3_opendir_2_cb(struct rpc_context *rpc, int status, void *command_data,
 	entry =res->READDIR3res_u.resok.reply.entries;
 	while (entry != NULL) {
 		nfsdirent = calloc(1, sizeof(struct nfsdirent));
+		__atomic_fetch_add(&libnfs_entries_seen, 1, __ATOMIC_RELAXED);
 		if (nfsdirent == NULL) {
 			data->cb(-ENOMEM, nfs, "Failed to allocate dirent",
                                  data->private_data);
@@ -2959,6 +2964,7 @@ nfs3_opendir_cb(struct rpc_context *rpc, int status, void *command_data,
                 memset(&attr, 0, sizeof(attr));
 
 		nfsdirent = calloc(1, sizeof(struct nfsdirent));
+		__atomic_fetch_add(&libnfs_entries_seen, 1, __ATOMIC_RELAXED);
 		if (nfsdirent == NULL) {
 			data->cb(-ENOMEM, nfs, "Failed to allocate dirent",
                                  data->private_data);

@@ -204,7 +204,7 @@ msgstr ""
 msgid "BUTTON MAPPING"
 msgstr ""
 
-#: pe/ui/pairing.cpp, pe/ui/update.cpp
+#: pe/ui/pairing.cpp, pe/ui/remote.cpp, pe/ui/update.cpp
 msgid "Cancel"
 msgstr ""
 
@@ -628,6 +628,10 @@ msgstr ""
 
 #: pe/ui/multiplayer.cpp
 msgid "Enter a UDP port between 1 and 65535."
+msgstr ""
+
+#: pe/ui/remote.cpp
+msgid "Estimating the time"
 msgstr ""
 
 #: eden_services.cpp
@@ -1334,6 +1338,10 @@ msgstr ""
 msgid "ON THIS CONSOLE"
 msgstr ""
 
+#: pe/ui/remote.cpp
+msgid "Only the first time takes long: the next start is at once."
+msgstr ""
+
 #. Short tag on a folder row.
 #: pe/ui/browse.cpp
 msgid "OPEN"
@@ -1573,6 +1581,10 @@ msgstr ""
 
 #: pe/ui/remote.cpp
 msgid "Reading the game lists..."
+msgstr ""
+
+#: pe/ui/remote.cpp
+msgid "Reading the game's files from the server"
 msgstr ""
 
 #: pe/ui/remote.cpp, pe/ui/settings.cpp
@@ -2037,6 +2049,10 @@ msgstr ""
 msgid "The profile's save data syncs with the server from now on."
 msgstr ""
 
+#: pe/ui/remote.cpp
+msgid "The reading you cancelled is still ending. Its files are kept; try again in a moment."
+msgstr ""
+
 #. Shown at the end of release notes that were cut short; prosperostore.net is a site's name and stays as it is.
 #: pe/ui/update.cpp
 msgid "The rest is on the app's page on prosperostore.net."
@@ -2316,6 +2332,10 @@ msgstr ""
 #. {0} is how many DLC (add-on content) a game has installed.
 #: eden_services.cpp, host/fake_services.cpp
 msgid "{0} DLC"
+msgstr ""
+
+#: pe/ui/remote.cpp
+msgid "{0} folders, {1} files"
 msgstr ""
 
 #. Exactly one game. In a language with more than two plural forms, word it so that it reads well with any number (Games: {0}).

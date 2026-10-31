@@ -61,6 +61,8 @@ Launcher::~Launcher()
     if (seed_edit_.valid()) seed_edit_.wait();
     nfs_edit_stop_ = true;
     if (nfs_edit_.valid()) nfs_edit_.wait();
+    prepare_stop_ = true;
+    if (prepare_.valid()) prepare_.wait();
     // The game list may still be reading; it uses the services this launcher was given.
     if (scan_.valid())
         scan_.wait();
@@ -184,6 +186,15 @@ void Launcher::start_game(const std::string &file, const std::string &title, con
         cue(Cue::error);
         return;
     }
+    if (services_.game_needs_prepare(file)) {
+        begin_prepare(file, title, cover);
+        return;
+    }
+    launch_game(file, title, cover);
+}
+
+void Launcher::launch_game(const std::string &file, const std::string &title, const std::string &cover)
+{
     services_.will_play(file);
     selected_game_ = services_.game_path(file);
     launch_title_ = title;
@@ -197,6 +208,17 @@ void Launcher::press(Key key)
 {
     if (!selected_game_.empty())
         return; // a game is starting
+    if (modal_ == Modal::preparing)
+    {
+        // The reading of a big folder is one call that cannot be cut: the screen closes now, the reading ends by itself
+        // (what it has listed is kept) and the game is not started.
+        if (key == Key::circle)
+        {
+            prepare_stop_ = true;
+            close_modal();
+        }
+        return;
+    }
     if (modal_ == Modal::game)
         return press_game(key);
     if (modal_ == Modal::mods)
@@ -259,6 +281,7 @@ void Launcher::update(float dt)
     update_multiplayer();
     update_game_options();
     update_nfs();
+    update_prepare(dt);
     update_controllers(dt);
     transition_.update(dt);
     press_ = std::max(0.0f, press_ - dt / 0.18f);
@@ -518,6 +541,8 @@ void Launcher::draw(gfx::DrawList &list)
             draw_update(c, opened);
         else if (modal_shown_ == Modal::download)
             draw_download(c, opened);
+        else if (modal_shown_ == Modal::preparing)
+            draw_prepare(c, opened);
         else if (modal_shown_ == Modal::source)
             draw_choice(c, opened);
         else if (modal_shown_ == Modal::save_sync)

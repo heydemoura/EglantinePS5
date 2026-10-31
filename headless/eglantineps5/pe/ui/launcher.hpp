@@ -91,6 +91,7 @@ class Launcher
         sync_setup,   // Settings > Save sync: the profiles and their servers (pairing.cpp)
         pairing,      // a profile paired with a server by a QR code (pairing.cpp)
         multiplayer,
+        preparing,    // a game on a network share, read before it starts (remote.cpp)
     };
     // The update dialog's steps: the offer, installing, stopping it, closing for the helper to
     // finish, and a failure.
@@ -117,6 +118,11 @@ class Launcher
     void launch(const std::string &file, const std::string &title, const std::string &cover);
     // Starts it now.
     void start_game(const std::string &file, const std::string &title, const std::string &cover);
+    void launch_game(const std::string &file, const std::string &title, const std::string &cover);
+    // A game on a network share: read before it starts, with a screen that says how far it is.
+    void begin_prepare(const std::string &file, const std::string &title, const std::string &cover);
+    void update_prepare(float dt);
+    void draw_prepare(Canvas &c, float open);
     void draw_screen(Canvas &c, Screen screen);
     void draw_frame(Canvas &c, const char *title, const char *copy);
     void draw_footer(Canvas &c, const Hint *hints, int count);
@@ -419,6 +425,11 @@ class Launcher
     ListView mod_rows_;
     int game_options_ = 0;          // the category a game's own settings dialog shows
     ListView option_rows_;          // its rows
+    std::atomic<bool> prepare_stop_{false};
+    std::future<bool> prepare_;                    // the reading, while it runs
+    std::atomic<unsigned> prepare_folders_{0}, prepare_files_{0}, prepare_expected_{0};
+    std::string prepare_file_, prepare_title_, prepare_cover_;
+    float prepare_time_ = 0.0f;
     std::atomic<bool> nfs_edit_stop_{false};
     std::future<std::optional<Services::NfsResult>> nfs_edit_; // the keyboard and the connection, while they run
     std::string nfs_shares_;                                   // the addresses kept

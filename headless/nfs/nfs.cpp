@@ -12,6 +12,7 @@
  */
 #include "nfs.h"
 #include "../diagnostics.h"
+#include "../ntfs/ntfsfs.h"
 
 #include <nfsc/libnfs.h>
 #include <nfsc/libnfs-raw.h>
@@ -100,6 +101,8 @@ constexpr size_t kCacheTotal = 128u << 20;           // read ahead in memory, fo
 constexpr size_t kCacheLeast = 32u << 20;            // a file always gets at least this much
 constexpr uint64_t kReadAhead = 16u << 20;           // files bigger than this get a thread that reads ahead
 constexpr uint32_t kTypeReg = 1, kTypeDir = 2;
+// A listing is read in answers of this size (libnfs asks for 8 KB: a folder of thousands of files took thousands of calls).
+constexpr uint32_t kReaddirBytes = 1u << 20;
 
 struct Share
 {
@@ -157,6 +160,7 @@ struct File
     bool eof = false, err = false;
     Cache *cache = nullptr;
     int gen = 0;
+    NtfsFile *nt = nullptr; // a file on an NTFS disk (ntfs/ntfsfs.h)
 };
 
 File g_files[kMaxFiles];
@@ -249,7 +253,14 @@ std::atomic<bool> g_alias_any{false};
 // The /nfs path a call is about: the path itself under /nfs, or the one an alias stands for. False for any other path.
 bool redirect(const char *path, std::string &out)
 {
-    if (!path || !g_any.load(std::memory_order_relaxed))
+    if (!path)
+        return false;
+    if (ntfsfs_is_path(path))
+    {
+        out = path;
+        return true;
+    }
+    if (!g_any.load(std::memory_order_relaxed))
         return false;
     if (is_nfs(path))
     {
@@ -318,6 +329,110 @@ void fill_stat(struct stat *st, bool dir, uint64_t size, uint64_t mtime, uint64_
     st->st_ino = static_cast<ino_t>(ino);
 }
 
+// What a listing told about each entry, and the listings themselves: the shares are read only, and a game's folder
+// is listed and asked about again and again (every file of romfs/ is looked at). One answer serves them all.
+struct Attr
+{
+    bool dir;
+    uint64_t size, mtime, mode, ino;
+    int64_t at;
+};
+
+struct Item
+{
+    std::string name;
+    Attr attr;
+};
+
+struct Listing
+{
+    std::vector<Item> items;
+    int64_t at;
+};
+
+// The shares are read only and the caches are emptied whenever the library is read again: they hold for the whole run.
+constexpr int64_t kCacheMs = 24ll * 60 * 60 * 1000;
+// What the shares were asked, for the log (every 5 s while it changes).
+std::atomic<uint64_t> g_n_open{0}, g_n_stat_hit{0}, g_n_stat_miss{0}, g_n_list{0}, g_n_list_hit{0}, g_n_read{0}, g_n_bytes{0};
+std::mutex g_cache_mutex;
+std::map<std::string, Attr> g_attrs;
+std::map<std::string, Listing> g_listings;
+
+std::string cache_key(const Share *s, const std::string &rel)
+{
+    return std::to_string(reinterpret_cast<uintptr_t>(s)) + ":" + rel;
+}
+
+void cache_clear()
+{
+    std::lock_guard<std::mutex> g(g_cache_mutex);
+    g_attrs.clear();
+    g_listings.clear();
+}
+
+// A big folder's listing (the textures of a game: tens of thousands of files, a server answering a few dozen entries at a
+// time) is kept in a file of this folder, as long as the folder's own modification time has not changed.
+std::string g_index_dir;
+
+std::string index_file(const Share *s, const std::string &rel)
+{
+    uint64_t h = 1469598103934665603ull;
+    for (unsigned char c : s->url + "|" + rel)
+        h = (h ^ c) * 1099511628211ull;
+    char name[40];
+    snprintf(name, sizeof(name), "/%016llx.idx", static_cast<unsigned long long>(h));
+    return g_index_dir + name;
+}
+
+bool index_load(const std::string &path, uint64_t dir_mtime, std::vector<Item> &items)
+{
+    FILE *f = __real_fopen(path.c_str(), "rb");
+    if (!f)
+        return false;
+    char magic[4];
+    uint64_t mtime = 0, count = 0;
+    bool ok = fread(magic, 1, 4, f) == 4 && !memcmp(magic, "NFI1", 4) && fread(&mtime, 8, 1, f) == 1 && mtime == dir_mtime &&
+              fread(&count, 8, 1, f) == 1 && count < (1u << 24);
+    const int64_t at = now_ms();
+    for (uint64_t i = 0; ok && i < count; ++i)
+    {
+        uint16_t length = 0;
+        uint64_t v[4];
+        uint8_t dir = 0;
+        ok = fread(&length, 2, 1, f) == 1 && length > 0 && length < 1024;
+        std::string name(length, '\0');
+        ok = ok && fread(&name[0], 1, length, f) == length && fread(&dir, 1, 1, f) == 1 && fread(v, 8, 4, f) == 4;
+        if (ok)
+            items.push_back({name, {dir != 0, v[0], v[1], v[2], v[3], at}});
+    }
+    __real_fclose(f);
+    if (!ok)
+        items.clear();
+    return ok;
+}
+
+void index_save(const std::string &path, uint64_t dir_mtime, const std::vector<Item> &items)
+{
+    mkdir(g_index_dir.c_str(), 0777);
+    const std::string staged = path + ".new";
+    FILE *f = __real_fopen(staged.c_str(), "wb");
+    if (!f)
+        return;
+    const uint64_t count = items.size();
+    bool ok = fwrite("NFI1", 1, 4, f) == 4 && fwrite(&dir_mtime, 8, 1, f) == 1 && fwrite(&count, 8, 1, f) == 1;
+    for (const Item &item : items)
+    {
+        const uint16_t length = static_cast<uint16_t>(item.name.size());
+        const uint8_t dir = item.attr.dir;
+        const uint64_t v[4] = {item.attr.size, item.attr.mtime, item.attr.mode, item.attr.ino};
+        ok = ok && fwrite(&length, 2, 1, f) == 1 && fwrite(item.name.data(), 1, length, f) == length && fwrite(&dir, 1, 1, f) == 1 &&
+             fwrite(v, 8, 4, f) == 4;
+    }
+    ok = (__real_fclose(f) == 0) && ok;
+    if (!ok || rename(staged.c_str(), path.c_str()) != 0)
+        remove(staged.c_str());
+}
+
 int nfs_stat_path(const Where &w, struct stat *st)
 {
     if (w.synthetic)
@@ -325,6 +440,18 @@ int nfs_stat_path(const Where &w, struct stat *st)
         fill_stat(st, true, 0, 0, 0, 1);
         return 0;
     }
+    const std::string key = cache_key(w.share, w.rel);
+    {
+        std::lock_guard<std::mutex> g(g_cache_mutex);
+        const auto it = g_attrs.find(key);
+        if (it != g_attrs.end() && now_ms() - it->second.at < kCacheMs)
+        {
+            ++g_n_stat_hit;
+            fill_stat(st, it->second.dir, it->second.size, it->second.mtime, it->second.mode, it->second.ino);
+            return 0;
+        }
+    }
+    ++g_n_stat_miss;
     nfs_stat_64 s;
     int rc;
     {
@@ -376,6 +503,11 @@ void free_cache(File *f)
 void free_file(File *f)
 {
     free_cache(f);
+    if (f->nt)
+    {
+        ntfsfs_close(f->nt);
+        f->nt = nullptr;
+    }
     if (f->fh && !f->share->dead)
     {
         std::lock_guard<std::mutex> g(f->share->lock);
@@ -398,9 +530,24 @@ void watch_reads()
     std::thread(
         []
         {
+            uint64_t last_sum = 0;
+            int ticks = 0;
             for (;;)
             {
                 std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                if (++ticks % 20 == 0)
+                {
+                    const uint64_t sum = g_n_open + g_n_stat_hit + g_n_stat_miss + g_n_list + g_n_list_hit + g_n_read;
+                    if (sum != last_sum)
+                    {
+                        last_sum = sum;
+                        nfs_log("stats: opens %llu, stat %llu (+%llu asked), lists %llu (+%llu cached), reads %llu (%llu MB)",
+                                static_cast<unsigned long long>(g_n_open), static_cast<unsigned long long>(g_n_stat_hit),
+                                static_cast<unsigned long long>(g_n_stat_miss), static_cast<unsigned long long>(g_n_list),
+                                static_cast<unsigned long long>(g_n_list_hit), static_cast<unsigned long long>(g_n_read),
+                                static_cast<unsigned long long>(g_n_bytes >> 20));
+                    }
+                }
                 std::vector<Share *> list;
                 {
                     std::lock_guard<std::mutex> g(g_mutex);
@@ -427,8 +574,28 @@ void watch_reads()
         .detach();
 }
 
+File *open_ntfs(const char *path, int *error)
+{
+    uint64_t size = 0;
+    NtfsFile *nt = ntfsfs_open(path, &size, error);
+    if (!nt)
+        return nullptr;
+    File *f = new_file();
+    if (!f)
+    {
+        ntfsfs_close(nt);
+        *error = EMFILE;
+        return nullptr;
+    }
+    f->nt = nt;
+    f->size = size;
+    return f;
+}
+
 File *open_file(const char *path, int *error)
 {
+    if (ntfsfs_is_path(path))
+        return open_ntfs(path, error);
     Where w;
     int e = resolve(path, w);
     if (!e && w.synthetic)
@@ -472,6 +639,7 @@ File *open_file(const char *path, int *error)
         *error = ENOMEM;
         return nullptr;
     }
+    ++g_n_open;
     watch_reads();
     return f;
 }
@@ -485,6 +653,7 @@ bool reconnect(Share *s)
         return false;
     nfs_set_timeout(ctx, std::max(g_timeout_ms.load() / 2, 3000));
     nfs_set_autoreconnect(ctx, 2);
+    nfs_set_readdir_max_buffer_size(ctx, kReaddirBytes, kReaddirBytes);
     const std::string url = "nfs://" + s->authority + s->folder + (s->query.empty() ? "" : "?" + s->query);
     nfs_url *u = nfs_parse_url_dir(ctx, url.c_str());
     int rc = -EINVAL;
@@ -541,6 +710,11 @@ Block fetch_block(File *f, uint64_t number)
             {
                 f->share->read_since = now_ms();
                 rc = nfs_pread(f->share->ctx, f->fh, data + done, want - done, start + done);
+                if (rc > 0)
+                {
+                    ++g_n_read;
+                    g_n_bytes += static_cast<uint64_t>(rc);
+                }
                 f->share->read_since = 0;
             }
             f->share->stalled = false;
@@ -702,6 +876,16 @@ size_t block_bytes(File *f, uint64_t number, size_t offset, uint8_t *dst, size_t
 
 size_t read_at(File *f, uint64_t pos, void *dst, size_t n)
 {
+    if (f->nt)
+    {
+        const size_t read = pos < f->size ? ntfsfs_pread(f->nt, dst, static_cast<size_t>(std::min<uint64_t>(n, f->size - pos)), pos) : 0;
+        if (read < n && pos + read < f->size)
+        {
+            errno = EIO;
+            f->err = true;
+        }
+        return read;
+    }
     size_t got = 0;
     uint8_t *out = static_cast<uint8_t *>(dst);
     while (got < n && pos < f->size)
@@ -863,6 +1047,7 @@ void mount_job(std::shared_ptr<Job> job, std::string authority, std::string path
         }
         nfs_set_timeout(ctx, std::max(timeout_ms, 3000));
         nfs_set_autoreconnect(ctx, 2);
+        nfs_set_readdir_max_buffer_size(ctx, kReaddirBytes, kReaddirBytes);
         const std::string url = "nfs://" + authority + folder + (query.empty() ? "" : "?" + query);
         nfs_url *u = nfs_parse_url_dir(ctx, url.c_str());
         if (!u)
@@ -951,6 +1136,7 @@ void mount_job(std::shared_ptr<Job> job, std::string authority, std::string path
 extern "C" bool nfs_set_shares(const char *list, char *error, size_t error_size)
 {
     std::string problems;
+    cache_clear();
     std::vector<Share *> made;
     std::string item;
     const std::string all = (list ? list : "") + std::string(";");
@@ -1226,18 +1412,124 @@ extern "C" void nfs_describe(char *out, size_t size)
     snprintf(out, size, "%s", text.c_str());
 }
 
+extern "C" unsigned long long libnfs_entries_seen;
+
+// The index of a game folder made on the PC (tools/make-nfs-index.ps1): one file with every entry of the folder, which
+// takes the place of listing it over the network. One line each: D or F, size, modification time (Unix), path with '/'.
+// Returns how many entries it holds, or -1 when the folder has no index (or it cannot be read).
+extern "C" int nfs_load_index(const char *game_folder)
+{
+    Where w;
+    if (resolve(game_folder, w) || w.synthetic)
+        return -1;
+    const std::string file = std::string(game_folder) + "/.eglantine-index";
+    int e = 0;
+    File *f = open_file(file.c_str(), &e);
+    if (!f)
+        return -1;
+    std::string data(static_cast<size_t>(f->size), '\0');
+    size_t have = 0;
+    while (have < data.size())
+    {
+        const size_t got = read_at(f, have, &data[have], std::min<size_t>(1u << 20, data.size() - have));
+        if (!got)
+            break;
+        have += got;
+    }
+    free_file(f);
+    data.resize(have);
+    static const char kHeader[] = "EGLANTINE-INDEX 1\n";
+    if (data.compare(0, sizeof(kHeader) - 1, kHeader) != 0)
+        return -1;
+    std::map<std::string, std::vector<Item>> dirs; // by the folder's path inside the game ("" is the game's own)
+    int count = 0;
+    uint64_t inode = 1ull << 40;
+    for (size_t at = sizeof(kHeader) - 1; at < data.size();)
+    {
+        size_t end = data.find('\n', at);
+        if (end == std::string::npos)
+            end = data.size();
+        const char *line = data.c_str() + at;
+        const size_t length = end - at;
+        at = end + 1;
+        if (length < 7 || (line[0] != 'D' && line[0] != 'F') || line[1] != '\t')
+            continue;
+        char *next = nullptr;
+        const unsigned long long size = strtoull(line + 2, &next, 10);
+        if (!next || *next != '\t')
+            continue;
+        const unsigned long long mtime = strtoull(next + 1, &next, 10);
+        if (!next || *next != '\t')
+            continue;
+        std::string relative(next + 1, line + length - (next + 1));
+        while (!relative.empty() && (relative.back() == '\r' || relative.back() == '/'))
+            relative.pop_back();
+        if (relative.empty())
+            continue;
+        const bool dir = line[0] == 'D';
+        const size_t slash = relative.rfind('/');
+        const std::string parent = slash == std::string::npos ? "" : relative.substr(0, slash);
+        const std::string name = slash == std::string::npos ? relative : relative.substr(slash + 1);
+        dirs[parent].push_back({name, {dir, dir ? 0 : size, mtime, dir ? 0755u : 0644u, ++inode, 0}});
+        if (dir)
+            dirs[relative]; // a folder with nothing in it is listed as empty
+        ++count;
+    }
+    const std::string base = w.rel == "/" ? "" : w.rel;
+    const int64_t forever = INT64_MAX / 4; // never older than the cache's limit
+    std::lock_guard<std::mutex> g(g_cache_mutex);
+    for (auto &entry : dirs)
+    {
+        const std::string folder = base + (entry.first.empty() ? "" : "/" + entry.first);
+        for (Item &item : entry.second)
+        {
+            item.attr.at = forever;
+            g_attrs[cache_key(w.share, folder + "/" + item.name)] = item.attr;
+        }
+        g_listings[cache_key(w.share, folder.empty() ? "/" : folder)] = {std::move(entry.second), forever};
+    }
+    nfs_log("%s: %d entries from the index of the game", game_folder, count);
+    return count;
+}
+
+extern "C" unsigned long long nfs_entries_seen(void)
+{
+    return __atomic_load_n(&libnfs_entries_seen, __ATOMIC_RELAXED);
+}
+
+extern "C" void nfs_set_index_dir(const char *dir)
+{
+    g_index_dir = dir ? dir : "";
+}
+
 extern "C" bool nfs_is_path(const char *path)
 {
-    return is_nfs(path);
+    return is_nfs(path) || ntfsfs_is_path(path);
 }
 
 extern "C" int nfs_list_each(const char *path, void (*each)(void *user, const char *name, unsigned long long size, int is_dir),
                              void *user)
 {
+    if (ntfsfs_is_path(path))
+    {
+        std::vector<std::pair<std::string, bool>> listed;
+        const int rc = ntfsfs_list(path, listed);
+        if (rc)
+            return -rc;
+        int count = 0;
+        for (const auto &entry : listed)
+            if (entry.first != "." && entry.first != "..")
+            {
+                each(user, entry.first.c_str(), 0, entry.second);
+                ++count;
+            }
+        return count;
+    }
     Where w;
     const int e = resolve(path, w);
     if (e)
         return -e;
+    watch_reads();
     int n = 0;
     if (w.synthetic)
     {
@@ -1249,28 +1541,68 @@ extern "C" int nfs_list_each(const char *path, void (*each)(void *user, const ch
         return n;
     }
     // The entries are kept first: the callback may ask the share for more (a stat), and the share's calls are one at a time.
-    struct Item
-    {
-        std::string name;
-        unsigned long long size;
-        int dir;
-    };
     std::vector<Item> items;
+    const std::string key = cache_key(w.share, w.rel);
+    bool cached = false;
     {
-        std::lock_guard<std::mutex> g(w.share->lock);
-        if (w.share->dead || !w.share->ctx)
-            return -EIO;
-        nfsdir *dir = nullptr;
-        const int rc = nfs_opendir(w.share->ctx, w.rel.c_str(), &dir);
-        if (rc < 0)
-            return rc;
-        while (nfsdirent *entry = nfs_readdir(w.share->ctx, dir))
-            if (strcmp(entry->name, ".") && strcmp(entry->name, ".."))
-                items.push_back({entry->name, entry->size, entry->type == kTypeDir});
-        nfs_closedir(w.share->ctx, dir);
+        std::lock_guard<std::mutex> g(g_cache_mutex);
+        const auto it = g_listings.find(key);
+        if (it != g_listings.end() && now_ms() - it->second.at < kCacheMs)
+        {
+            items = it->second.items;
+            cached = true;
+            ++g_n_list_hit;
+        }
+    }
+    uint64_t dir_mtime = 0;
+    std::string index;
+    if (!cached && !g_index_dir.empty())
+    {
+        struct stat dst;
+        if (nfs_stat_path(w, &dst) == 0)
+            dir_mtime = static_cast<uint64_t>(dst.st_mtime);
+        index = index_file(w.share, w.rel);
+        if (dir_mtime && index_load(index, dir_mtime, items))
+        {
+            cached = true;
+            ++g_n_list_hit;
+            nfs_log("%s: %zu entries from the index kept", path, items.size());
+            std::lock_guard<std::mutex> g(g_cache_mutex);
+            const std::string base = w.rel == "/" ? "" : w.rel;
+            for (const Item &item : items)
+                g_attrs[cache_key(w.share, base + "/" + item.name)] = item.attr;
+            g_listings[cache_key(w.share, w.rel)] = {items, now_ms()};
+        }
+    }
+    if (!cached)
+    {
+        ++g_n_list;
+        {
+            std::lock_guard<std::mutex> g(w.share->lock);
+            if (w.share->dead || !w.share->ctx)
+                return -EIO;
+            nfsdir *dir = nullptr;
+            const int rc = nfs_opendir(w.share->ctx, w.rel.c_str(), &dir);
+            if (rc < 0)
+                return rc;
+            const int64_t at = now_ms();
+            while (nfsdirent *entry = nfs_readdir(w.share->ctx, dir))
+                if (strcmp(entry->name, ".") && strcmp(entry->name, ".."))
+                    items.push_back({entry->name,
+                                     {entry->type == kTypeDir, entry->size, static_cast<uint64_t>(entry->mtime.tv_sec), entry->mode,
+                                      entry->inode, at}});
+            nfs_closedir(w.share->ctx, dir);
+        }
+        std::lock_guard<std::mutex> g(g_cache_mutex);
+        const std::string base = w.rel == "/" ? "" : w.rel;
+        for (const Item &item : items)
+            g_attrs[cache_key(w.share, base + "/" + item.name)] = item.attr;
+        g_listings[key] = {items, now_ms()};
+        if (!index.empty() && dir_mtime && items.size() >= 64)
+            index_save(index, dir_mtime, items);
     }
     for (const Item &item : items)
-        each(user, item.name.c_str(), item.size, item.dir);
+        each(user, item.name.c_str(), item.attr.size, item.attr.dir);
     return static_cast<int>(items.size());
 }
 
@@ -1291,6 +1623,7 @@ extern "C" void nfs_alias_begin(const char *folder)
     std::lock_guard<std::mutex> g(g_alias_mutex);
     g_alias_pending.clear();
     g_alias_prefix = std::string(folder) + "/";
+    cache_clear();
 }
 
 extern "C" void nfs_alias_add(const char *name, const char *nfs_path)
@@ -1534,10 +1867,16 @@ extern "C"
         std::string nfs_path;
         if (!redirect(path, nfs_path))
             return __real_stat(path, st);
-        Where w;
-        int e = resolve(nfs_path.c_str(), w);
-        if (!e)
-            e = nfs_stat_path(w, st);
+        int e;
+        if (ntfsfs_is_path(nfs_path.c_str()))
+            e = ntfsfs_stat(nfs_path.c_str(), st);
+        else
+        {
+            Where w;
+            e = resolve(nfs_path.c_str(), w);
+            if (!e)
+                e = nfs_stat_path(w, st);
+        }
         if (e)
         {
             errno = e;

@@ -2425,3 +2425,23 @@ msgstr "RECURSOS"
 #: pe/ui/settings.cpp
 msgid "{0} shares"
 msgstr "{0} recursos"
+
+#: pe/ui/remote.cpp
+msgid "Reading the game's files from the server"
+msgstr "Leyendo los archivos del juego desde el servidor"
+
+#: pe/ui/remote.cpp
+msgid "{0} folders, {1} files"
+msgstr "{0} carpetas, {1} archivos"
+
+#: pe/ui/remote.cpp
+msgid "Only the first time takes long: the next start is at once."
+msgstr "Solo la primera vez tarda: el próximo arranque es inmediato."
+
+#: pe/ui/remote.cpp
+msgid "Estimating the time"
+msgstr "Calculando el tiempo"
+
+#: pe/ui/remote.cpp
+msgid "The reading you cancelled is still ending. Its files are kept; try again in a moment."
+msgstr "La lectura que cancelaste aún está terminando. Sus archivos se guardan; intenta de nuevo en un momento."

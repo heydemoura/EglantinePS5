@@ -35,6 +35,9 @@ builds on the following projects, each under its own license.
   fixes of [tutifrutas/SwanStationPS5](https://github.com/tutifrutas/SwanStationPS5) (itself from
   [PS5SX2](https://github.com/Swordpdf/PS5SX2) by Swordpdf). The NFS client for games on NFS servers; the
   app's layer over it (`headless/nfs`) is from SwanStationPS5 too.
+- **[PS5-NTFS-BROWSER](https://github.com/abcde6543/PS5-NTFS-BROWSER)** by abcde6543, GPL-3.0-or-later. Its
+  read-only NTFS reader (`ntfs.c`, `bdev.c`, `part.c`, `utf.c` and their headers, without its writing part) is in
+  `headless/ntfs`, with the layer over it (`ntfsfs.cpp`) from SwanStationPS5. It reads the games of an NTFS disk.
 - **LLVM compiler-rt** `emutls.c`, Apache-2.0 WITH LLVM-exception.
 
 ## Graphics

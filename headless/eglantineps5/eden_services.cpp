@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "../nfs/nfs.h"
+#include "../ntfs/ntfsfs.h"
 #include "eden_services.h"
 
 #include "assets_dir.h"
@@ -39,6 +40,7 @@
 #include <filesystem>
 #include <initializer_list>
 #include <map>
+#include <mutex>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -228,8 +230,21 @@ std::string GameTitle(const std::string& filename) {
 // A game's file in roms/. A game that is a folder (exefs/ and romfs/, extracted) is listed as "<folder>.dir" and
 // is started from its exefs/main: Eden then loads the folder, and finds romfs/ next to exefs/. The folder is
 // in roms/ or on an NFS share (nfs_alias_target).
+// The games on USB and NTFS disks: a file name in the library -> the path of the game (its file, or the exefs/main of
+// a folder), found by UsbGames. They are shown with the games of roms/, and RomPath gives their real path.
+static std::mutex g_shelf_mutex;
+static std::map<std::string, std::string> g_shelf;
+static bool ShelfPath(const std::string& file, std::string& path) {
+    const std::lock_guard lock(g_shelf_mutex);
+    const auto found = g_shelf.find(file);
+    if (found == g_shelf.end()) return false;
+    path = found->second;
+    return true;
+}
+
 static bool IsFolderGame(const std::string& file) { return file.size() > 4 && file.ends_with(".dir"); }
 static std::string RomPath(const std::string& file) {
+    if (std::string shelf; ShelfPath(file, shelf)) return shelf;
     if (IsFolderGame(file)) {
         const std::string local = Eden::AssetsPath("roms/" + file.substr(0, file.size() - 4) + "/exefs/main");
         if (Eden::FileExists(local)) return local;
@@ -554,6 +569,96 @@ std::optional<std::int64_t> EdenServices::ask_seed(std::int64_t current, const s
     return Eden::RngSeedFromText(Common::UTF16ToUTF8(answer.text));
 }
 
+bool EdenServices::game_needs_prepare(const std::string& file) {
+    // Only a game on an NFS share is read first: a USB or NTFS disk answers at once.
+    return IsFolderGame(file) && RomPath(file).rfind("/nfs/", 0) == 0;
+}
+
+// A game folder on a share is listed from its root, folder by folder: each answer is kept (nfs.cpp), so the emulator's
+// own walk of it afterwards asks the server for nothing. The files seen in the end are written down: the next reading
+// of this game knows how far it has to go (`expected`, 0 when it does not know).
+static std::string TotalFile(const std::string& root) {
+    std::uint64_t hash = 1469598103934665603ull;
+    for (const unsigned char c : root) hash = (hash ^ c) * 1099511628211ull;
+    char name[40];
+    std::snprintf(name, sizeof(name), "/%016llx.total", static_cast<unsigned long long>(hash));
+    return Eden::ConfigDir() + "/nfs-index" + name;
+}
+
+bool EdenServices::prepare_game(const std::string& file, const std::atomic<bool>& stop, std::atomic<unsigned>& folders,
+                                std::atomic<unsigned>& files, std::atomic<unsigned>& expected) {
+    std::string root = RomPath(file); // <game>/exefs/main
+    for (int up = 0; up < 2; ++up) {
+        const auto slash = root.rfind('/');
+        if (slash == std::string::npos) return true;
+        root.resize(slash);
+    }
+    // A game that brings its index (made on the PC) needs no reading at all.
+    if (const int indexed = nfs_load_index(root.c_str()); indexed >= 0) {
+        files = static_cast<unsigned>(indexed);
+        expected = files.load();
+        ++folders;
+        return !stop;
+    }
+    if (FILE* known = std::fopen(TotalFile(root).c_str(), "r")) {
+        unsigned total = 0;
+        if (std::fscanf(known, "%u", &total) == 1) expected = total;
+        std::fclose(known);
+    }
+    struct Walk {
+        std::vector<std::string> subfolders;
+        std::atomic<unsigned>* files;
+    };
+    // While a folder is being read (one call, which for a folder of tens of thousands of files is minutes) the count
+    // follows the entries as they arrive.
+    std::atomic<unsigned> counted{0};
+    std::atomic<unsigned long long> since{nfs_entries_seen()};
+    std::atomic<bool> reading{true};
+    std::thread live([&] {
+        while (reading) {
+            files = counted + static_cast<unsigned>(nfs_entries_seen() - since);
+            std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        }
+    });
+    struct StopLive {
+        std::atomic<bool>& reading;
+        std::thread& live;
+        ~StopLive() { reading = false; live.join(); }
+    } stop_live{reading, live};
+    std::vector<std::string> pending{root};
+    bool whole = true;
+    while (!pending.empty() && !stop) {
+        const std::string folder = pending.back();
+        pending.pop_back();
+        std::atomic<unsigned> listed{0};
+        Walk walk{{}, &listed};
+        since = nfs_entries_seen();
+        const int count = nfs_list_each(folder.c_str(), [](void* user, const char* name, unsigned long long, int dir) {
+            Walk* walk = static_cast<Walk*>(user);
+            if (dir) walk->subfolders.emplace_back(name);
+            else ++*walk->files;
+        }, &walk);
+        counted += listed;
+        since = nfs_entries_seen();
+        files = counted.load();
+        ++folders;
+        if (count < 0) {
+            Eden::Report("nfs", ("Could not list " + folder).c_str());
+            whole = false;
+            break; // the game is started anyway: what is wrong shows there
+        }
+        for (const std::string& name : walk.subfolders) pending.push_back(folder + "/" + name);
+    }
+    if (whole && !stop && pending.empty()) {
+        (void)mkdir((Eden::ConfigDir() + "/nfs-index").c_str(), 0777);
+        if (FILE* total = std::fopen(TotalFile(root).c_str(), "w")) {
+            std::fprintf(total, "%u\n", counted.load());
+            std::fclose(total);
+        }
+    }
+    return !stop;
+}
+
 static std::string ReadNfsText();
 
 std::string EdenServices::nfs_shares() { return ReadNfsText(); }
@@ -819,6 +924,7 @@ static std::string ReadNfsText() {
 }
 
 static void StartNfs() {
+    nfs_set_index_dir((Eden::ConfigDir() + "/nfs-index").c_str());
     const std::string text = ReadNfsText();
     if (text.empty()) return;
     char error[512]{};
@@ -869,6 +975,57 @@ static std::vector<std::string> NfsGames(const std::set<std::string>& local) {
     return names;
 }
 
+// Games in a folder called "games" at the root of a USB drive (/mnt/usb0 to /mnt/usb7, which the console mounts when it
+// can read the disk) or of an NTFS disk (read by ntfs/ntfsfs.h: the console does not mount NTFS). One folder down is read
+// too. A game that is in roms/ or on a share keeps its place; the rest is found once, the first drive first.
+static std::vector<std::string> UsbGames(const std::set<std::string>& taken, std::map<std::string, std::string>& labels) {
+    std::vector<std::pair<std::string, const char*>> roots;
+    for (int drive = 0; drive < 8; ++drive) {
+        const std::string root = "/mnt/usb" + std::to_string(drive) + "/games";
+        if (Eden::DirectoryExists(root)) roots.emplace_back(root, "USB");
+    }
+    // The NTFS disks: looked for each time (a disk may have been plugged in), and read through the app's own reader.
+    (void)ntfsfs_scan();
+    static char volumes[NTFSFS_MAX_VOLUMES][NTFSFS_PATH_MAX];
+    const int count = ntfsfs_mount_points(volumes, NTFSFS_MAX_VOLUMES);
+    for (int i = 0; i < count; ++i) {
+        const std::string root = std::string{volumes[i]} + "/games";
+        if (Eden::DirectoryExists(root)) roots.emplace_back(root, "NTFS");
+    }
+    std::map<std::string, std::string> found;
+    std::vector<std::string> names;
+    const auto add = [&](const std::string& key, const std::string& path, const char* label) {
+        if (taken.contains(key) || found.contains(key)) return;
+        found[key] = path;
+        labels[key] = label;
+        names.push_back(key);
+    };
+    for (const auto& [root, label] : roots) {
+        std::vector<std::string> folders{root};
+        for (std::size_t f = 0; f < folders.size(); ++f) {
+            std::error_code error;
+            for (const auto& entry : Eden::ReadNativeDirectory(folders[f], error)) {
+                const std::string name = entry.path().filename().string();
+                const std::string path = folders[f] + "/" + name;
+                struct stat info {};
+                if (stat(path.c_str(), &info) != 0) continue;
+                if (S_ISDIR(info.st_mode)) {
+                    struct stat main_info {};
+                    if (stat((path + "/exefs/main").c_str(), &main_info) == 0 && S_ISREG(main_info.st_mode))
+                        add(name + ".dir", path + "/exefs/main", label);
+                    else if (f == 0 && folders.size() < 64)
+                        folders.push_back(path);
+                } else if (S_ISREG(info.st_mode) && Eden::ValidRomFilename(name) && !IsFolderGame(name)) {
+                    add(name, path, label);
+                }
+            }
+        }
+    }
+    const std::lock_guard lock(g_shelf_mutex);
+    g_shelf = std::move(found);
+    return names;
+}
+
 std::vector<pe::ui::Game> EdenServices::games() {
     // The launcher reads the list beside its menu (pe/ui/library.cpp), so the metadata reader
     // is used by one thread at a time.
@@ -901,9 +1058,15 @@ std::vector<pe::ui::Game> EdenServices::games() {
         else
             files.push_back(name);
     }
+    std::map<std::string, std::string> source; // where the games that are not in roms/ are, marked in the library
     {
-        const std::set<std::string> local(files.begin(), files.end());
-        for (std::string& name : NfsGames(local)) files.push_back(std::move(name));
+        std::set<std::string> taken(files.begin(), files.end());
+        for (std::string& name : NfsGames(taken)) {
+            source[name] = "NFS";
+            taken.insert(name);
+            files.push_back(std::move(name));
+        }
+        for (std::string& name : UsbGames(taken, source)) files.push_back(std::move(name));
     }
     for (const std::string& file : files) {
         const std::size_t dot = file.find_last_of('.');
@@ -917,7 +1080,7 @@ std::vector<pe::ui::Game> EdenServices::games() {
         if (stat(path.c_str(), &info) != 0 || !S_ISREG(info.st_mode)) continue;
         pe::ui::Game game;
         game.name = CleanTitle(file);
-        game.format = format;
+        game.format = source.contains(file) ? source.at(file) + " " + format : format;
         game.size = IsFolderGame(file) ? std::string{"-"} : SizeLabel(static_cast<double>(info.st_size));
         game.file = file;
         // A game whose data cannot be read is still listed, by its file name.

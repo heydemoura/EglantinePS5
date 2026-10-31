@@ -2417,7 +2417,14 @@ if(PS5_NATIVE)
     target_compile_definitions(nfs-client PRIVATE HAVE_CONFIG_H HAVE_NFS4_2 "_U_=__attribute__((unused))")
     target_compile_options(nfs-client PRIVATE -w -fPIC -ffunction-sections -fdata-sections
         $<$<COMPILE_LANGUAGE:C>:-std=gnu99>)
-    target_sources(eden-headless PRIVATE "${EDEN_PORT_DIR}/nfs/nfs.cpp")
+    # Games on NTFS disks (headless/ntfs/ntfsfs.h): the read-only NTFS reader of PS5-NTFS-BROWSER.
+    add_library(ntfs-reader STATIC "${EDEN_PORT_DIR}/ntfs/bdev.c" "${EDEN_PORT_DIR}/ntfs/ntfs.c"
+        "${EDEN_PORT_DIR}/ntfs/part.c" "${EDEN_PORT_DIR}/ntfs/utf.c")
+    target_compile_options(ntfs-reader PRIVATE -w -fPIC -ffunction-sections -fdata-sections
+        $<$<COMPILE_LANGUAGE:C>:-std=gnu11>)
+    target_sources(eden-headless PRIVATE "${EDEN_PORT_DIR}/nfs/nfs.cpp" "${EDEN_PORT_DIR}/ntfs/ntfsfs.cpp")
+    set_source_files_properties("${EDEN_PORT_DIR}/ntfs/ntfsfs.cpp" PROPERTIES COMPILE_OPTIONS "-Wno-error;-Wno-unused-function")
+    target_link_libraries(eden-headless PRIVATE ntfs-reader)
     set_source_files_properties("${EDEN_PORT_DIR}/nfs/nfs.cpp" PROPERTIES COMPILE_OPTIONS "-Wno-error;-Wno-unused-function")
     target_link_libraries(eden-headless PRIVATE nfs-client)
 endif()

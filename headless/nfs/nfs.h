@@ -73,6 +73,16 @@ extern "C"
     /* How many of the shares set are not mounted. */
     int nfs_unmounted(void);
 
+    /* Reads the index of a game folder (/nfs/..., made on the PC by tools/make-nfs-index.ps1) in place of listing it over
+     * the network: how many entries it held, or -1 when the folder has no index. */
+    int nfs_load_index(const char *game_folder);
+
+    /* How many entries of listings have been received from servers since the start (grows while a big folder is read). */
+    unsigned long long nfs_entries_seen(void);
+
+    /* Where the listings of big folders are kept between runs (valid while the folder's modification time is the same). */
+    void nfs_set_index_dir(const char *dir);
+
     /* True for a path under /nfs (when shares are set). */
     bool nfs_is_path(const char *path);
 

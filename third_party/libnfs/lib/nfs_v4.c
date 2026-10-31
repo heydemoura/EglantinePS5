@@ -106,6 +106,9 @@
 #include "libnfs-raw-nfs4.h"
 #include "libnfs-private.h"
 
+extern unsigned long long libnfs_entries_seen;
+
+
 /*
  * Naming convention in this file:
  *
@@ -4471,6 +4474,7 @@ nfs4_parse_readdir(struct nfs_context *nfs, struct nfs4_cb_data *data,
                 memcpy(data->filler.blob2.val, &e->cookie, sizeof(uint64_t));
 
 		nfsdirent = malloc(sizeof(struct nfsdirent));
+		__atomic_fetch_add(&libnfs_entries_seen, 1, __ATOMIC_RELAXED);
 		if (nfsdirent == NULL) {
                         nfs_set_error(nfs, "Out of memory.");
                         data->cb(-ENOMEM, nfs, nfs_get_error(nfs),

@@ -733,4 +733,118 @@ void Launcher::draw_sources(Canvas &c, float open)
     list.pop_opacity();
 }
 
+// ---------------------------------------------------------------- A game on a network share, read before it starts
+
+void Launcher::begin_prepare(const std::string &file, const std::string &title, const std::string &cover)
+{
+    // A reading that was cancelled may still be going (a big folder cannot be cut halfway): it is waited for.
+    if (prepare_.valid())
+    {
+        say(tr("The reading you cancelled is still ending. Its files are kept; try again in a moment."), true);
+        cue(Cue::error);
+        return;
+    }
+    prepare_file_ = file;
+    prepare_title_ = title;
+    prepare_cover_ = cover;
+    prepare_time_ = 0.0f;
+    prepare_stop_ = false;
+    prepare_folders_ = 0;
+    prepare_files_ = 0;
+    prepare_expected_ = 0;
+    try
+    {
+        prepare_ = std::async(std::launch::async, [this] {
+            return services_.prepare_game(prepare_file_, prepare_stop_, prepare_folders_, prepare_files_, prepare_expected_);
+        });
+    }
+    catch (const std::exception &)
+    {
+        launch_game(file, title, cover); // it is read as the game asks
+        return;
+    }
+    modal_ = modal_shown_ = Modal::preparing;
+    message_.clear();
+    cue(Cue::modal_open);
+}
+
+void Launcher::update_prepare(float dt)
+{
+    if (!prepare_.valid())
+        return;
+    prepare_time_ += dt;
+    if (prepare_.wait_for(std::chrono::seconds{0}) != std::future_status::ready)
+        return;
+    bool done = false;
+    try
+    {
+        done = prepare_.get();
+    }
+    catch (const std::exception &)
+    {
+        done = true; // the game is started anyway: what is wrong shows there
+    }
+    const bool open = modal_ == Modal::preparing;
+    if (open)
+        modal_ = Modal::none;
+    if (done && !prepare_stop_ && selected_game_.empty())
+        launch_game(prepare_file_, prepare_title_, prepare_cover_);
+    else if (open)
+        cue(Cue::modal_close);
+}
+
+void Launcher::draw_prepare(Canvas &c, float open)
+{
+    gfx::DrawList &list = c.list;
+    list.push_opacity(open);
+    list.push_transform(1.0f - 0.04f * (1.0f - open) * motion(), kCenterX, 540.0f, 0.0f, (1.0f - open) * 30.0f * motion());
+    glass(c, kPanel, 28.0f, theme::kPanel.with_alpha(0.97f), theme::kLime.with_alpha(0.38f), 1.8f);
+    const auto centred = [&](std::string_view value, float top, float line, float size, Color color)
+    { text_shrink(c, value, kCenterX, baseline(top, line, size), size, color, kPanel.w - 96.0f, Align::center); };
+
+    // The game's cover in a ring that turns while its folders are read.
+    list.circle(kCenterX, kRingY, kRingRadius - kRingWidth, theme::kBase.with_alpha(0.55f));
+    list.ring(kCenterX, kRingY, kRingRadius, kRingWidth, theme::kPanelEdge.with_alpha(0.22f));
+    arc(list, kCenterX, kRingY, kRingRadius, kRingWidth, prepare_time_ * 4.2f,
+        kPi * (0.55f + 0.45f * std::sin(prepare_time_ * 2.1f)), theme::kLime);
+    const float art = (kRingRadius - kRingWidth) * 2.0f * 0.70710678f;
+    cover(c, prepare_cover_, {kCenterX - art * 0.5f, kRingY - art * 0.5f, art, art}, 12.0f);
+
+    centred(prepare_title_, 506.0f, 46.0f, theme::kHeading, theme::kTitle);
+    centred(tr("Reading the game's files from the server"), 560.0f, 32.0f, theme::kText24, theme::kValue);
+
+    // The length is known when an earlier reading of this game wrote it down: the bar fills and the time left is
+    // estimated from the pace so far. Otherwise a bar that goes back and forth, and what has been seen.
+    const Rect track{kPanel.x + 96.0f, 618.0f, kPanel.w - 192.0f, 8.0f};
+    const unsigned seen = prepare_files_.load(), expected = prepare_expected_.load();
+    const float amount = expected > 0 ? std::min(0.99f, static_cast<float>(seen) / static_cast<float>(expected)) : 0.0f;
+    progress_bar(list, track, amount, theme::kLime);
+    if (expected == 0)
+    {
+        const float segment = track.w * 0.28f;
+        const float place = 0.5f - 0.5f * std::cos(prepare_time_ * 2.4f);
+        list.rounded_rect({track.x + (track.w - segment) * place, track.y, segment, track.h}, 4.0f, theme::kLime);
+    }
+    const int seconds = static_cast<int>(prepare_time_);
+    char clock[16];
+    std::snprintf(clock, sizeof(clock), "%d:%02d", seconds / 60, seconds % 60);
+    std::string left = tr("Estimating the time");
+    if (expected > 0 && seen > 200 && prepare_time_ > 3.0f && seen < expected)
+    {
+        const int whole = std::max(1, static_cast<int>(std::ceil(prepare_time_ * static_cast<double>(expected - seen) /
+                                                                 static_cast<double>(seen))));
+        left = whole < 90 ? fill(tr("About {0} s left"), {std::to_string(whole)}) :
+                            fill(tr("About {0} min left"), {std::to_string((whole + 59) / 60)});
+    }
+    centred(fill(tr("{0} folders, {1} files"), {std::to_string(prepare_folders_.load()), std::to_string(seen)}) +
+                "  ·  " + clock + "  ·  " + left,
+            642.0f, 32.0f, theme::kSmall, theme::kLimePale);
+    centred(tr("Only the first time takes long: the next start is at once."), 690.0f, 30.0f, theme::kSmall, theme::kCopy);
+
+    static constexpr Hint kHintsRunning[] = {{Pad::circle, TR("Cancel")}};
+    draw_hints(c, kHintsRunning, 1, kPanel.x + 52.0f, kPanel.y + kPanel.h - 54.0f, theme::kCopy, kPanel.w - 104.0f);
+    list.pop_transform();
+    list.pop_opacity();
+}
+
 } // namespace pe::ui
