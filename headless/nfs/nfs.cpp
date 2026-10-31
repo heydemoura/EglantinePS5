@@ -94,7 +94,7 @@ extern "C"
 
 namespace
 {
-constexpr int kMaxFiles = 128;
+constexpr int kMaxFiles = 4096; // a game may keep hundreds of files open at once (a Switch 2 one opened more than 128)
 constexpr int kFdBase = 0x6e660000;
 constexpr size_t kBlock = 512u << 10;                // what is read from the server at once, and cached
 constexpr size_t kCacheTotal = 128u << 20;           // read ahead in memory, for all the files together

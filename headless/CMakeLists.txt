@@ -118,7 +118,7 @@ eden_sparse_replace("inline const u64 HostPageMask = ~(HostPageSize - 1);"
 eden_sparse_replace("mprotect(reinterpret_cast<void*>(page), HostPageSize, PROT_READ | PROT_WRITE)"
     "(CommitSparsePage(page), 0)" 1)
 eden_sparse_replace("void FreeMemoryPages(void* base, std::size_t size) noexcept;"
-    "void FreeMemoryPages(void* base, std::size_t size) noexcept;\nvoid* AllocateSparsePages(std::size_t size) noexcept;\nvoid FreeSparsePages(void* base, std::size_t size) noexcept;\nvoid CommitSparsePage(std::uintptr_t page) noexcept;" 1)
+    "void FreeMemoryPages(void* base, std::size_t size) noexcept;\nvoid* AllocateSparsePages(std::size_t size) noexcept;\nvoid FreeSparsePages(void* base, std::size_t size) noexcept;\nvoid CommitSparsePage(std::uintptr_t page) noexcept;\nbool SparseTablesAvailable() noexcept;" 1)
 write_derived("${PORT_BUILD_DIR}/sparse/common/sparse_large_vector.h" "${sparse_header}")
 
 # An abandoned fiber stack is not unwound. Empty the by-value weak reference
@@ -168,6 +168,15 @@ if(PS5_NATIVE)
     string(REPLACE "    GenRunCode(rcp);"
         "    std::printf(\"EDEN_JIT_FEATURES mask=%x cache_bytes=%zu\\n\", unsigned(GetHostFeatures()), total_code_size);\n    GenRunCode(rcp);" code_source "${code_source}")
 endif()
+  # A cache takes its memory as it fills (src/memory_pages.cpp): the JIT asks before every
+  # block, and before it takes room for constants, how far it is about to write.
+  set(commit_site "void BlockOfCode::EnsureMemoryCommitted([[maybe_unused]] size_t codesize) {\n")
+  string(FIND "${code_source}" "${commit_site}" commit_at)
+  if(commit_at LESS 0)
+      message(FATAL_ERROR "Pinned JIT memory commit changed")
+  endif()
+  string(REPLACE "${commit_site}"
+      "${commit_site}    commitMemory(std::min<size_t>(maxSize_, size_ + codesize));\n" code_source "${code_source}")
   # ConstantPool has completed construction before this body. Isolate its last
   # page from executable prelude, without accessing fields during construction.
   string(REPLACE "    EnableWriting();\n    EnsureMemoryCommitted(PRELUDE_COMMIT_SIZE);"
@@ -1742,10 +1751,66 @@ endforeach()
 # keeps them alive until CPU joins; balance Run()'s additional reference here.
 string(REPLACE "    for (auto* thread : impl->shutdown_threads)\n        void(thread->Run(*this));"
     "    for (auto* thread : impl->shutdown_threads) {\n        ASSERT(thread->Run(*this).IsSuccess());\n        thread->Close(*this);\n    }" kernel_source "${kernel_source}")
+# The guest's memory is backed where it is used (src/memory_pages.cpp). Here: everything outside
+# the pools, as soon as the kernel knows where the pools are and before its first write (the
+# slab heaps). A pool's pages follow when they are handed out (k_memory_manager.cpp below).
+set(guest_backing_site "        DeriveInitialMemoryLayout();\n        Init::InitializeSlabHeaps(system, *memory_layout);")
+string(FIND "${kernel_source}" "${guest_backing_site}" guest_backing_at)
+if(guest_backing_at LESS 0)
+    message(FATAL_ERROR "Pinned kernel start changed; review where the guest's memory is backed.")
+endif()
+string(REPLACE "${guest_backing_site}"
+    "        DeriveInitialMemoryLayout();\n        for (const auto& region : memory_layout->GetPhysicalMemoryRegionTree()) {\n            const u64 dram = Core::DramMemoryMap::Base;\n            if (region.IsDerivedFrom(KMemoryRegionType_DramUserPool) || region.GetLastAddress() < dram) continue;\n            const u64 start = std::max<u64>(region.GetAddress(), dram);\n            ::Common::CommitGuestMemory(start - dram, region.GetLastAddress() - start + 1);\n        }\n        Init::InitializeSlabHeaps(system, *memory_layout);"
+    kernel_source "${kernel_source}")
+string(PREPEND kernel_source "#include <algorithm>\n#include <cstddef>\n#include <cstdint>\n#include \"core/device_memory.h\"\nnamespace Common { void CommitGuestMemory(std::uint64_t offset, std::size_t bytes) noexcept; }\n")
 write_derived("${PORT_BUILD_DIR}/kernel.cpp" "${kernel_source}")
 get_target_property(core_sources core SOURCES)
 list(REMOVE_ITEM core_sources hle/kernel/kernel.cpp)
 list(APPEND core_sources "${PORT_BUILD_DIR}/kernel.cpp")
+
+file(READ "${PROJECT_SOURCE_DIR}/src/core/hle/kernel/k_memory_manager.cpp" pool_source)
+string(PREPEND pool_source "#include <cstddef>\n#include <cstdint>\nnamespace Common { void CommitGuestMemoryOnHandOut(std::uint64_t offset, std::size_t bytes) noexcept; void FillGuestMemory(std::uint8_t* at, int fill, std::size_t bytes) noexcept; }\n")
+# Its two places: a run of pages in one piece, and the blocks of a page group.
+set(continuous_site "    // If we failed to allocate, quit now.\n    if (allocated_block == 0) {\n        return 0;\n    }\n")
+set(group_site "                KPhysicalAddress allocated_block = cur_manager->AllocateBlock(index, random);\n                if (allocated_block == 0) {\n                    break;\n                }\n")
+string(FIND "${pool_source}" "${continuous_site}" continuous_at)
+string(FIND "${pool_source}" "${group_site}" group_at)
+if(continuous_at LESS 0 OR group_at LESS 0)
+    message(FATAL_ERROR "Pinned guest page allocation changed; review where the guest's memory is backed.")
+endif()
+string(REPLACE "${continuous_site}"
+    "${continuous_site}    ::Common::CommitGuestMemoryOnHandOut(GetInteger(allocated_block) - Core::DramMemoryMap::Base, num_pages * PageSize);\n"
+    pool_source "${pool_source}")
+string(REPLACE "${group_site}"
+    "${group_site}                ::Common::CommitGuestMemoryOnHandOut(GetInteger(allocated_block) - Core::DramMemoryMap::Base, pages_per_alloc * PageSize);\n"
+    pool_source "${pool_source}")
+# With the guest's memory as a service (src/guest_memory_service.inc), a page filled with zeroes
+# where the slot still shows the zero block is left alone, and pages the guest's kernel frees
+# give whole slots back.
+set(optimized_fill_site "            std::memset(ptr + offset * PageSize, fill_pattern, PageSize);")
+string(FIND "${pool_source}" "${optimized_fill_site}" optimized_fill_at)
+if(optimized_fill_at LESS 0)
+    message(FATAL_ERROR "Pinned optimized allocation fill changed; review the guest memory service.")
+endif()
+string(REPLACE "${optimized_fill_site}"
+    "            ::Common::FillGuestMemory(ptr + offset * PageSize, fill_pattern, PageSize);"
+    pool_source "${pool_source}")
+write_derived("${PORT_BUILD_DIR}/k_memory_manager.cpp" "${pool_source}")
+file(READ "${PROJECT_SOURCE_DIR}/src/core/hle/kernel/k_page_heap.cpp" page_heap_source)
+set(page_heap_free_site "void KPageHeap::Free(KPhysicalAddress addr, size_t num_pages) {\n    // Freeing no pages is a no-op.\n    if (num_pages == 0) {\n        return;\n    }\n")
+string(FIND "${page_heap_source}" "${page_heap_free_site}" page_heap_free_at)
+if(page_heap_free_at LESS 0)
+    message(FATAL_ERROR "Pinned page heap free changed; review the guest memory service.")
+endif()
+string(REPLACE "${page_heap_free_site}"
+    "${page_heap_free_site}    ::Common::GuestMemoryFreed(GetInteger(addr) - Core::DramMemoryMap::Base, num_pages * PageSize);\n"
+    page_heap_source "${page_heap_source}")
+string(PREPEND page_heap_source "#include <cstddef>\n#include <cstdint>\n#include \"core/device_memory.h\"\nnamespace Common { void GuestMemoryFreed(std::uint64_t offset, std::size_t bytes) noexcept; }\n")
+write_derived("${PORT_BUILD_DIR}/k_page_heap.cpp" "${page_heap_source}")
+get_target_property(pool_core_sources core SOURCES)
+list(REMOVE_ITEM pool_core_sources hle/kernel/k_memory_manager.cpp hle/kernel/k_page_heap.cpp)
+list(APPEND pool_core_sources "${PORT_BUILD_DIR}/k_memory_manager.cpp" "${PORT_BUILD_DIR}/k_page_heap.cpp")
+set_property(TARGET core PROPERTY SOURCES "${pool_core_sources}")
 set_property(TARGET core PROPERTY SOURCES "${core_sources}")
 
 # Replace SDL audio with the optional native sink; the renderer stays null.
@@ -2157,6 +2222,46 @@ ${paths_source}")
     write_derived("${PORT_BUILD_DIR}/fs.cpp" "${fs_source}")
     list(REMOVE_ITEM common_sources fs/fs.cpp)
     list(APPEND common_sources "${PORT_BUILD_DIR}/fs.cpp")
+# The GPU's address space table (Common::MultiLevelPageTable, one per address space a game asks
+# for) reserves its whole range with an anonymous mmap and relies on the system to back a page
+# only when it is first written. On the PS5 an anonymous mapping comes out of the flexible pool
+# (a few hundred MiB): a game that asked for a larger GPU address space (40 bits: a 1 GiB table)
+# got no table at all, and the next mapping wrote through a null base ("assert base" in Eden's
+# log, then SIGSEGV on nvservices). It is reserved like the other large tables instead, sparse
+# (AllocateSparsePages, src/memory_pages.cpp), and each first-level chunk is committed when the
+# table reserves it for a mapping (AllocateLevel), which is the only way a mapping is written.
+file(READ "${PROJECT_SOURCE_DIR}/src/common/multi_level_page_table.inc" mlpt_source)
+foreach(mlpt_site
+        "    void* base{mmap(nullptr, alloc_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)};\n    if (base == MAP_FAILED)\n        base = nullptr;\n"
+        "    ASSERT(munmap(base_ptr, alloc_size) == 0);\n"
+        "#else\n    void* base = ptr;\n#endif\n")
+    string(FIND "${mlpt_source}" "${mlpt_site}" mlpt_at)
+    if(mlpt_at LESS 0)
+        message(FATAL_ERROR "Pinned multi_level_page_table.inc changed; review how the GPU page table is reserved.")
+    endif()
+endforeach()
+string(REPLACE
+    "    void* base{mmap(nullptr, alloc_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)};\n    if (base == MAP_FAILED)\n        base = nullptr;\n"
+    "    void* base{AllocateSparsePages(alloc_size)};\n" mlpt_source "${mlpt_source}")
+string(REPLACE "    ASSERT(munmap(base_ptr, alloc_size) == 0);\n"
+    "    FreeSparsePages(base_ptr, alloc_size);\n" mlpt_source "${mlpt_source}")
+string(REPLACE "#else\n    void* base = ptr;\n#endif\n"
+    "#else\n    void* base = ptr;\n    // The chunk is written next (MemoryManager::PageTableOp): give its slots memory of their own.\n    const auto chunk_begin = reinterpret_cast<std::uintptr_t>(ptr);\n    const auto chunk_end = chunk_begin + first_level_chunk_size;\n    for (std::uintptr_t page = chunk_begin; page < chunk_end; page += 0x200000)\n        CommitSparsePage(page);\n    CommitSparsePage(chunk_end - 1);\n#endif\n"
+    mlpt_source "${mlpt_source}")
+string(REPLACE "namespace Common {\n"
+    "namespace Common {\nvoid* AllocateSparsePages(std::size_t size) noexcept;\nvoid FreeSparsePages(void* base, std::size_t size) noexcept;\nvoid CommitSparsePage(std::uintptr_t page) noexcept;\n"
+    mlpt_source "${mlpt_source}")
+string(PREPEND mlpt_source "#include <cstdint>\n")
+file(READ "${PROJECT_SOURCE_DIR}/src/common/multi_level_page_table.cpp" mlpt_unit)
+string(REPLACE "#include \"common/multi_level_page_table.inc\"\n" "${mlpt_source}\n" mlpt_unit "${mlpt_unit}")
+string(FIND "${mlpt_unit}" "AllocateSparsePages(alloc_size)" mlpt_done)
+if(mlpt_done LESS 0)
+    message(FATAL_ERROR "Pinned multi_level_page_table.cpp changed; it no longer includes the .inc as expected.")
+endif()
+write_derived("${PORT_BUILD_DIR}/multi_level_page_table.cpp" "${mlpt_unit}")
+list(REMOVE_ITEM common_sources multi_level_page_table.cpp)
+list(APPEND common_sources "${PORT_BUILD_DIR}/multi_level_page_table.cpp")
+
     list(REMOVE_ITEM common_sources fs/path_util.cpp)
     list(APPEND common_sources "${PORT_BUILD_DIR}/path_util.cpp")
     set_property(TARGET common PROPERTY SOURCES "${common_sources}")
@@ -2268,14 +2373,25 @@ void Initialize() {
     if(NOT heap_hash STREQUAL "df61acb51502c3b75c4fda62859c42eac6d19a6690f9b68c0e2dfbf20ae72c0f")
         message(FATAL_ERROR "The shared heap changed since G6; qualify it before using it here.")
     endif()
-    # The heap may grow to 3 GiB: with guest cores 1/2 at 192 MiB of code, a large game's
-    # blocks (~0.5 KiB of metadata each) once exhausted 2 GiB. That is its address range, not its
-    # memory: the heap commits 128 MiB pieces as allocations need them (heap_arenas.inc), because
-    # everything the CPU holds comes out of the 12 GiB it shares with the GPU. Taken whole at
-    # start, guest RAM, a dense page table, this heap and the A64 code caches were 8.6 GiB of it.
+    # The heap may grow to 6 GiB: with guest cores 1/2 at 192 MiB of code, a large game's
+    # blocks (~0.5 KiB of metadata each) once exhausted 2 GiB, and Tears of the Kingdom with the
+    # UltraCam mod filled 3 GiB building the mod's RomFS while the console had 8 GiB free
+    # (Swordpdf/ProsperoEden#246). That is its address range, not its memory: the heap commits
+    # 128 MiB pieces as allocations need them (heap_arenas.inc), because everything the CPU holds
+    # comes out of the 12 GiB it shares with the GPU. Taken whole at start, guest RAM, a dense page
+    # table, a 3 GiB heap and the A64 code caches were 8.6 GiB of it; where no range can be
+    # reserved, the heap still takes only 3 GiB at once (EDEN_HEAP_WHOLE_SIZE). The size no longer
+    # fits an unsigned int, so it is a size_t, and so is the one line that prints it.
+    # (The stock wrappers, EDEN_HEAP_ARENAS off, take the heap whole: 3 GiB there.)
+    option(EDEN_HEAP_ARENAS "Per-thread arenas inside the owned heap" ON)
+    set(heap_mib 3072)
+    if(EDEN_HEAP_ARENAS)
+        set(heap_mib 6144)
+    endif()
     file(READ "${heap_source}" heap)
-    string(REPLACE "128 MiB" "3072 MiB" heap "${heap}")
-    string(REPLACE "(128u * 1024u * 1024u)" "(3072u * 1024u * 1024u)" heap "${heap}")
+    string(REPLACE "128 MiB" "${heap_mib} MiB" heap "${heap}")
+    string(REPLACE "(128u * 1024u * 1024u)" "((size_t)${heap_mib} << 20)" heap "${heap}")
+    string(REPLACE "base=%p size=%u\\n" "base=%p size=%zu\\n" heap "${heap}")
     string(REPLACE "#include <sys/mman.h>" "#include <sys/mman.h>\nvoid *eden_heap_pages(size_t);\nvoid eden_heap_pages_free(void *, size_t);" heap "${heap}")
     string(REPLACE "mmap(NULL, PS5_OPENGL_HEAP_SIZE, PROT_READ | PROT_WRITE,\n                    MAP_PRIVATE | MAP_ANON, -1, 0)" "eden_heap_pages(PS5_OPENGL_HEAP_SIZE)" heap "${heap}")
     string(REPLACE "if (base == MAP_FAILED)" "if (base == NULL)" heap "${heap}")
@@ -2283,7 +2399,6 @@ void Initialize() {
     string(REPLACE "\"PS5-OpenGL\"" "\"Eden-headless\"" heap "${heap}")
     # Replace the single-mspace wrappers with per-thread arenas over the same heap
     # (headless/heap_arenas.inc). The shared source above stays pinned/unchanged.
-    option(EDEN_HEAP_ARENAS "Per-thread arenas inside the owned heap" ON)
     if(EDEN_HEAP_ARENAS)
         set(heap_wrappers_begin "static int ps5_heap_ready(void) {")
         set(heap_wrappers_end "void ps5_opengl_heap_stats_print(unsigned iteration) {")
@@ -2321,7 +2436,7 @@ void Initialize() {
         "${EDEN_PORT_DIR}/heap_pages.cpp" "${EDEN_PORT_DIR}/performance.cpp"
         "${EDEN_PORT_DIR}/crash_report.cpp" "${EDEN_PORT_DIR}/stop_limit.cpp"
         "${EDEN_PORT_DIR}/elevation/elevation.cpp"
-        "${eden_app_crt}" "${PORT_ROOT}/src/lifecycle.c"
+        "${eden_app_crt}" "${PORT_ROOT}/src/lifecycle.c" "${PORT_ROOT}/src/direct_memory.c"
         "${PORT_BUILD_DIR}/app_heap.c")
     target_compile_definitions(eden-headless PRIVATE PS5_NATIVE=1)
     set_property(TARGET eden-headless APPEND PROPERTY LINK_DEPENDS

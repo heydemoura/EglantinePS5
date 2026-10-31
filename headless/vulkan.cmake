@@ -19,8 +19,10 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     "${EDEN_PORT_DIR}/vulkan_download_batch.inc"
     "${EDEN_PORT_DIR}/vulkan_gc_downloads.inc")
-list(REMOVE_ITEM video_sources vulkan_common/vulkan_device.cpp renderer_vulkan/vk_scheduler.cpp)
-list(APPEND video_sources "${PORT_BUILD_DIR}/vulkan_device.cpp" "${PORT_BUILD_DIR}/vulkan_scheduler.cpp")
+list(REMOVE_ITEM video_sources vulkan_common/vulkan_device.cpp renderer_vulkan/vk_scheduler.cpp
+    vulkan_common/vulkan_memory_allocator.cpp renderer_vulkan/vk_staging_buffer_pool.cpp)
+list(APPEND video_sources "${PORT_BUILD_DIR}/vulkan_device.cpp" "${PORT_BUILD_DIR}/vulkan_scheduler.cpp"
+    "${PORT_BUILD_DIR}/vulkan_memory_allocator.cpp" "${PORT_BUILD_DIR}/vulkan_staging_buffer_pool.cpp")
 # Split the dispatch timer into its three phases (prepare-vulkan-port.py).
 list(REMOVE_ITEM video_sources control/scheduler.cpp)
 list(APPEND video_sources "${PORT_BUILD_DIR}/control_scheduler.cpp")

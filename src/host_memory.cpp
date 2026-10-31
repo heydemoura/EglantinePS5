@@ -59,6 +59,12 @@ eden_fastmem_probe_fallback:
 namespace Common {
 void* AllocateMemoryPages(size_t size) noexcept;
 void FreeMemoryPages(void* base, size_t size) noexcept;
+// The guest's memory (memory_pages.cpp, guest_memory_service.inc): backed where the guest uses it, and given back
+// when a slot holds only zeroes again. With a fastmem window the block must be one piece (AllocateGuestMemory).
+void* AllocateGuestMemory(size_t size) noexcept;
+void* AllocateGuestMemoryWhereUsed(size_t size) noexcept;
+void ClearGuestMemory(std::uint8_t* at, std::uint64_t offset, std::size_t bytes, int fill) noexcept;
+void FreeGuestMemory(void* base, size_t size) noexcept;
 #ifdef PS5_NATIVE
 std::int64_t DirectMemoryStart(const void* pointer) noexcept;
 #endif
@@ -478,7 +484,9 @@ public:
             base = static_cast<u8*>(mapped);
         }
 #endif
-        if (!base) base = static_cast<u8*>(AllocateMemoryPages(requested));
+        // The fastmem window aliases the block by its place in direct memory: it is then one block.
+        if (!base)
+            base = static_cast<u8*>(fastmem ? AllocateGuestMemory(requested) : AllocateGuestMemoryWhereUsed(requested));
         if (!base) throw std::system_error(errno, std::generic_category(), "Backing allocation");
         if (!fastmem) return;
         window = std::make_unique<Window>();
@@ -497,7 +505,7 @@ public:
             return;
         }
 #endif
-        FreeMemoryPages(base, size);
+        FreeGuestMemory(base, size);
     }
 };
 
@@ -525,7 +533,8 @@ HostMemory& HostMemory::operator=(HostMemory&& other) noexcept {
 void HostMemory::ClearBackingRegion(size_t offset, size_t length, u32 fill) {
     if (offset > backing_size || length > backing_size - offset)
         throw std::out_of_range("Backing clear range");
-    if (length) std::memset(backing_base + offset, fill, length);
+    // A fill with zeroes leaves a slot that shows the zero block alone (memory_pages.cpp).
+    if (length) ClearGuestMemory(backing_base + offset, offset, length, static_cast<int>(fill));
 }
 // Eden asks for these while a page table uses VirtualBasePointer() as its fastmem arena. Without a window (the
 // window is off on the console) there is no arena to change: the page table, which Eden has already updated, is what

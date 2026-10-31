@@ -294,7 +294,28 @@ void RecordHle(const char* service, unsigned command, long long ns);
 // dev-settings gc_dirty=upstream restores Eden's rule.
 inline std::atomic<bool> gc_keep_dirty{true};
 inline std::atomic<bool> graphics_memory_short{false};
-inline constexpr std::size_t kShortMemory = std::size_t{384} << 20;
+// 1 GiB: the pool is the CPU's too, and the largest thing a game asked of it at once was a block of
+// 486 MiB (a texture array of 121 layers, decoded before it is uploaded). With less here the collector
+// let the pool run down to 620 MiB in one block, and that request ended the session.
+inline constexpr std::size_t kShortMemory = std::size_t{1} << 30;
+// The guest's headroom in the pool: 1 GiB that a game's own memory may take at once while the graphics
+// caches give memory back. The memory service holds it as blocks of its own (src/guest_memory_service.inc).
+inline constexpr std::size_t kGuestReserve = std::size_t{1} << 30;
+// What the caches see of the pool (performance.cpp, RefreshFreeMemory): its largest free block less the part
+// of the guest's headroom the service does not hold yet (all of it when no service holds any), and memory
+// short when that is under kShortMemory or a burst of the game's writes has taken half the headroom, so the
+// caches start giving memory back before a write has to wait for them. `known`: the pool could be read;
+// `held`, `target`: the service's reserve now and in full (bytes, both 0 without).
+struct PoolView {
+    std::size_t free;
+    bool short_memory;
+};
+inline PoolView ViewOfPool(bool known, std::size_t largest, std::size_t held, std::size_t target) {
+    if (!known) return {0, true};
+    const std::size_t headroom = target == 0 ? kGuestReserve : held < target ? target - held : 0;
+    const std::size_t free = largest > headroom ? largest - headroom : 0;
+    return {free, free < kShortMemory || (target != 0 && held < target / 2)};
+}
 // Development: the texture cache reports its memory use and marks every 300 frames.
 inline std::atomic<bool> texture_budget_log{false};
 // "Is memory short?", installed by the PS5 build (performance.cpp, GraphicsMemoryShort). This
@@ -381,6 +402,10 @@ inline void CountJit(std::atomic<unsigned long long>& counter) {
 // GPU thread only (Vulkan frame report): cumulative GPU-thread idle/dispatch/wait
 // totals with the owner's CPU clock, then a guest-core CPU snapshot.
 void ReportGpuThread(unsigned frame);
+// The heap's line in stderr.log: what it holds of the pool, what of that its blocks use, what it has given back.
+void ReportHeap(const char* why);
+// Gives the heap's empty spaces back to the pool; the bytes returned.
+std::size_t TrimHeap(const char* why);
 inline std::atomic<unsigned> capture_passes{};
 
 class Timer {

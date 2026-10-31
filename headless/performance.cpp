@@ -340,6 +340,10 @@ extern "C" void ps5_opengl_heap_snapshot(const char* phase, unsigned iteration);
 extern "C" unsigned eden_heap_arenas_created(void) __attribute__((weak));
 extern "C" std::size_t eden_heap_committed(void) __attribute__((weak));
 extern "C" std::size_t eden_heap_large_held(unsigned* blocks) __attribute__((weak));
+extern "C" std::size_t eden_heap_trim(void) __attribute__((weak));
+extern "C" void eden_heap_usage(std::size_t* held, std::size_t* in_use, std::size_t* returned) __attribute__((weak));
+extern "C" unsigned eden_guest_memory_wanted(void) __attribute__((weak));
+extern "C" void eden_guest_memory_reserve(std::size_t* held, std::size_t* target) __attribute__((weak));
 #ifdef PS5_NATIVE
 extern "C" std::int64_t sceKernelGetDirectMemorySize();
 extern "C" std::int32_t sceKernelAvailableDirectMemorySize(std::int64_t, std::int64_t, std::size_t, std::int64_t*,
@@ -363,15 +367,32 @@ static void RefreshFreeMemory() {
     std::size_t largest = 0;
     const std::int64_t total = sceKernelGetDirectMemorySize();
     const bool known = total > 0 && sceKernelAvailableDirectMemorySize(0, total, 0x4000, &start, &largest) == 0;
-    largest_free_block.store(known ? largest : 0, std::memory_order_relaxed);
-    graphics_memory_short.store(!known || largest < kShortMemory, std::memory_order_relaxed);
+    std::size_t held = 0, target = 0;
+    if (eden_guest_memory_reserve) eden_guest_memory_reserve(&held, &target);
+    const PoolView view = ViewOfPool(known, largest, held, target);
+    largest_free_block.store(known ? (view.free != 0 ? view.free : 1) : 0, std::memory_order_relaxed);
+    graphics_memory_short.store(view.short_memory, std::memory_order_relaxed);
+    // The heap's empty spaces go back to the pool while it is short (every 2 s at most).
+    static std::atomic<long long> trimmed_ns{0};
+    if (view.short_memory && now - trimmed_ns.load(std::memory_order_relaxed) >= 2'000'000'000) {
+        trimmed_ns.store(now, std::memory_order_relaxed);
+        TrimHeap("the pool is short");
+    }
+}
+// A write to the guest's memory waiting for a block (src/guest_memory_service.inc, WaitForBlock): the game's own
+// memory comes first, so while one waits the caches see memory short and none free, and the texture collector
+// evicts at its hardest until the write has its block.
+static bool GuestMemoryWanted() {
+    return eden_guest_memory_wanted && eden_guest_memory_wanted() != 0;
 }
 static bool GraphicsMemoryShort() {
+    if (GuestMemoryWanted()) return true;
     RefreshFreeMemory();
     return graphics_memory_short.load(std::memory_order_relaxed);
 }
 // What the caches' "memory in use" is measured against (performance.h, graphics_memory_free).
 static unsigned long long GraphicsMemoryFree() {
+    if (GuestMemoryWanted()) return 1; // not 0: the caches read 0 as "not known"
     RefreshFreeMemory();
     return largest_free_block.load(std::memory_order_relaxed);
 }
@@ -393,7 +414,31 @@ void RecordHle(const char* service, unsigned command, long long ns) {
     entry.second += static_cast<unsigned long long>(ns > 0 ? ns : 0);
 }
 
+void ReportHeap(const char* why) {
+    if (!eden_heap_usage) return;
+    std::size_t held = 0, in_use = 0, returned = 0;
+    eden_heap_usage(&held, &in_use, &returned);
+    unsigned large_blocks = 0;
+    const std::size_t large = eden_heap_large_held ? eden_heap_large_held(&large_blocks) : 0;
+    std::fprintf(stderr, "[EglantinePS5] heap: holds %zu MiB (%zu MiB of pieces, %zu MiB in %u large blocks), "
+                         "%zu MiB of it in use; %zu MiB given back so far (%s)\n",
+                 held >> 20, (held - large) >> 20, large >> 20, large_blocks, in_use >> 20, returned >> 20, why);
+}
+
+std::size_t TrimHeap(const char* why) {
+    if (!eden_heap_trim) return 0;
+    const std::size_t returned = eden_heap_trim();
+    if (returned != 0) {
+        char text[160];
+        std::snprintf(text, sizeof(text), "gave back %zu MiB: %s", returned >> 20, why);
+        ReportHeap(text);
+    }
+    return returned;
+}
+
 void ReportGpuThread(unsigned frame) {
+    static unsigned heap_reports = 0;
+    if (++heap_reports % 6 == 1) ReportHeap("report");
     // Heap growth and arena use over the run (allocation failures abort the title).
     ps5_opengl_heap_snapshot("vulkan_report", frame);
     {

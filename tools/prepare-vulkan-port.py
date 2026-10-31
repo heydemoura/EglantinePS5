@@ -419,6 +419,144 @@ adapt('src/video_core/renderer_vulkan/vk_present_manager.cpp', 'vulkan_present_m
 # descriptor at GPU address 0; desktop kernels only log the resulting page fault, the PS5
 # kills the title (TCP read at VA 0).
 # The spec requires a null pAddressInfo (or VK_WHOLE_SIZE) for a null descriptor.
+# The allocator's budget is the driver's, and on the console it does not say what is available: the
+# driver counts each allocation twice (as VRAM and as visible VRAM), so the budget of the 8 GiB heap
+# is used up at about 4 GiB, and it knows nothing of the pool the CPU shares. Eden asks for images
+# and buffers within the budget and takes a refusal as final. A refused image or buffer is asked for
+# again outside the budget; the driver refuses when the pool has no room, which is still the end of
+# the session, and stderr.log then says what the pool had.
+ALLOCATOR_REFUSED = """    VkResult created = CALL;
+    if (created != VK_SUCCESS) {
+        VmaAllocationCreateInfo outside_budget = alloc_ci;
+        outside_budget.flags &= ~static_cast<VmaAllocationCreateFlags>(VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT);
+        created = AGAIN;
+        static std::atomic<unsigned long long> refused{0};
+        const auto times = refused.fetch_add(1, std::memory_order_relaxed) + 1;
+        if ((times & (times - 1)) == 0) { // the 1st, 2nd, 4th, 8th ... time
+            std::fprintf(stderr, "EDEN_GRAPHICS_MEMORY budget refused %llu requests; asked again outside it: result %d, DETAIL\\n",
+                         times, int(created), VALUES);
+        }
+        if (created != VK_SUCCESS) {
+            VmaBudget held[VK_MAX_MEMORY_HEAPS]{};
+            vmaGetHeapBudgets(allocator, held);
+            unsigned long long blocks = 0, used = 0;
+            for (const VmaBudget& heap : held) {
+                blocks += heap.statistics.blockBytes;
+                used += heap.statistics.allocationBytes;
+            }
+            const auto free_block = ::Eden::Performance::graphics_memory_free.load(std::memory_order_relaxed);
+            std::size_t guest_span = 0, guest_held = 0;
+            ::Common::GuestMemoryUsage(&guest_span, &guest_held);
+            std::fprintf(stderr, "EDEN_GRAPHICS_MEMORY refused outside the budget too (result %d): the pool's largest free "
+                         "block is %llu MiB; the allocator holds %llu MiB in blocks, %llu MiB of it in use; the guest's "
+                         "memory holds %llu MiB, the heap %llu MiB\\n",
+                         int(created), free_block ? free_block() >> 20 : 0ull, blocks >> 20, used >> 20,
+                         static_cast<unsigned long long>(guest_held >> 20),
+                         static_cast<unsigned long long>(eden_heap_committed() >> 20));
+        }
+    }
+    vk::Check(created);
+"""
+def refused(call, detail, values):
+    return (ALLOCATOR_REFUSED.replace('CALL', call).replace('AGAIN', call.replace('&alloc_ci', '&outside_budget'))
+            .replace('DETAIL', detail).replace('VALUES', values))
+IMAGE_VALUES = 'ci.extent.width, ci.extent.height, ci.extent.depth, ci.arrayLayers, ci.mipLevels, unsigned(ci.samples), int(ci.format)'
+BUFFER_VALUES = 'static_cast<unsigned long long>(ci.size), unsigned(ci.usage)'
+adapt('src/video_core/vulkan_common/vulkan_memory_allocator.cpp', 'vulkan_memory_allocator.cpp', [
+    ('#include "video_core/vulkan_common/vulkan_memory_allocator.h"\n',
+     '#include "video_core/vulkan_common/vulkan_memory_allocator.h"\n#include <atomic>\n#include <cstddef>\n#include <cstdio>\n#include "performance.h"\nnamespace Common { void GuestMemoryUsage(std::size_t* span, std::size_t* held) noexcept; }\nextern "C" std::size_t eden_heap_committed(void);\n'),
+    # An image with nothing bound (the sparse virtual texture arrays no pool could hold): when the driver refuses
+    # it with residency, it is asked for again with binding alone, and what it said is written down.
+    ('    if (device.GetDispatchLoader().vkCreateImage(*device.GetLogical(), &sparse_ci, nullptr,\n'
+     '                                                 &sparse) != VK_SUCCESS) {\n'
+     '        return vk::Image{};\n'
+     '    }\n',
+     """    VkResult sparse_result = device.GetDispatchLoader().vkCreateImage(*device.GetLogical(), &sparse_ci, nullptr, &sparse);
+    if (sparse_result != VK_SUCCESS) {
+        VkImageCreateInfo binding_only = ci;
+        binding_only.flags |= VK_IMAGE_CREATE_SPARSE_BINDING_BIT;
+        const VkResult second = device.GetDispatchLoader().vkCreateImage(*device.GetLogical(), &binding_only, nullptr, &sparse);
+        std::fprintf(stderr, "EDEN_SPARSE_IMAGE %ux%ux%u, %u layers, %u levels, format %d, usage 0x%x, flags 0x%x, tiling %d: "
+                     "with residency %d, binding alone %d\\n",
+                     ci.extent.width, ci.extent.height, ci.extent.depth, ci.arrayLayers, ci.mipLevels, int(ci.format),
+                     unsigned(ci.usage), unsigned(ci.flags), int(ci.tiling), int(sparse_result), int(second));
+        if (second != VK_SUCCESS) {
+            return vk::Image{};
+        }
+    }
+"""),
+    ('    vk::Check(vmaCreateBuffer(allocator, &ci, &alloc_ci, &handle, &allocation, &alloc_info));\n',
+     refused('vmaCreateBuffer(allocator, &ci, &alloc_ci, &handle, &allocation, &alloc_info)',
+             'buffer of %llu bytes, usage 0x%x', BUFFER_VALUES)),
+    ('    vk::Check(vmaCreateBufferWithAlignment(allocator, &ci, &alloc_ci, min_alignment, &handle,\n'
+     '                                           &allocation, &alloc_info));\n',
+     refused('vmaCreateBufferWithAlignment(allocator, &ci, &alloc_ci, min_alignment, &handle,\n'
+             '                                           &allocation, &alloc_info)',
+             'buffer of %llu bytes, usage 0x%x', BUFFER_VALUES)),
+])
+# Staging buffers (headless/staging_buffers.h): above 16 MiB a buffer the CPU writes or reads is its
+# transfer rounded up to 16 MiB instead of the next power of two, a kept buffer is handed out again
+# only when it holds the transfer, and a refused buffer is asked for once more after the kept ones
+# the GPU is done with are let go. A Switch 2 title was refused 512 MiB for a 341 MiB transfer with
+# 480 MiB free. No Finish() when releasing: a buffer handed out earlier may not have its copy recorded.
+adapt('src/video_core/renderer_vulkan/vk_staging_buffer_pool.cpp', 'vulkan_staging_buffer_pool.cpp', [
+    ('#include "video_core/vulkan_common/vulkan_wrapper.h"\n',
+     '#include "video_core/vulkan_common/vulkan_wrapper.h"\n#include <atomic>\n#include <cstdio>\n#include "staging_buffers.h"\n'),
+    ('    const auto is_free = [this](const StagingBuffer& entry) {\n'
+     '        return !entry.deferred && scheduler.IsFree(entry.tick);\n'
+     '    };',
+     '    const auto is_free = [this, size](const StagingBuffer& entry) {\n'
+     '        return !entry.deferred && scheduler.IsFree(entry.tick) &&\n'
+     '               ::Eden::StagingBuffers::Holds(entry.mapped_span.size(), entry.log2_level) >= size;\n'
+     '    };'),
+    ('    auto const log2_size = Common::Log2Ceil<u32>(u32(size));\n',
+     '    auto const log2_size = Common::Log2Ceil<u32>(u32(size));\n'
+     '    const bool exact = ::Eden::StagingBuffers::Exact(size, usage != MemoryUsage::DeviceLocal);\n'
+     '    const VkDeviceSize made = ::Eden::StagingBuffers::Size(size, log2_size, exact);\n'
+     '    if (exact) {\n'
+     '        // Kept buffers of this power of two too small for the transfer go before it is made.\n'
+     '        ::Eden::StagingBuffers::ReleaseFrom(GetCache(usage)[log2_size], [this, size](const StagingBuffer& entry) {\n'
+     '            return !entry.deferred && scheduler.IsFree(entry.tick) &&\n'
+     '                   ::Eden::StagingBuffers::Holds(entry.mapped_span.size(), entry.log2_level) < size;\n'
+     '        });\n'
+     '    }\n'),
+    ('        .size = 1ULL << log2_size,\n', '        .size = made,\n'),
+    ('    vk::Buffer buffer = memory_allocator.CreateBuffer(buffer_ci, usage);\n',
+     '    vk::Buffer buffer;\n'
+     '    try {\n'
+     '        buffer = memory_allocator.CreateBuffer(buffer_ci, usage);\n'
+     '    } catch (const vk::Exception& refused) {\n'
+     '        if (refused.GetResult() != VK_ERROR_OUT_OF_DEVICE_MEMORY) {\n'
+     '            throw;\n'
+     '        }\n'
+     '        // Refused: the kept buffers the GPU is done with go, and the buffer is asked for once\n'
+     '        // more. Refused again, the error goes on as before.\n'
+     '        const auto idle = [this](const StagingBuffer& entry) {\n'
+     '            return !entry.deferred && scheduler.IsFree(entry.tick);\n'
+     '        };\n'
+     '        ::Eden::StagingBuffers::Released released;\n'
+     '        for (StagingBuffersCache* const cache : {&device_local_cache, &upload_cache, &download_cache}) {\n'
+     '            for (StagingBuffers& level : *cache) {\n'
+     '                released += ::Eden::StagingBuffers::ReleaseFrom(level, idle);\n'
+     '            }\n'
+     '        }\n'
+     '        std::fprintf(stderr, "EDEN_STAGING_OOM asked=%zu made=%llu released=%zu buffers (%llu MiB)\\n", size,\n'
+     '                     static_cast<unsigned long long>(made), released.buffers,\n'
+     '                     static_cast<unsigned long long>(released.bytes >> 20));\n'
+     '        buffer = memory_allocator.CreateBuffer(buffer_ci, usage);\n'
+     '    }\n'
+     '    // A large buffer smaller than the power of two: the 1st, 2nd, 4th, 8th ... in the log.\n'
+     '    if (exact && made >= (VkDeviceSize{64} << 20) && made < (VkDeviceSize{1} << log2_size)) {\n'
+     '        static std::atomic<unsigned long long> large{0};\n'
+     '        const auto times = large.fetch_add(1, std::memory_order_relaxed) + 1;\n'
+     '        if ((times & (times - 1)) == 0) {\n'
+     '            std::fprintf(stderr, "EDEN_STAGING_EXACT %llu MiB made for a transfer of %llu MiB, not the %llu MiB of the "\n'
+     '                         "next power of two (%llu so far)\\n",\n'
+     '                         static_cast<unsigned long long>(made >> 20), static_cast<unsigned long long>(size >> 20),\n'
+     '                         static_cast<unsigned long long>((VkDeviceSize{1} << log2_size) >> 20), times);\n'
+     '        }\n'
+     '    }\n'),
+])
 # Development A/B switches for device features (headless/dev_vulkan.h, dev-settings).
 adapt('src/video_core/vulkan_common/vulkan_device.cpp', 'vulkan_device.cpp', [
     ('#include <algorithm>', '#include <algorithm>\n#include <cstdio>\n#include "dev_vulkan.h"\n#include "performance.h"'),

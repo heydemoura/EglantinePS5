@@ -45,6 +45,10 @@ void Forward(int signal, siginfo_t* info, void* context) {
 }
 
 void Handle(int signal, siginfo_t* info, void* context) {
+    // A write to a slot of the guest's memory that shows the zero block is the service's to give a block.
+    if (const auto guest = Eden::Fastmem::guest_write_fault.load(std::memory_order_acquire);
+        guest && guest(info ? info->si_addr : nullptr))
+        return;
     const std::uint64_t pc = Eden::Fastmem::ContextRip(context);
     for (auto& range : ranges) {
         const auto begin = range.begin.load(std::memory_order_acquire);
