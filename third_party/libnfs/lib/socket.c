@@ -2059,13 +2059,35 @@ rpc_set_sockaddr(struct rpc_context *rpc, const char *server, int port)
 {
 	struct addrinfo *ai = NULL;
 	int err, i;
+	/* EglantinePS5: the console's getaddrinfo cannot resolve even a numeric address, so one is read here. */
+	struct addrinfo numeric_ai;
+	struct sockaddr_storage numeric_sa;
+	int numeric = 0;
+
+	memset(&numeric_ai, 0, sizeof(numeric_ai));
+	memset(&numeric_sa, 0, sizeof(numeric_sa));
+	if (inet_pton(AF_INET, server, &((struct sockaddr_in *)&numeric_sa)->sin_addr) == 1) {
+		((struct sockaddr_in *)&numeric_sa)->sin_family = AF_INET;
+		numeric_ai.ai_family = AF_INET;
+		numeric_ai.ai_addrlen = sizeof(struct sockaddr_in);
+		numeric = 1;
+	} else if (inet_pton(AF_INET6, server, &((struct sockaddr_in6 *)&numeric_sa)->sin6_addr) == 1) {
+		((struct sockaddr_in6 *)&numeric_sa)->sin6_family = AF_INET6;
+		numeric_ai.ai_family = AF_INET6;
+		numeric_ai.ai_addrlen = sizeof(struct sockaddr_in6);
+		numeric = 1;
+	}
+	if (numeric) {
+		numeric_ai.ai_addr = (struct sockaddr *)&numeric_sa;
+		ai = &numeric_ai;
+	}
 
 	/*
 	 * A resolver hiccup should not tear the mount down, so retry a
 	 * transient failure a few times. Keep the bound small, this runs on
 	 * the caller's event loop thread.
 	 */
-	for (i = 0, err = 0; i < RESOLVE_RETRIES; i++) {
+	for (i = 0, err = 0; !numeric && i < RESOLVE_RETRIES; i++) {
 		if (i) {
 			RPC_LOG(rpc, 2, "rpc_set_sockaddr: getaddrinfo(%s) failed "
 				"temporarily (%d), retrying", server, err);
@@ -2135,7 +2157,8 @@ rpc_set_sockaddr(struct rpc_context *rpc, const char *server, int port)
 		break;
 #endif
 	}
-	freeaddrinfo(ai);
+	if (!numeric)
+		freeaddrinfo(ai);
 
 	/* Remember the port so a re-resolve on reconnect can reuse it. */
 	rpc->port = port;

@@ -566,7 +566,8 @@ std::optional<pe::ui::Services::NfsResult> EdenServices::edit_nfs_shares(const s
     Eden::TextRequest request;
     request.title = u"NFS shares";
     request.placeholder = u"nfs://192.168.1.85/roms";
-    request.initial = Common::UTF8ToUTF16(current);
+    // Nothing kept yet: the keyboard starts from an address to edit.
+    request.initial = Common::UTF8ToUTF16(current.empty() ? std::string{"nfs://192.168.1.87/switch"} : current);
     request.max_length = 400;
     const auto answer = Eden::AskSystemKeyboard(request, stop);
     if (answer.outcome == Eden::TextOutcome::unavailable)
