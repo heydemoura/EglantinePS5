@@ -445,24 +445,32 @@ namespace {
 // instruction's address and the first return address of the app's code above the stack pointer:
 // a write by the emulated CPU has the JIT's entry point there, a write by the emulator itself the
 // function that called the copy. The promotions are counted by that place (ServiceReport).
+constexpr std::size_t WriterPcs = 4;
 struct WriterSite {
-    std::atomic<std::uintptr_t> pc{0};
+    std::atomic<std::uintptr_t> key{0};
+    std::uintptr_t pcs[WriterPcs]{};
     std::atomic<std::uint64_t> count{0};
 };
 constexpr std::size_t WriterSites = 512;
 WriterSite writer_sites[WriterSites];
 std::atomic<std::uint64_t> promotions_in_app_code{0}, promotions_elsewhere{0};
-thread_local std::uintptr_t fault_site = 0;
+thread_local std::uintptr_t fault_pcs[WriterPcs] = {};
 thread_local bool fault_in_app_code = false;
 
 void NoteWriter() noexcept {
     (fault_in_app_code ? promotions_in_app_code : promotions_elsewhere).fetch_add(1, std::memory_order_relaxed);
-    const std::uintptr_t key = fault_site + 1;
-    std::size_t at = static_cast<std::size_t>((key * 0x9E3779B97F4A7C15ull) >> 55) % WriterSites;
+    std::uintptr_t key = 0xCBF29CE484222325ull;
+    for (const std::uintptr_t pc : fault_pcs) key = (key ^ pc) * 0x100000001B3ull;
+    key |= 1;
+    std::size_t at = static_cast<std::size_t>((key >> 12) % WriterSites);
     for (std::size_t probe = 0; probe < 16; ++probe, at = (at + 1) % WriterSites) {
         std::uintptr_t expected = 0;
-        if (writer_sites[at].pc.compare_exchange_strong(expected, key, std::memory_order_acq_rel) ||
-            expected == key) {
+        if (writer_sites[at].key.compare_exchange_strong(expected, key, std::memory_order_acq_rel)) {
+            for (std::size_t i = 0; i < WriterPcs; ++i) writer_sites[at].pcs[i] = fault_pcs[i];
+            writer_sites[at].count.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        if (expected == key) {
             writer_sites[at].count.fetch_add(1, std::memory_order_relaxed);
             return;
         }
@@ -598,17 +606,21 @@ struct sigaction service_previous_segv{}, service_previous_bus{};
 void ServiceSignal(int signal, siginfo_t* info, void* context) {
 #ifdef PS5_NATIVE
     fault_in_app_code = false;
-    fault_site = 0;
+    for (std::uintptr_t& pc : fault_pcs) pc = 0;
     if (context != nullptr) {
         const auto low = reinterpret_cast<std::uintptr_t>(__eden_text_start) + 8;
         const auto high = reinterpret_cast<std::uintptr_t>(__eden_text_end);
         const std::uintptr_t rip = Eden::Fastmem::ContextRip(context);
         fault_in_app_code = rip >= low && rip < high;
         const auto* stack = reinterpret_cast<const std::uintptr_t*>(Eden::Fastmem::ContextRsp(context));
-        for (unsigned i = 0; i < 128; ++i) {
-            if (stack[i] >= low && stack[i] < high) {
-                fault_site = stack[i];
-                break;
+        std::size_t found = 0;
+        // Never past the page (16 KiB) that holds the stack pointer: a thread's stack can end a few
+        // hundred bytes above it, and what lies after it is not mapped.
+        const auto page_end = ((reinterpret_cast<std::uintptr_t>(stack) | 0x3FFFu) + 1);
+        const auto room = static_cast<unsigned>((page_end - reinterpret_cast<std::uintptr_t>(stack)) / sizeof(std::uintptr_t));
+        for (unsigned i = 0; i < 160 && i < room && found < WriterPcs; ++i) {
+            if (stack[i] >= low && stack[i] < high && (found == 0 || fault_pcs[found - 1] != stack[i])) {
+                fault_pcs[found++] = stack[i];
             }
         }
     }
@@ -863,31 +875,35 @@ void ServiceReport(SparseRange& range, const char* when) noexcept {
         reserve_count.load(std::memory_order_relaxed) * (SparseSlot >> 20));
     if (length > 0) Report(line);
     // Who wrote the slots that were promoted: the largest places (offsets in the app's image).
-    struct Top { std::uintptr_t pc; std::uint64_t count; } top[8]{};
+    struct Top { const WriterSite* site; std::uint64_t count; } top[10]{};
     for (const WriterSite& site : writer_sites) {
-        const std::uintptr_t pc = site.pc.load(std::memory_order_relaxed);
         const std::uint64_t count = site.count.load(std::memory_order_relaxed);
-        if (pc == 0 || count <= top[7].count) continue;
-        std::size_t place = 7;
+        if (site.key.load(std::memory_order_relaxed) == 0 || count <= top[9].count) continue;
+        std::size_t place = 9;
         while (place > 0 && top[place - 1].count < count) {
             top[place] = top[place - 1];
             --place;
         }
-        top[place] = {pc, count};
+        top[place] = {&site, count};
     }
-    char writers[512];
+    char writers[640];
     int used = std::snprintf(writers, sizeof(writers),
-                             "EDEN_CRAM_WRITERS promotions by code of the app %llu, by other code %llu; first return address in the app (offset):",
+                             "EDEN_CRAM_WRITERS promotions by code of the app %llu, by other code %llu\n",
                              (unsigned long long)promotions_in_app_code.load(), (unsigned long long)promotions_elsewhere.load());
+    if (used > 0) Report(writers);
     for (const Top& entry : top) {
-        if (entry.count == 0 || used < 0 || static_cast<std::size_t>(used) >= sizeof(writers) - 40) break;
-        used += std::snprintf(writers + used, sizeof(writers) - used, " %llx:%llu",
-                              (unsigned long long)(entry.pc - 1 - 0x400000ull), (unsigned long long)entry.count);
-    }
-    if (used > 0 && static_cast<std::size_t>(used) < sizeof(writers) - 2) {
-        writers[used++] = '\n';
-        writers[used] = 0;
-        Report(writers);
+        if (entry.count == 0) break;
+        int length = std::snprintf(writers, sizeof(writers), "EDEN_CRAM_WRITER %llu:", (unsigned long long)entry.count);
+        for (const std::uintptr_t pc : entry.site->pcs) {
+            if (length > 0 && static_cast<std::size_t>(length) < sizeof(writers) - 24)
+                length += std::snprintf(writers + length, sizeof(writers) - length, " %llx",
+                                        (unsigned long long)(pc != 0 ? pc - 0x400000ull : 0));
+        }
+        if (length > 0 && static_cast<std::size_t>(length) < sizeof(writers) - 2) {
+            writers[length++] = '\n';
+            writers[length] = 0;
+            Report(writers);
+        }
     }
 }
 

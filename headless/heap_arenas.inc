@@ -959,16 +959,24 @@ static unsigned eden_site_slot(const void *address) {
 static __attribute__((noinline)) unsigned eden_site_collect(uintptr_t pcs[EDEN_SITE_PCS]) {
   const uintptr_t low = (uintptr_t)__eden_text_start + 8, high = (uintptr_t)__eden_text_end;
   const uintptr_t *stack = (const uintptr_t *)__builtin_frame_address(0);
+  /* The result is written after the scan: the array of the caller lies in the stack being read. */
+  uintptr_t local[EDEN_SITE_PCS] = {0};
   unsigned found = 0;
-  for (unsigned i = 0; i < 128 && found < EDEN_SITE_PCS; ++i) {
+  /* Never past the page (16 KiB) that holds the frame: a thread's stack can end a few hundred bytes
+   * above, and what lies after it is not mapped. */
+  const uintptr_t page_end = (((uintptr_t)stack | 0x3FFFu) + 1);
+  const unsigned room = (unsigned)((page_end - (uintptr_t)stack) / sizeof(uintptr_t));
+  for (unsigned i = 0; i < 128 && i < room && found < EDEN_SITE_PCS; ++i) {
     const uintptr_t value = stack[i];
     /* The app's code is execute-only on the console: its bytes cannot be read to check that the
      * address follows a call (the system ends the process). A stale word of the stack can be taken
      * for a return address; the chain is read with that in mind. */
-    if (value < low || value >= high)
+    if (value < low || value >= high || (found != 0 && local[found - 1] == value))
       continue;
-    pcs[found++] = value;
+    local[found++] = value;
   }
+  for (unsigned i = 0; i < EDEN_SITE_PCS; ++i)
+    pcs[i] = local[i];
   return found;
 }
 
