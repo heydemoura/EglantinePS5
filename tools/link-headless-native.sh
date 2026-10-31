@@ -49,6 +49,10 @@ fi
     --error-limit=0 -Map="$output.map" \
     --wrap=aligned_alloc --wrap=malloc --wrap=calloc --wrap=realloc --wrap=free \
     --wrap=posix_memalign --wrap=malloc_usable_size \
+    --wrap=fopen --wrap=fread --wrap=fseek --wrap=fseeko --wrap=ftell --wrap=ftello --wrap=rewind \
+    --wrap=feof --wrap=ferror --wrap=fileno --wrap=fgetc --wrap=getc --wrap=fgets --wrap=setvbuf \
+    --wrap=flockfile --wrap=funlockfile --wrap=open --wrap=close --wrap=read --wrap=pread --wrap=lseek \
+    --wrap=fstat --wrap=stat --wrap=lstat \
     -o "$output" --start-group "${libraries[@]}" "${radv_link_inputs[@]}" \
     "$sdk/target/lib/libc++.a" "$sdk/target/lib/libc++abi.a" "$sdk/target/lib/libunwind.a" \
     --end-group --as-needed "$sdk/target/lib/libSceLibcInternal.so" "$sdk/target/lib/libkernel.so" \

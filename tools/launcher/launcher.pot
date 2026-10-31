@@ -386,7 +386,7 @@ msgstr ""
 msgid "Could not save the folder. Please try again."
 msgstr ""
 
-#: pe/ui/browse.cpp, pe/ui/game_options.cpp, pe/ui/library.cpp, pe/ui/profiles.cpp
+#: eden_services.cpp, pe/ui/browse.cpp, pe/ui/game_options.cpp, pe/ui/library.cpp, pe/ui/profiles.cpp
 msgid "Could not save. Please try again."
 msgstr ""
 
@@ -820,6 +820,10 @@ msgstr ""
 msgid "GAMES"
 msgstr ""
 
+#: pe/ui/settings.cpp
+msgid "Games on a PC or a NAS, played over the network. Add each server with its address and exported folder."
+msgstr ""
+
 #: pe/ui/remote.cpp, pe/ui/settings.cpp
 msgid "Games on your network, downloaded when you play them."
 msgstr ""
@@ -1144,6 +1148,62 @@ msgstr ""
 msgid "NEXT START"
 msgstr ""
 
+#: eden_services.cpp
+msgid "NFS share connected."
+msgstr ""
+
+#: eden_services.cpp
+msgid "NFS share not connected:"
+msgstr ""
+
+#: eden_services.cpp
+msgid "NFS share not connected: that folder is not exported by the server. It exports:"
+msgstr ""
+
+#: eden_services.cpp
+msgid "NFS share not connected: the connection was refused or could not be made."
+msgstr ""
+
+#: eden_services.cpp
+msgid "NFS share not connected: the folder is not on the server."
+msgstr ""
+
+#: eden_services.cpp
+msgid "NFS share not connected: the server closed the connection."
+msgstr ""
+
+#: eden_services.cpp
+msgid "NFS share not connected: the server denies access to this console."
+msgstr ""
+
+#: eden_services.cpp
+msgid "NFS share not connected: the server did not answer."
+msgstr ""
+
+#: eden_services.cpp
+msgid "NFS share not connected: the server refused the mount."
+msgstr ""
+
+#: eden_services.cpp
+msgid "NFS share not connected: the server's name could not be found."
+msgstr ""
+
+#: eden_services.cpp
+msgid "NFS share not saved:"
+msgstr ""
+
+#: pe/ui/settings.cpp
+msgid "NFS shares"
+msgstr ""
+
+#: pe/ui/settings.cpp
+msgid "NFS SHARES"
+msgstr ""
+
+#: eden_services.cpp
+msgid "NFS shares removed."
+msgstr ""
+
 #: pe/ui/multiplayer.cpp
 msgid "Nickname"
 msgstr ""
@@ -1211,7 +1271,7 @@ msgid "Nobody approved the code in time."
 msgstr ""
 
 #. No add-ons (updates or DLC).
-#: pe/ui/library.cpp
+#: pe/ui/library.cpp, pe/ui/settings.cpp
 msgid "None"
 msgstr ""
 
@@ -1778,6 +1838,14 @@ msgid "Several sources have this game. Which one should it come from?"
 msgstr ""
 
 #: pe/ui/settings.cpp
+msgid "SHARE"
+msgstr ""
+
+#: pe/ui/settings.cpp
+msgid "SHARES"
+msgstr ""
+
+#: pe/ui/settings.cpp
 msgid "Show or hide the FPS overlay"
 msgstr ""
 
@@ -1945,7 +2013,7 @@ msgstr ""
 msgid "The game starts when the download is done."
 msgstr ""
 
-#: pe/ui/game_options.cpp, pe/ui/multiplayer.cpp
+#: pe/ui/game_options.cpp, pe/ui/multiplayer.cpp, pe/ui/settings.cpp
 msgid "The keyboard could not be opened."
 msgstr ""
 
@@ -2329,6 +2397,10 @@ msgstr ""
 
 #: pe/ui/multiplayer.cpp
 msgid "{0} public rooms"
+msgstr ""
+
+#: pe/ui/settings.cpp
+msgid "{0} shares"
 msgstr ""
 
 #: pe/ui/remote.cpp, pe/ui/settings.cpp

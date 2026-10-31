@@ -33,6 +33,7 @@ Launcher::Launcher(Services &services, Textures &textures, const Fonts &fonts, b
     clock_ = services_.clock();
     prefs_ = services_.preferences();
     sources_ = services_.sources();
+    nfs_shares_ = services_.nfs_shares();
     sources_generation_ = sources_.generation; // the list read below has the sources' games
     downloads_ = services_.downloads();
     apply_look();
@@ -41,9 +42,9 @@ Launcher::Launcher(Services &services, Textures &textures, const Fonts &fonts, b
     const bool continue_ready = home_.setup_ready && home_.last_exists;
     home_focus_ = continue_ready ? 0 : home_.setup_ready ? 1 : 2;
     home_springs_[static_cast<std::size_t>(home_focus_)].snap(1.0f);
-    settings_.visible = 12;
-    settings_.pitch = 52.0f;
-    settings_.reset(12, 0);
+    settings_.visible = 13;
+    settings_.pitch = 48.0f;
+    settings_.reset(13, 0);
     section_.snap(1.0f);
     detail_.snap(1.0f);
     cue(home_.launch_failed ? Cue::notify : first_start ? Cue::welcome : Cue::resume);
@@ -58,6 +59,8 @@ Launcher::~Launcher()
     if (room_edit_.valid()) room_edit_.wait();
     seed_edit_stop_ = true;
     if (seed_edit_.valid()) seed_edit_.wait();
+    nfs_edit_stop_ = true;
+    if (nfs_edit_.valid()) nfs_edit_.wait();
     // The game list may still be reading; it uses the services this launcher was given.
     if (scan_.valid())
         scan_.wait();
@@ -255,6 +258,7 @@ void Launcher::update(float dt)
     refresh_sync_setup(dt);
     update_multiplayer();
     update_game_options();
+    update_nfs();
     update_controllers(dt);
     transition_.update(dt);
     press_ = std::max(0.0f, press_ - dt / 0.18f);

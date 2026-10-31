@@ -13,11 +13,29 @@
 #include <vector>
 
 extern "C" int sceKernelGetdents(int, char*, int);
+// The NFS shares (nfs/nfs.h): a folder under /nfs is listed by the share's client, not by the console.
+extern "C" bool nfs_is_path(const char*) __attribute__((weak));
+extern "C" int nfs_list_each(const char*, void (*)(void*, const char*, unsigned long long, int), void*)
+    __attribute__((weak));
 
 namespace Eden {
 inline std::vector<std::filesystem::directory_entry> ReadNativeDirectory(
         const std::filesystem::path& path, std::error_code& error) {
     std::vector<std::filesystem::directory_entry> entries;
+    if (nfs_is_path && nfs_is_path(path.c_str())) {
+        std::vector<std::string> names;
+        const int count = nfs_list_each(path.c_str(), [](void* user, const char* name, unsigned long long, int) {
+            static_cast<std::vector<std::string>*>(user)->emplace_back(name);
+        }, &names);
+        if (count < 0) {
+            error = {-count, std::generic_category()};
+            return entries;
+        }
+        error.clear();
+        for (const std::string& name : names) entries.emplace_back(path / name, error);
+        if (error) entries.clear();
+        return entries;
+    }
     const int fd = open(path.c_str(), O_RDONLY | O_DIRECTORY);
     if (fd < 0) {
         error = {errno, std::generic_category()};

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+#include "../nfs/nfs.h"
 #include "eden_services.h"
 
 #include "assets_dir.h"
@@ -23,6 +24,9 @@
 #include "common/string_util.h"
 
 #include <algorithm>
+#include <chrono>
+#include <set>
+#include <thread>
 #include <stdexcept>
 #include <cctype>
 #include <cstddef>
@@ -221,11 +225,25 @@ std::string GameTitle(const std::string& filename) {
     return Eden::UsableName(saved) ? Eden::PlainName(saved) : CleanTitle(filename);
 }
 
+// A game's file in roms/. A game that is a folder (exefs/ and romfs/, extracted) is listed as "<folder>.dir" and
+// is started from its exefs/main: Eden then loads the folder, and finds romfs/ next to exefs/. The folder is
+// in roms/ or on an NFS share (nfs_alias_target).
+static bool IsFolderGame(const std::string& file) { return file.size() > 4 && file.ends_with(".dir"); }
+static std::string RomPath(const std::string& file) {
+    if (IsFolderGame(file)) {
+        const std::string local = Eden::AssetsPath("roms/" + file.substr(0, file.size() - 4) + "/exefs/main");
+        if (Eden::FileExists(local)) return local;
+        char shared[NFS_PATH_MAX];
+        if (nfs_alias_target(file.c_str(), shared, sizeof(shared))) return shared;
+    }
+    return Eden::AssetsPath("roms/" + file);
+}
+
 // The cached cover of a ROM, extracted from it when missing; empty when it has none.
 std::string EnsureCover(const std::string& filename, std::string* title = nullptr) {
     const std::string cover = CoverPath(filename);
     if (Eden::FileExists(cover) && !title) return cover;
-    const std::string rom = Eden::AssetsPath("roms/" + filename);
+    const std::string rom = RomPath(filename);
     if (!Eden::FileExists(rom)) return {};
     (void)mkdir(Eden::CoversDir().c_str(), 0777);
     char extracted[513]{};
@@ -275,7 +293,7 @@ int CountInstalledGames() {
     int count = 0;
     for (const auto& entry : entries) {
         const std::string filename = entry.path().filename().string();
-        if (Eden::ValidRomFilename(filename) && IsFile(Eden::AssetsPath("roms/" + filename))) ++count;
+        if (Eden::ValidRomFilename(filename) && IsFile(RomPath(filename))) ++count;
     }
     return count;
 }
@@ -536,6 +554,95 @@ std::optional<std::int64_t> EdenServices::ask_seed(std::int64_t current, const s
     return Eden::RngSeedFromText(Common::UTF16ToUTF8(answer.text));
 }
 
+static std::string ReadNfsText();
+
+std::string EdenServices::nfs_shares() { return ReadNfsText(); }
+
+// The keyboard for the addresses (several go separated by ';'), then the connection: the shares are kept, mounted and
+// the player is told how it went.
+std::optional<pe::ui::Services::NfsResult> EdenServices::edit_nfs_shares(const std::atomic<bool>& stop) {
+    std::string current = ReadNfsText();
+    std::replace(current.begin(), current.end(), '\n', ';');
+    Eden::TextRequest request;
+    request.title = u"NFS shares";
+    request.placeholder = u"nfs://192.168.1.85/roms";
+    request.initial = Common::UTF8ToUTF16(current);
+    request.max_length = 400;
+    const auto answer = Eden::AskSystemKeyboard(request, stop);
+    if (answer.outcome == Eden::TextOutcome::unavailable)
+        throw std::runtime_error("The system keyboard is unavailable");
+    if (answer.outcome != Eden::TextOutcome::accepted) return std::nullopt;
+    const std::string text = Common::UTF16ToUTF8(answer.text);
+    NfsResult result;
+    // A connection from an earlier start may still be going: the new list waits for it.
+    for (int waited = 0; nfs_mount_running() && waited < 200 && !stop; ++waited)
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    char error[512]{};
+    if (!nfs_set_shares(text.c_str(), error, sizeof(error))) {
+        const char* reason = std::strchr(error, '\t');
+        result.shares = ReadNfsText();
+        result.message = std::string{tr("NFS share not saved:")} + " " + (reason ? reason + 1 : error);
+        return result;
+    }
+    // Kept as lines, as the file is read.
+    std::string lines = text;
+    std::replace(lines.begin(), lines.end(), ';', '\n');
+    std::string kept;
+    for (std::size_t start = 0; start <= lines.size();) {
+        const std::size_t end = std::min(lines.find('\n', start), lines.size());
+        std::string line = lines.substr(start, end - start);
+        start = end + 1;
+        const auto first = line.find_first_not_of(" \t\r");
+        if (first == std::string::npos) continue;
+        line = line.substr(first, line.find_last_not_of(" \t\r") - first + 1);
+        kept += (kept.empty() ? "" : "\n") + line;
+    }
+    (void)mkdir(Eden::ConfigDir().c_str(), 0777);
+    const std::string path = Eden::ConfigFile("nfs.txt");
+    if (kept.empty()) {
+        (void)std::remove(path.c_str());
+    } else if (FILE* file = std::fopen(path.c_str(), "w")) {
+        std::fputs((kept + "\n").c_str(), file);
+        std::fclose(file);
+    } else {
+        result.message = tr("Could not save. Please try again.");
+        return result;
+    }
+    result.shares = kept;
+    if (kept.empty()) {
+        result.ok = true;
+        result.message = tr("NFS shares removed.");
+        return result;
+    }
+    nfs_mount_begin(8000);
+    for (int waited = 0; (waited < 5 || nfs_mount_running()) && waited < 200 && !stop; ++waited)
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    char detail[512]{};
+    const int why = nfs_first_failure(detail, sizeof(detail));
+    switch (why) {
+    case NFS_FAIL_NONE: result.ok = true; result.message = tr("NFS share connected."); break;
+    case NFS_FAIL_NO_ANSWER: result.message = tr("NFS share not connected: the server did not answer."); break;
+    case NFS_FAIL_REFUSED: result.message = tr("NFS share not connected: the server refused the mount."); break;
+    case NFS_FAIL_NO_FOLDER: result.message = tr("NFS share not connected: the folder is not on the server."); break;
+    case NFS_FAIL_CONNECT:
+        result.message = tr("NFS share not connected: the connection was refused or could not be made.");
+        break;
+    case NFS_FAIL_CLOSED: result.message = tr("NFS share not connected: the server closed the connection."); break;
+    case NFS_FAIL_NAME: result.message = tr("NFS share not connected: the server's name could not be found."); break;
+    case NFS_FAIL_DENIED:
+        result.message = tr("NFS share not connected: the server denies access to this console.");
+        break;
+    case NFS_FAIL_NOT_EXPORTED:
+        result.message = std::string{tr("NFS share not connected: that folder is not exported by the server. It exports:")} +
+                         " " + detail;
+        break;
+    default: result.message = std::string{tr("NFS share not connected:")} + " " + detail; break;
+    }
+    return result;
+}
+
+static void StartNfs();
+
 EdenServices::EdenServices(std::string launch_error, Eden::Multiplayer::RoomClient& rooms)
     : rooms_(rooms), launch_error_(std::move(launch_error)) {
     (void)mkdir(Eden::ConfigDir().c_str(), 0777);
@@ -548,6 +655,7 @@ EdenServices::EdenServices(std::string launch_error, Eden::Multiplayer::RoomClie
                                  std::to_string(who.current + 1) + " of " + std::to_string(who.profiles.size()) +
                                  ")").c_str());
     KeepSaveSyncFile(who.profiles);
+    StartNfs();
     setup_ = eden_startup_error();
     Eden::Report("setup", setup_.empty() ? "Keys and firmware startup checks passed" : setup_.c_str());
     // The download sources' games and the download queue (remote/remote.h): only with filesystem access,
@@ -602,16 +710,16 @@ pe::ui::Home EdenServices::home() {
     home.last_file = Eden::LoadLastGame();
     // A game no longer in the game files folder is not offered: the most recent one that is
     // takes its place (or none).
-    if (!home.last_file.empty() && !IsFile(Eden::AssetsPath("roms/" + home.last_file))) {
+    if (!home.last_file.empty() && !IsFile(RomPath(home.last_file))) {
         home.last_file.clear();
         for (const auto& name : Eden::LoadRecentGames()) {
-            if (IsFile(Eden::AssetsPath("roms/" + name))) {
+            if (IsFile(RomPath(name))) {
                 home.last_file = name;
                 break;
             }
         }
     }
-    const std::string last_path = Eden::AssetsPath("roms/" + home.last_file);
+    const std::string last_path = RomPath(home.last_file);
     home.last_exists = !home.last_file.empty() && IsFile(last_path);
     if (!home.last_file.empty()) {
         std::string title = GameTitle(home.last_file);
@@ -649,7 +757,7 @@ pe::ui::Home EdenServices::home() {
         history.push_back(home.last_file);
     }
     for (const auto& name : history) {
-        if (!IsFile(Eden::AssetsPath("roms/" + name))) continue;
+        if (!IsFile(RomPath(name))) continue;
         home.recents.push_back({name, GameTitle(name), EnsureCover(name)});
     }
     const int installed = CountInstalledGames();
@@ -687,6 +795,79 @@ std::string EdenServices::version() {
     return shown;
 }
 
+// Games on NFS servers (nfs/nfs.h): the addresses are the lines of config/nfs.txt, mounted in the background
+// at start. Each .nsp and .xci in a share's folder (or one folder down) is listed with the local games, under
+// roms/ by its file name: nfs_alias makes that path be the file on the share. A name the console already has
+// is left to the console's file.
+// The addresses kept in config/nfs.txt, one per line (what the keyboard of Settings > NFS shares writes).
+static std::string ReadNfsText() {
+    std::string text;
+    if (!Eden::FilesystemAccess() || !Eden::FileExists(Eden::ConfigFile("nfs.txt"))) return text;
+    if (FILE* file = std::fopen(Eden::ConfigFile("nfs.txt").c_str(), "r")) {
+        char buffer[512];
+        while (std::fgets(buffer, sizeof(buffer), file)) {
+            std::string line(buffer);
+            const auto hash = line.find('#');
+            if (hash != std::string::npos) line.resize(hash);
+            while (!line.empty() && std::isspace(static_cast<unsigned char>(line.back()))) line.pop_back();
+            if (!line.empty()) text += (text.empty() ? "" : "\n") + line;
+        }
+        std::fclose(file);
+    }
+    return text;
+}
+
+static void StartNfs() {
+    const std::string text = ReadNfsText();
+    if (text.empty()) return;
+    char error[512]{};
+    if (!nfs_set_shares(text.c_str(), error, sizeof(error))) Eden::Report("nfs", error);
+    nfs_mount_begin(8000);
+}
+
+static std::vector<std::string> NfsGames(const std::set<std::string>& local) {
+    for (int waited = 0; nfs_mount_running() && waited < 300; ++waited)
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    std::vector<std::string> names;
+    nfs_alias_begin(Eden::AssetsPath("roms").c_str());
+    static char points[NFS_MAX_SHARES][NFS_PATH_MAX];
+    struct Entry { std::string name; bool is_dir; };
+    const int shares = nfs_mount_points(points, NFS_MAX_SHARES);
+    for (int s = 0; s < shares; ++s) {
+        std::vector<std::string> folders{points[s]};
+        for (std::size_t f = 0; f < folders.size(); ++f) {
+            std::vector<Entry> entries;
+            const int count = nfs_list_each(folders[f].c_str(), [](void* user, const char* name, unsigned long long, int dir) {
+                static_cast<std::vector<Entry>*>(user)->push_back({name, dir != 0});
+            }, &entries);
+            if (count < 0) continue;
+            for (const Entry& entry : entries) {
+                const std::string& name = entry.name;
+                const std::string path = folders[f] + "/" + name;
+                if (entry.is_dir) {
+                    struct stat info {};
+                    const std::string folder_game = name + ".dir";
+                    if (stat((path + "/exefs/main").c_str(), &info) == 0 && S_ISREG(info.st_mode)) {
+                        if (!local.contains(folder_game) &&
+                            std::find(names.begin(), names.end(), folder_game) == names.end()) {
+                            names.push_back(folder_game);
+                            nfs_alias_add(folder_game.c_str(), (path + "/exefs/main").c_str());
+                        }
+                    } else if (f == 0 && folders.size() < 64) {
+                        folders.push_back(path);
+                    }
+                } else if (Eden::ValidRomFilename(name) && !IsFolderGame(name) && !local.contains(name) &&
+                           std::find(names.begin(), names.end(), name) == names.end()) {
+                    names.push_back(name);
+                    nfs_alias_add(name.c_str(), path.c_str());
+                }
+            }
+        }
+    }
+    nfs_alias_commit();
+    return names;
+}
+
 std::vector<pe::ui::Game> EdenServices::games() {
     // The launcher reads the list beside its menu (pe/ui/library.cpp), so the metadata reader
     // is used by one thread at a time.
@@ -710,21 +891,33 @@ std::vector<pe::ui::Game> EdenServices::games() {
             sources.push_back(names.contains(game.source) ? names.at(game.source) : game.source);
         return sources;
     };
+    std::vector<std::string> files;
     for (const auto& entry : entries) {
-        const std::string file = entry.path().filename().string();
+        const std::string name = entry.path().filename().string();
+        std::error_code folder_error;
+        if (entry.is_directory(folder_error) && Eden::FileExists(Eden::AssetsPath("roms/" + name + "/exefs/main")))
+            files.push_back(name + ".dir");
+        else
+            files.push_back(name);
+    }
+    {
+        const std::set<std::string> local(files.begin(), files.end());
+        for (std::string& name : NfsGames(local)) files.push_back(std::move(name));
+    }
+    for (const std::string& file : files) {
         const std::size_t dot = file.find_last_of('.');
         if (file == "." || file == ".." || dot == std::string::npos) continue;
         std::string format = file.substr(dot + 1);
         std::transform(format.begin(), format.end(), format.begin(),
                        [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
-        if (format != "NSP" && format != "XCI") continue;
-        const std::string path = Eden::AssetsPath("roms/" + file);
+        if (format != "NSP" && format != "XCI" && format != "DIR") continue;
+        const std::string path = RomPath(file);
         struct stat info {};
         if (stat(path.c_str(), &info) != 0 || !S_ISREG(info.st_mode)) continue;
         pe::ui::Game game;
         game.name = CleanTitle(file);
         game.format = format;
-        game.size = SizeLabel(static_cast<double>(info.st_size));
+        game.size = IsFolderGame(file) ? std::string{"-"} : SizeLabel(static_cast<double>(info.st_size));
         game.file = file;
         // A game whose data cannot be read is still listed, by its file name.
         try {
@@ -732,7 +925,8 @@ std::vector<pe::ui::Game> EdenServices::games() {
             // The cover is replaced in one step: the menu may be loading the old one right now.
             const std::string cover = CoverPath(file);
             const std::string staged = cover + ".new";
-            const int metadata = eden_extract_game_metadata(path.c_str(), Eden::AssetsPath("keys").c_str(),
+            // A folder has no control data to read (no title, no cover): it keeps its folder's name.
+            const int metadata = IsFolderGame(file) ? 0 : eden_extract_game_metadata(path.c_str(), Eden::AssetsPath("keys").c_str(),
                                                             staged.c_str(), title, sizeof(title));
             if (metadata & EDEN_METADATA_TITLE) {
                 game.name = title;
@@ -791,7 +985,7 @@ std::vector<pe::ui::Game> EdenServices::games() {
     return games;
 }
 
-std::string EdenServices::game_path(const std::string& file) { return Eden::AssetsPath("roms/" + file); }
+std::string EdenServices::game_path(const std::string& file) { return RomPath(file); }
 
 bool EdenServices::take_update(pe::ui::UpdateOffer* offer) {
     Eden::UpdateNotice::Offer found;
@@ -898,7 +1092,7 @@ bool EdenServices::remove_profile(int index) {
 }
 
 bool EdenServices::game_exists(const std::string& file) {
-    return Eden::ValidRomFilename(file) && IsFile(Eden::AssetsPath("roms/" + file));
+    return Eden::ValidRomFilename(file) && IsFile(RomPath(file));
 }
 
 bool EdenServices::docked(std::uint64_t title_id) { return Eden::LoadGameDocked(title_id); }
@@ -1320,7 +1514,7 @@ bool EdenServices::delete_game(const pe::ui::Game& game, std::string* message) {
     if (!Eden::FilesystemAccess() || game.sources.empty() || game.remote || !Eden::ValidRomFilename(game.file))
         return false;
     const std::lock_guard lock(bridge_);
-    const std::string rom = Eden::AssetsPath("roms/" + game.file);
+    const std::string rom = RomPath(game.file);
     // The game, what came with it from its sources, and every update and DLC of it in updates/
     // (also one put there by hand), found by the title IDs the files hold.
     std::vector<std::string> files{rom};
@@ -1429,7 +1623,7 @@ void EdenServices::StartSync(std::vector<SyncJob> jobs, bool before) {
         last.before = before;
         for (Work item : work) {
             if (sync_stop_) break;
-            if (const std::string path = Eden::AssetsPath("roms/" + item.job.file); item.syncs && Eden::FileExists(path)) {
+            if (const std::string path = RomPath(item.job.file); item.syncs && Eden::FileExists(path)) {
                 const std::lock_guard lock(bridge_);
                 item.game.title_id = eden_game_title_id(path.c_str());
             }

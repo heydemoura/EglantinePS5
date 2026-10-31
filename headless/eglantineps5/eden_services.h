@@ -112,6 +112,8 @@ public:
     void leave_room() override;
     std::optional<std::string> room_text(int, const std::string&, const std::atomic<bool>&) override;
     std::optional<std::int64_t> ask_seed(std::int64_t, const std::atomic<bool>&) override;
+    std::string nfs_shares() override;
+    std::optional<NfsResult> edit_nfs_shares(const std::atomic<bool>&) override;
     bool can_launch_game() override;
 private:
     Eden::Multiplayer::RoomClient& rooms_;

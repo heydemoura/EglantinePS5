@@ -2406,6 +2406,20 @@ if(PS5_NATIVE)
     target_link_libraries(eden-headless PRIVATE
         "${sdk}/target/lib/libSceImeDialog.so" "${sdk}/target/lib/libSceSysmodule.so"
         "${PORT_ROOT}/build/stubs/libSceCommonDialog.so")
+    # Games on NFS servers (headless/nfs/nfs.h): libnfs, and the app's layer that passes the C library's file
+    # calls through it (the final link wraps them: tools/link-headless-native.sh).
+    set(libnfs_dir "${PORT_ROOT}/third_party/libnfs")
+    file(GLOB_RECURSE libnfs_sources "${libnfs_dir}/lib/*.c" "${libnfs_dir}/mount/*.c" "${libnfs_dir}/nfs/*.c"
+        "${libnfs_dir}/nfs4/*.c" "${libnfs_dir}/portmap/*.c")
+    add_library(nfs-client STATIC ${libnfs_sources})
+    target_include_directories(nfs-client PUBLIC "${libnfs_dir}" "${libnfs_dir}/include" "${libnfs_dir}/include/nfsc"
+        "${libnfs_dir}/mount" "${libnfs_dir}/nfs" "${libnfs_dir}/nfs4" "${libnfs_dir}/portmap")
+    target_compile_definitions(nfs-client PRIVATE HAVE_CONFIG_H HAVE_NFS4_2 "_U_=__attribute__((unused))")
+    target_compile_options(nfs-client PRIVATE -w -fPIC -ffunction-sections -fdata-sections
+        $<$<COMPILE_LANGUAGE:C>:-std=gnu99>)
+    target_sources(eden-headless PRIVATE "${EDEN_PORT_DIR}/nfs/nfs.cpp")
+    set_source_files_properties("${EDEN_PORT_DIR}/nfs/nfs.cpp" PROPERTIES COMPILE_OPTIONS "-Wno-error;-Wno-unused-function")
+    target_link_libraries(eden-headless PRIVATE nfs-client)
 endif()
 add_library(eden-metadata STATIC "${EDEN_PORT_DIR}/metadata_bridge.cpp")
 target_include_directories(eden-metadata PUBLIC "${EDEN_PORT_DIR}" PRIVATE "${PROJECT_SOURCE_DIR}/src")

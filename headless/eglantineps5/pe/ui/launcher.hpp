@@ -179,6 +179,9 @@ class Launcher
     void press_game_options(Key key);
     // The RNG seed is typed on the system keyboard: opens it, and takes its answer when it closes.
     void edit_seed();
+    // Settings > NFS shares: the keyboard for the addresses, and what came of connecting.
+    void edit_nfs();
+    void update_nfs();
     void update_game_options();
     void draw_game_options(Canvas &c, float open);
     // How many of a category's settings the game has of its own.
@@ -416,6 +419,10 @@ class Launcher
     ListView mod_rows_;
     int game_options_ = 0;          // the category a game's own settings dialog shows
     ListView option_rows_;          // its rows
+    std::atomic<bool> nfs_edit_stop_{false};
+    std::future<std::optional<Services::NfsResult>> nfs_edit_; // the keyboard and the connection, while they run
+    std::string nfs_shares_;                                   // the addresses kept
+    bool nfs_rescan_ = false;                                  // the games are read again once the scan in progress ends
     std::atomic<bool> seed_edit_stop_{false};
     std::future<std::optional<std::int64_t>> seed_edit_;  // the keyboard, while it is open
     bool mapping_for_game_ = false; // the mapping dialog edits the game's own mapping

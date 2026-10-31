@@ -2353,3 +2353,75 @@ msgstr "{0}/ (NSP o XCI)"
 #: pe/ui/browse.cpp
 msgid "{0}/ (one folder per game ID)"
 msgstr "{0}/ (una carpeta por ID de título)"
+
+#: pe/ui/settings.cpp
+msgid "Games on a PC or a NAS, played over the network. Add each server with its address and exported folder."
+msgstr "Juegos en una PC o un NAS, jugados por la red. Agrega cada servidor con su dirección y la carpeta exportada."
+
+#: pe/ui/settings.cpp
+msgid "NFS share connected."
+msgstr "Recurso NFS conectado."
+
+#: pe/ui/settings.cpp
+msgid "NFS share not connected:"
+msgstr "Recurso NFS no conectado:"
+
+#: pe/ui/settings.cpp
+msgid "NFS share not connected: that folder is not exported by the server. It exports:"
+msgstr "Recurso NFS no conectado: el servidor no exporta esa carpeta. Exporta:"
+
+#: pe/ui/settings.cpp
+msgid "NFS share not connected: the connection was refused or could not be made."
+msgstr "Recurso NFS no conectado: la conexión fue rechazada o no se pudo hacer."
+
+#: pe/ui/settings.cpp
+msgid "NFS share not connected: the folder is not on the server."
+msgstr "Recurso NFS no conectado: la carpeta no está en el servidor."
+
+#: pe/ui/settings.cpp
+msgid "NFS share not connected: the server closed the connection."
+msgstr "Recurso NFS no conectado: el servidor cerró la conexión."
+
+#: pe/ui/settings.cpp
+msgid "NFS share not connected: the server denies access to this console."
+msgstr "Recurso NFS no conectado: el servidor niega el acceso a esta consola."
+
+#: pe/ui/settings.cpp
+msgid "NFS share not connected: the server did not answer."
+msgstr "Recurso NFS no conectado: el servidor no respondió."
+
+#: pe/ui/settings.cpp
+msgid "NFS share not connected: the server refused the mount."
+msgstr "Recurso NFS no conectado: el servidor rechazó el montaje."
+
+#: pe/ui/settings.cpp
+msgid "NFS share not connected: the server's name could not be found."
+msgstr "Recurso NFS no conectado: no se encontró el nombre del servidor."
+
+#: pe/ui/settings.cpp
+msgid "NFS share not saved:"
+msgstr "Recurso NFS no guardado:"
+
+#: pe/ui/settings.cpp
+msgid "NFS shares"
+msgstr "Recursos NFS"
+
+#: pe/ui/settings.cpp
+msgid "NFS SHARES"
+msgstr "RECURSOS NFS"
+
+#: pe/ui/settings.cpp
+msgid "NFS shares removed."
+msgstr "Recursos NFS quitados."
+
+#: pe/ui/settings.cpp
+msgid "SHARE"
+msgstr "RECURSO"
+
+#: pe/ui/settings.cpp
+msgid "SHARES"
+msgstr "RECURSOS"
+
+#: pe/ui/settings.cpp
+msgid "{0} shares"
+msgstr "{0} recursos"

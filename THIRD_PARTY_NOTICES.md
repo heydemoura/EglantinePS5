@@ -30,6 +30,11 @@ builds on the following projects, each under its own license.
 - **[QR Code generator library](https://github.com/nayuki/QR-Code-generator)** (C), MIT,
   unmodified in `third_party/qrcodegen` with its `LICENSE`. The launcher draws the QR code
   of a save sync's pairing with it.
+- **[libnfs](https://github.com/sahlberg/libnfs)** 18.0.0 by Ronnie Sahlberg, LGPL-2.1-or-later (its
+  protocol files BSD-2-Clause), in `third_party/libnfs` with its licenses, with the console configuration and
+  fixes of [tutifrutas/SwanStationPS5](https://github.com/tutifrutas/SwanStationPS5) (itself from
+  [PS5SX2](https://github.com/Swordpdf/PS5SX2) by Swordpdf). The NFS client for games on NFS servers; the
+  app's layer over it (`headless/nfs`) is from SwanStationPS5 too.
 - **LLVM compiler-rt** `emutls.c`, Apache-2.0 WITH LLVM-exception.
 
 ## Graphics

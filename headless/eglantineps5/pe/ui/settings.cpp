@@ -20,7 +20,7 @@ constexpr Rect kListPanel{108.0f, 188.0f, 820.0f, 720.0f};
 constexpr Rect kDetailPanel{980.0f, 188.0f, 820.0f, 720.0f};
 constexpr Rect kDialog{550.0f, 180.0f, 820.0f, 720.0f};
 constexpr float kRowsTop = 264.0f;
-constexpr float kRowHeight = 50.0f;
+constexpr float kRowHeight = 46.0f;
 enum Category
 {
     kProfiles,
@@ -32,6 +32,7 @@ enum Category
     kDiagnostics,
     kFiles,
     kDownloads,
+    kNfs,
     kSaveSync,
     kMultiplayer,
     kLanguage,
@@ -39,11 +40,11 @@ enum Category
 };
 constexpr const char *kCategories[kCategoryCount] = {
     TR("Profiles"), TR("Video"), TR("Performance"), TR("Audio"), TR("Controls"), TR("Accessibility"),
-    TR("Diagnostics"), TR("Game files"), TR("Downloads"), TR("Save sync"), TR("Multiplayer"), TR("Language")};
+    TR("Diagnostics"), TR("Game files"), TR("Downloads"), TR("NFS shares"), TR("Save sync"), TR("Multiplayer"), TR("Language")};
 // The same as headings: capitals differ by language, so each is its own text.
 constexpr const char *kHeadings[kCategoryCount] = {
     TR("PROFILES"), TR("VIDEO"), TR("PERFORMANCE"), TR("AUDIO"), TR("CONTROLS"), TR("ACCESSIBILITY"),
-    TR("DIAGNOSTICS"), TR("GAME FILES"), TR("DOWNLOADS"), TR("SAVE SYNC"), TR("MULTIPLAYER"), TR("LANGUAGE")};
+    TR("DIAGNOSTICS"), TR("GAME FILES"), TR("DOWNLOADS"), TR("NFS SHARES"), TR("SAVE SYNC"), TR("MULTIPLAYER"), TR("LANGUAGE")};
 
 // The Video dialog's rows, and the window that shows five of them (placed as a game's settings
 // are).
@@ -126,6 +127,13 @@ std::string short_path(const std::string &path, std::size_t limit)
 
 void Launcher::press_settings(Key key)
 {
+    // The keyboard (or the connection that follows it) is open: Circle takes it away, nothing else is for this screen.
+    if (nfs_edit_.valid())
+    {
+        if (key == Key::circle)
+            nfs_edit_stop_ = true;
+        return;
+    }
     switch (key)
     {
     case Key::circle:
@@ -157,6 +165,9 @@ void Launcher::press_settings(Key key)
             break;
         case kDownloads:
             open_sources();
+            break;
+        case kNfs:
+            edit_nfs();
             break;
         case kSaveSync:
             open_sync_setup();
@@ -222,6 +233,8 @@ void Launcher::draw_settings(Canvas &c)
         !sources_.configured ? std::string{tr("Not set up")} :
         sources_.list.size() == 1 ? sources_.list.front().name :
                                     fill(tr("{0} sources"), {std::to_string(sources_.list.size())}),
+        nfs_shares_.empty() ? std::string{tr("Off")} :
+                              fill(tr("{0} shares"), {std::to_string(1 + std::count(nfs_shares_.begin(), nfs_shares_.end(), '\n'))}),
         [&] {
             int linked = 0;
             for (const SaveSyncProfile &profile : sync_setup_.profiles)
@@ -343,6 +356,20 @@ void Launcher::draw_settings(Canvas &c)
         }
         lines.push_back({tr("FTP SERVER"), fill(tr("Port {0}"), {std::to_string(sources_.ftp_port)})});
         lines.push_back({tr("DOWNLOADS"), std::to_string(queued)});
+        break;
+    }
+    case kNfs:
+    {
+        about = tr("Games on a PC or a NAS, played over the network. Add each server with its address and exported folder.");
+        std::size_t start = 0;
+        for (int shown = 0; start <= nfs_shares_.size() && !nfs_shares_.empty() && shown < 4; ++shown)
+        {
+            const std::size_t end = std::min(nfs_shares_.find('\n', start), nfs_shares_.size());
+            lines.push_back({tr("SHARE"), nfs_shares_.substr(start, end - start)});
+            start = end + 1;
+        }
+        if (lines.empty())
+            lines.push_back({tr("SHARES"), tr("None")});
         break;
     }
     case kSaveSync:
@@ -897,6 +924,55 @@ void Launcher::draw_dialog(Canvas &c, Modal modal, float open)
     }
     list.pop_transform();
     list.pop_opacity();
+}
+
+
+// ---------------------------------------------------------------- NFS shares
+
+void Launcher::edit_nfs()
+{
+    nfs_edit_stop_ = false;
+    try
+    {
+        nfs_edit_ = std::async(std::launch::async, [this] { return services_.edit_nfs_shares(nfs_edit_stop_); });
+    }
+    catch (const std::exception &)
+    {
+        say(tr("The keyboard could not be opened."), true);
+        cue(Cue::error);
+    }
+}
+
+void Launcher::update_nfs()
+{
+    if (nfs_rescan_ && !scan_.valid())
+    {
+        nfs_rescan_ = false;
+        start_scan();
+    }
+    if (!nfs_edit_.valid() || nfs_edit_.wait_for(std::chrono::seconds{0}) != std::future_status::ready)
+        return;
+    std::optional<Services::NfsResult> answer;
+    try
+    {
+        answer = nfs_edit_.get();
+    }
+    catch (const std::exception &)
+    {
+        say(tr("The keyboard could not be opened."), true);
+        cue(Cue::error);
+        return;
+    }
+    if (!answer || nfs_edit_stop_)
+        return;
+    nfs_shares_ = answer->shares;
+    say(answer->message, !answer->ok);
+    cue(answer->ok ? Cue::toggle : Cue::error);
+    // The games of the shares come into the library, or go out of it.
+    if (scan_.valid())
+        nfs_rescan_ = true;
+    else
+        start_scan();
 }
 
 } // namespace pe::ui

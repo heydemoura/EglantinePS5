@@ -660,6 +660,16 @@ class Services
     // nothing when the keyboard was cancelled. Throws when the keyboard cannot be opened.
     virtual std::optional<std::int64_t> ask_seed(std::int64_t /*current*/, const std::atomic<bool>& /*stop*/)
     { return std::nullopt; }
+    // Settings > NFS shares: the addresses kept (one per line), and the keyboard to change them. The answer, once the
+    // keyboard is accepted, is what came of connecting: nothing when it was cancelled.
+    struct NfsResult
+    {
+        bool ok = false;
+        std::string message; // how it went, in the player's language
+        std::string shares;  // what is kept now
+    };
+    virtual std::string nfs_shares() { return {}; }
+    virtual std::optional<NfsResult> edit_nfs_shares(const std::atomic<bool>& /*stop*/) { return std::nullopt; }
     virtual bool can_launch_game() { return true; }
 
     // ---- images ----

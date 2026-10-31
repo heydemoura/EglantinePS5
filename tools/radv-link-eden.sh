@@ -15,6 +15,18 @@ eden_radv_link_recipe() {
         case "$input" in --start-group|--end-group) ;; *) inputs+=("$input") ;; esac
     done
     radv_link_inputs=("${inputs[@]}")
+    # The platform layer wraps fclose and fflush (its open_memstream) and headless/nfs/nfs.cpp wraps them too: the
+    # platform's two are kept in a copy of the archive under other names, which nfs.cpp calls for every FILE that
+    # is not one of its own.
+    local platform_archive="$root/build/libps5platform-nfs.a" i
+    mkdir -p "$root/build"
+    cp "$radv_sdk/target/lib/libps5platform.a" "$platform_archive"
+    "$(command -v llvm-objcopy-18 || command -v llvm-objcopy)" \
+        --redefine-sym __wrap_fclose=ps5_memstream_fclose \
+        --redefine-sym __wrap_fflush=ps5_memstream_fflush "$platform_archive"
+    for i in "${!radv_link_inputs[@]}"; do
+        [[ ${radv_link_inputs[i]} == "$radv_sdk/target/lib/libps5platform.a" ]] && radv_link_inputs[i]="$platform_archive"
+    done
     local flag
     local retained=()
     for flag in "${radv_link_flags[@]}"; do
