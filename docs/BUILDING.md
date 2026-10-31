@@ -82,10 +82,13 @@ Inside this repository, in `.deps/`:
 - **Eglantine** (the `Eglantine/` submodule, a Switch 2 capable fork of Eden), at the commit the
   submodule records; `git clone --recurse-submodules`, or `git submodule update --init` after a plain
   clone. The build copies it into its cache (`tools/sync-eden-source.sh`) and uses Eden's own
-  hash-pinned packages, which its configure step downloads. EglantinePS5 does not modify the
-  submodule's files: the PS5 frontend in `headless/` replaces and derives sources at configure time
-  (`headless/inject.cmake`). To move to a newer Eglantine: `make update`, then `make test`, then commit
-  the submodule (`git add Eglantine`).
+  hash-pinned packages, which its configure step downloads. The PS5 frontend in `headless/` replaces
+  and derives sources at configure time (`headless/inject.cmake`). The few changes to the core itself
+  are the patches in `tools/eglantine-patches/`, applied to the submodule's working tree by
+  `tools/apply-eglantine-patches.sh` (from `make deps`; `make update` takes them out first and puts
+  them back). The submodule's commit does not change, so never `git add Eglantine` for them; a patch
+  that no longer applies stops the build and has to be made again. To move to a newer Eglantine:
+  `make update`, then `make test`, then commit the submodule (`git add Eglantine`).
 - **FFmpeg** at the commit Eden pins, built with only the decoders games use.
 - **PS5 OpenGL 4.6 SDK 1.0.2** (release archive), for the launcher and the OpenGL renderer.
 - **OpenSSL, zlib, libcurl and libpsl** from pacbrew v0.40.2.
@@ -168,6 +171,11 @@ python3 tools/symbolize-crash.py crash-20261001-121314.txt build/symbols/Eglanti
 The second argument is the unstripped executable of the build that wrote the report:
 `build/headless-native/llvm-pie.elf` right after a build. `make release` copies it to
 `build/symbols/EglantinePS5-vX.Y.Z.elf`; keep that file with the release, it is not published.
+
+The `-stderr.log` beside a report also holds the memory measurement lines `EDEN_HEAP_SITE` (what
+keeps the heap) and `EDEN_CRAM_WRITER` (what writes guest memory). The program's code cannot be read
+on the console, so these are raw addresses; `python3 -I tools/symbolize-sites.py REPORT-stderr.log
+build/headless-native/llvm-pie.elf` turns them into function names.
 
 `make test` checks the report on the host (`tools/check-crash-report.py`). A development build
 crashes on request, to try it on a console: write `segv`, `thread`, `abort` or `throw` to
