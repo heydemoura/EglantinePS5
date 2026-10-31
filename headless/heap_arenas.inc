@@ -925,7 +925,7 @@ static int eden_tcache_keep(void *address, size_t usable) {
 /* ---- Where the live blocks come from (a measurement, reported by eden_heap_sites_report) ----
  * One block in EDEN_SITE_RATE, and every block of 1 MiB or more, is followed from its allocation to
  * its free. At the allocation the stack above the allocator is read for the first return addresses
- * that fall in the app's code and follow a call instruction; the bytes of the block are added to the
+ * that fall in the app's code; the bytes of the block are added to the
  * group of that chain, and taken off again when it is freed. A group is a place in the emulator that
  * asks for memory, as far as the first calls up say. Sampled blocks count EDEN_SITE_RATE times. */
 extern const char __eden_text_start[];
@@ -962,13 +962,12 @@ static __attribute__((noinline)) unsigned eden_site_collect(uintptr_t pcs[EDEN_S
   unsigned found = 0;
   for (unsigned i = 0; i < 128 && found < EDEN_SITE_PCS; ++i) {
     const uintptr_t value = stack[i];
+    /* The app's code is execute-only on the console: its bytes cannot be read to check that the
+     * address follows a call (the system ends the process). A stale word of the stack can be taken
+     * for a return address; the chain is read with that in mind. */
     if (value < low || value >= high)
       continue;
-    const unsigned char *code = (const unsigned char *)value;
-    /* After a direct call, or an indirect one through a register or memory. */
-    if (code[-5] == 0xE8 || (code[-2] == 0xFF && (code[-1] & 0x38) == 0x10) ||
-        (code[-6] == 0xFF && (code[-5] & 0x38) == 0x10))
-      pcs[found++] = value;
+    pcs[found++] = value;
   }
   return found;
 }
