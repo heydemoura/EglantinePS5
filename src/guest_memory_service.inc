@@ -435,6 +435,41 @@ extern "C" std::uintptr_t eden_guest_write_refused(unsigned* why, unsigned* stat
     return address;
 }
 
+#ifdef PS5_NATIVE
+extern "C" const char __eden_text_start[] __attribute__((weak));
+extern "C" const char __eden_text_end[] __attribute__((weak));
+#endif
+
+namespace {
+// Who writes the slots that get promoted. A fault handler (ServiceSignal) reads the interrupted
+// instruction's address and the first return address of the app's code above the stack pointer:
+// a write by the emulated CPU has the JIT's entry point there, a write by the emulator itself the
+// function that called the copy. The promotions are counted by that place (ServiceReport).
+struct WriterSite {
+    std::atomic<std::uintptr_t> pc{0};
+    std::atomic<std::uint64_t> count{0};
+};
+constexpr std::size_t WriterSites = 512;
+WriterSite writer_sites[WriterSites];
+std::atomic<std::uint64_t> promotions_in_app_code{0}, promotions_elsewhere{0};
+thread_local std::uintptr_t fault_site = 0;
+thread_local bool fault_in_app_code = false;
+
+void NoteWriter() noexcept {
+    (fault_in_app_code ? promotions_in_app_code : promotions_elsewhere).fetch_add(1, std::memory_order_relaxed);
+    const std::uintptr_t key = fault_site + 1;
+    std::size_t at = static_cast<std::size_t>((key * 0x9E3779B97F4A7C15ull) >> 55) % WriterSites;
+    for (std::size_t probe = 0; probe < 16; ++probe, at = (at + 1) % WriterSites) {
+        std::uintptr_t expected = 0;
+        if (writer_sites[at].pc.compare_exchange_strong(expected, key, std::memory_order_acq_rel) ||
+            expected == key) {
+            writer_sites[at].count.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+    }
+}
+} // namespace
+
 namespace {
 // Writers waiting for a block (WaitForBlock), and how many waits ended with one.
 std::atomic<unsigned> memory_waiters{0};
@@ -531,7 +566,10 @@ bool HandleGuestWriteFault(void* fault) noexcept {
             done = PromoteFine(*range, slot);
         } else if (state == SlotZero) {
             done = PromoteZero(*range, slot);
-            if (done) counters.promotions.fetch_add(1, std::memory_order_relaxed);
+            if (done) {
+                counters.promotions.fetch_add(1, std::memory_order_relaxed);
+                NoteWriter();
+            }
         } else if (state == SlotShared) {
             done = PromoteShared(*range, slot);
         }
@@ -558,6 +596,23 @@ namespace {
 struct sigaction service_previous_segv{}, service_previous_bus{};
 
 void ServiceSignal(int signal, siginfo_t* info, void* context) {
+#ifdef PS5_NATIVE
+    fault_in_app_code = false;
+    fault_site = 0;
+    if (context != nullptr) {
+        const auto low = reinterpret_cast<std::uintptr_t>(__eden_text_start) + 8;
+        const auto high = reinterpret_cast<std::uintptr_t>(__eden_text_end);
+        const std::uintptr_t rip = Eden::Fastmem::ContextRip(context);
+        fault_in_app_code = rip >= low && rip < high;
+        const auto* stack = reinterpret_cast<const std::uintptr_t*>(Eden::Fastmem::ContextRsp(context));
+        for (unsigned i = 0; i < 128; ++i) {
+            if (stack[i] >= low && stack[i] < high) {
+                fault_site = stack[i];
+                break;
+            }
+        }
+    }
+#endif
     if (HandleGuestWriteFault(info ? info->si_addr : nullptr)) return;
     const struct sigaction& previous = signal == SIGSEGV ? service_previous_segv : service_previous_bus;
     if (previous.sa_flags & SA_SIGINFO) {
@@ -807,6 +862,33 @@ void ServiceReport(SparseRange& range, const char* when) noexcept {
         (unsigned long long)counters.unfined.load(), (unsigned long long)counters.fine_failures.load(),
         reserve_count.load(std::memory_order_relaxed) * (SparseSlot >> 20));
     if (length > 0) Report(line);
+    // Who wrote the slots that were promoted: the largest places (offsets in the app's image).
+    struct Top { std::uintptr_t pc; std::uint64_t count; } top[8]{};
+    for (const WriterSite& site : writer_sites) {
+        const std::uintptr_t pc = site.pc.load(std::memory_order_relaxed);
+        const std::uint64_t count = site.count.load(std::memory_order_relaxed);
+        if (pc == 0 || count <= top[7].count) continue;
+        std::size_t place = 7;
+        while (place > 0 && top[place - 1].count < count) {
+            top[place] = top[place - 1];
+            --place;
+        }
+        top[place] = {pc, count};
+    }
+    char writers[512];
+    int used = std::snprintf(writers, sizeof(writers),
+                             "EDEN_CRAM_WRITERS promotions by code of the app %llu, by other code %llu; first return address in the app (offset):",
+                             (unsigned long long)promotions_in_app_code.load(), (unsigned long long)promotions_elsewhere.load());
+    for (const Top& entry : top) {
+        if (entry.count == 0 || used < 0 || static_cast<std::size_t>(used) >= sizeof(writers) - 40) break;
+        used += std::snprintf(writers + used, sizeof(writers) - used, " %llx:%llu",
+                              (unsigned long long)(entry.pc - 1 - 0x400000ull), (unsigned long long)entry.count);
+    }
+    if (used > 0 && static_cast<std::size_t>(used) < sizeof(writers) - 2) {
+        writers[used++] = '\n';
+        writers[used] = 0;
+        Report(writers);
+    }
 }
 
 // What finer slots would give: 16 KiB pages of the Own slots that hold only zeroes, and those that

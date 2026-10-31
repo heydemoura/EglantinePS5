@@ -58,6 +58,7 @@
  * (eden_heap_split_pages), and a growth takes its pieces' memory the same way (src/memory_pages.cpp).
  */
 #include <pthread.h>
+#include <stdio.h>
 #include <string.h>
 
 #define EDEN_HEAP_ARENA_SHIFT 23u /* 8 MiB arenas and slots */
@@ -921,6 +922,183 @@ static int eden_tcache_keep(void *address, size_t usable) {
   return 1;
 }
 
+/* ---- Where the live blocks come from (a measurement, reported by eden_heap_sites_report) ----
+ * One block in EDEN_SITE_RATE, and every block of 1 MiB or more, is followed from its allocation to
+ * its free. At the allocation the stack above the allocator is read for the first return addresses
+ * that fall in the app's code and follow a call instruction; the bytes of the block are added to the
+ * group of that chain, and taken off again when it is freed. A group is a place in the emulator that
+ * asks for memory, as far as the first calls up say. Sampled blocks count EDEN_SITE_RATE times. */
+extern const char __eden_text_start[];
+extern const char __eden_text_end[];
+#define EDEN_SITE_BLOCKS 131072u
+#define EDEN_SITE_TABLE 4096u
+#define EDEN_SITE_PCS 6u
+#define EDEN_SITE_RATE 128u
+#define EDEN_SITE_BIG ((size_t)1 << 20)
+
+static struct {
+  _Atomic uintptr_t address; /* 0 free, 1 given back */
+  unsigned site;
+  unsigned big;
+  size_t size;
+} eden_site_blocks[EDEN_SITE_BLOCKS];
+static struct {
+  _Atomic uintptr_t hash;
+  uintptr_t pcs[EDEN_SITE_PCS];
+  _Atomic long exact_bytes, sampled_bytes, exact_blocks, sampled_blocks;
+} eden_site_table[EDEN_SITE_TABLE];
+
+static int eden_site_sampled(const void *address) {
+  return (((uintptr_t)address * 0x9E3779B97F4A7C15ull) >> 57) == 0;
+}
+
+static unsigned eden_site_slot(const void *address) {
+  return (unsigned)((((uintptr_t)address >> 4) * 0x9E3779B97F4A7C15ull) >> 40) % EDEN_SITE_BLOCKS;
+}
+
+static __attribute__((noinline)) unsigned eden_site_collect(uintptr_t pcs[EDEN_SITE_PCS]) {
+  const uintptr_t low = (uintptr_t)__eden_text_start + 8, high = (uintptr_t)__eden_text_end;
+  const uintptr_t *stack = (const uintptr_t *)__builtin_frame_address(0);
+  unsigned found = 0;
+  for (unsigned i = 0; i < 128 && found < EDEN_SITE_PCS; ++i) {
+    const uintptr_t value = stack[i];
+    if (value < low || value >= high)
+      continue;
+    const unsigned char *code = (const unsigned char *)value;
+    /* After a direct call, or an indirect one through a register or memory. */
+    if (code[-5] == 0xE8 || (code[-2] == 0xFF && (code[-1] & 0x38) == 0x10) ||
+        (code[-6] == 0xFF && (code[-5] & 0x38) == 0x10))
+      pcs[found++] = value;
+  }
+  return found;
+}
+
+static __attribute__((noinline)) void eden_site_alloc(const void *address, size_t size) {
+  if (address == NULL)
+    return;
+  const unsigned big = size >= EDEN_SITE_BIG;
+  if (!big && !eden_site_sampled(address))
+    return;
+  uintptr_t pcs[EDEN_SITE_PCS] = {0};
+  eden_site_collect(pcs);
+  uintptr_t hash = 0xCBF29CE484222325ull;
+  for (unsigned i = 0; i < EDEN_SITE_PCS; ++i)
+    hash = (hash ^ pcs[i]) * 0x100000001B3ull;
+  hash |= 1;
+  unsigned site = EDEN_SITE_TABLE;
+  for (unsigned probe = 0; probe < 16; ++probe) {
+    const unsigned at = (unsigned)((hash >> 12) + probe) % EDEN_SITE_TABLE;
+    uintptr_t expected = 0;
+    if (atomic_compare_exchange_strong_explicit(&eden_site_table[at].hash, &expected, hash, memory_order_acq_rel,
+                                                memory_order_acquire)) {
+      for (unsigned i = 0; i < EDEN_SITE_PCS; ++i)
+        eden_site_table[at].pcs[i] = pcs[i];
+      site = at;
+      break;
+    }
+    if (expected == hash) {
+      site = at;
+      break;
+    }
+  }
+  if (site == EDEN_SITE_TABLE)
+    return;
+  const unsigned first = eden_site_slot(address);
+  for (unsigned probe = 0; probe < 16; ++probe) {
+    const unsigned at = (first + probe) % EDEN_SITE_BLOCKS;
+    uintptr_t value = atomic_load_explicit(&eden_site_blocks[at].address, memory_order_relaxed);
+    if (value > 1)
+      continue;
+    if (atomic_compare_exchange_strong_explicit(&eden_site_blocks[at].address, &value, (uintptr_t)address,
+                                                memory_order_acq_rel, memory_order_relaxed)) {
+      eden_site_blocks[at].site = site;
+      eden_site_blocks[at].big = big;
+      eden_site_blocks[at].size = size;
+      if (big) {
+        atomic_fetch_add_explicit(&eden_site_table[site].exact_bytes, (long)size, memory_order_relaxed);
+        atomic_fetch_add_explicit(&eden_site_table[site].exact_blocks, 1, memory_order_relaxed);
+      } else {
+        atomic_fetch_add_explicit(&eden_site_table[site].sampled_bytes, (long)size, memory_order_relaxed);
+        atomic_fetch_add_explicit(&eden_site_table[site].sampled_blocks, 1, memory_order_relaxed);
+      }
+      return;
+    }
+  }
+}
+
+static void eden_site_free(const void *address, size_t usable) {
+  if (usable < EDEN_SITE_BIG && !eden_site_sampled(address))
+    return;
+  const unsigned first = eden_site_slot(address);
+  for (unsigned probe = 0; probe < 16; ++probe) {
+    const unsigned at = (first + probe) % EDEN_SITE_BLOCKS;
+    uintptr_t value = atomic_load_explicit(&eden_site_blocks[at].address, memory_order_acquire);
+    if (value == 0)
+      return;
+    if (value != (uintptr_t)address)
+      continue;
+    const unsigned site = eden_site_blocks[at].site, big = eden_site_blocks[at].big;
+    const long size = (long)eden_site_blocks[at].size;
+    if (!atomic_compare_exchange_strong_explicit(&eden_site_blocks[at].address, &value, 1, memory_order_acq_rel,
+                                                 memory_order_relaxed))
+      return;
+    if (big) {
+      atomic_fetch_sub_explicit(&eden_site_table[site].exact_bytes, size, memory_order_relaxed);
+      atomic_fetch_sub_explicit(&eden_site_table[site].exact_blocks, 1, memory_order_relaxed);
+    } else {
+      atomic_fetch_sub_explicit(&eden_site_table[site].sampled_bytes, size, memory_order_relaxed);
+      atomic_fetch_sub_explicit(&eden_site_table[site].sampled_blocks, 1, memory_order_relaxed);
+    }
+    return;
+  }
+}
+
+/* The places that hold the most, to stderr.log: MiB alive, blocks alive, and the chain of calls
+ * (offsets in the app's image, for tools/symbolize-crash.py or llvm-symbolizer). */
+void eden_heap_sites_report(void) {
+  struct {
+    long bytes, blocks;
+    unsigned site;
+  } top[12];
+  unsigned count = 0;
+  long total = 0;
+  for (unsigned at = 0; at < EDEN_SITE_TABLE; ++at) {
+    if (atomic_load_explicit(&eden_site_table[at].hash, memory_order_relaxed) == 0)
+      continue;
+    const long bytes =
+        atomic_load_explicit(&eden_site_table[at].exact_bytes, memory_order_relaxed) +
+        (long)EDEN_SITE_RATE * atomic_load_explicit(&eden_site_table[at].sampled_bytes, memory_order_relaxed);
+    const long blocks =
+        atomic_load_explicit(&eden_site_table[at].exact_blocks, memory_order_relaxed) +
+        (long)EDEN_SITE_RATE * atomic_load_explicit(&eden_site_table[at].sampled_blocks, memory_order_relaxed);
+    if (bytes <= 0)
+      continue;
+    total += bytes;
+    unsigned place = count;
+    if (count < 12)
+      ++count;
+    else if (bytes <= top[11].bytes)
+      continue;
+    else
+      place = 11;
+    while (place > 0 && top[place - 1].bytes < bytes) {
+      top[place] = top[place - 1];
+      --place;
+    }
+    top[place].bytes = bytes;
+    top[place].blocks = blocks;
+    top[place].site = at;
+  }
+  fprintf(stderr, "EDEN_HEAP_SITES followed blocks hold %ld MiB; the largest places:\n", total >> 20);
+  for (unsigned i = 0; i < count; ++i) {
+    const unsigned at = top[i].site;
+    fprintf(stderr, "EDEN_HEAP_SITE %ld MiB in %ld blocks:", top[i].bytes >> 20, top[i].blocks);
+    for (unsigned k = 0; k < EDEN_SITE_PCS; ++k)
+      fprintf(stderr, " %lx", (unsigned long)(eden_site_table[at].pcs[k] ? eden_site_table[at].pcs[k] - 0x400000ul : 0));
+    fputc('\n', stderr);
+  }
+}
+
 static void *eden_heap_allocate(size_t count, size_t size, int zero) {
   const size_t bytes = count * size;
   if (bytes >= EDEN_HEAP_LARGE_REQUEST && eden_heap_grows) {
@@ -941,7 +1119,9 @@ void *__wrap_malloc(size_t size) {
   if (!ps5_heap_ready())
     return __real_malloc(size);
   void *cached = eden_tcache_take(size);
-  return cached != NULL ? cached : eden_heap_record(eden_heap_allocate(1, size, 0), size);
+  void *block = cached != NULL ? cached : eden_heap_record(eden_heap_allocate(1, size, 0), size);
+  eden_site_alloc(block, size);
+  return block;
 }
 
 void *__wrap_calloc(size_t count, size_t size) {
@@ -952,12 +1132,16 @@ void *__wrap_calloc(size_t count, size_t size) {
     return NULL;
   }
   void *cached = eden_tcache_take(count * size);
-  if (cached != NULL)
+  if (cached != NULL) {
+    eden_site_alloc(cached, count * size);
     return memset(cached, 0, count * size);
-  return eden_heap_record(eden_heap_allocate(count, size, 1), count * size);
+  }
+  void *block = eden_heap_record(eden_heap_allocate(count, size, 1), count * size);
+  eden_site_alloc(block, count * size);
+  return block;
 }
 
-void *__wrap_realloc(void *address, size_t size) {
+static void *eden_realloc_inner(void *address, size_t size) {
   if (address == NULL)
     return __wrap_malloc(size);
   const int in_range = eden_heap_in_range(address);
@@ -1004,9 +1188,20 @@ void *__wrap_realloc(void *address, size_t size) {
   return moved;
 }
 
+void *__wrap_realloc(void *address, size_t size) {
+  if (address == NULL)
+    return __wrap_malloc(size);
+  if (ps5_heap_owns(address))
+    eden_site_free(address, eden_heap_usable(address));
+  void *result = eden_realloc_inner(address, size);
+  eden_site_alloc(result, size);
+  return result;
+}
+
 void __wrap_free(void *address) {
   if (eden_heap_in_range(address)) {
     const size_t usable = sceLibcMspaceMallocUsableSize(address);
+    eden_site_free(address, usable);
     if (eden_tcache_keep(address, usable))
       return;
     eden_heap_account(-(long)usable, -1);
@@ -1015,6 +1210,7 @@ void __wrap_free(void *address) {
   }
   const int large = eden_heap_large_find(address);
   if (large >= 0) {
+    eden_site_free(address, eden_heap_large[large].size);
     eden_heap_account(-(long)eden_heap_large[large].size, -1);
     eden_heap_large_free(large);
   } else
@@ -1047,9 +1243,10 @@ int __wrap_posix_memalign(void **address, size_t alignment, size_t size) {
       result = ENOMEM;
     }
   }
-  if (result == 0)
+  if (result == 0) {
     eden_heap_record(*address, size);
-  else
+    eden_site_alloc(*address, size);
+  } else
     eden_heap_failed(size, atomic_load_explicit(&eden_heap_grow_why, memory_order_relaxed));
   return result;
 }

@@ -35,6 +35,7 @@
 // dynarmic A64 dispatch-path counters (headless/dynarmic/jit_group_support.inc).
 extern "C" void eden_jit_path_counters(unsigned core, unsigned long long* out) __attribute__((weak));
 namespace Common {
+void GuestMemoryUsage(std::size_t* span, std::size_t* held) noexcept;
 // Address space Eden's sparse tables span and the memory they hold (src/memory_pages.cpp).
 void SparseUsage(std::size_t* reserved, std::size_t* committed) noexcept;
 } // namespace Common
@@ -341,6 +342,7 @@ extern "C" unsigned eden_heap_arenas_created(void) __attribute__((weak));
 extern "C" std::size_t eden_heap_committed(void) __attribute__((weak));
 extern "C" std::size_t eden_heap_large_held(unsigned* blocks) __attribute__((weak));
 extern "C" std::size_t eden_heap_trim(void) __attribute__((weak));
+extern "C" void eden_heap_sites_report(void) __attribute__((weak));
 extern "C" void eden_heap_usage(std::size_t* held, std::size_t* in_use, std::size_t* returned) __attribute__((weak));
 extern "C" unsigned eden_guest_memory_wanted(void) __attribute__((weak));
 extern "C" void eden_guest_memory_reserve(std::size_t* held, std::size_t* target) __attribute__((weak));
@@ -372,6 +374,16 @@ static void RefreshFreeMemory() {
     const PoolView view = ViewOfPool(known, largest, held, target);
     largest_free_block.store(known ? (view.free != 0 ? view.free : 1) : 0, std::memory_order_relaxed);
     graphics_memory_short.store(view.short_memory, std::memory_order_relaxed);
+    // The pool, the guest's memory and the heap in stderr.log every 20 s, to see what holds it.
+    static std::atomic<long long> summary_ns{0};
+    if (now - summary_ns.load(std::memory_order_relaxed) >= 20'000'000'000) {
+        summary_ns.store(now, std::memory_order_relaxed);
+        std::size_t guest_span = 0, guest_held = 0;
+        ::Common::GuestMemoryUsage(&guest_span, &guest_held);
+        std::fprintf(stderr, "EDEN_MEMORY pool largest free block %zu MiB, short=%d; the guest's memory holds %zu MiB\n",
+                     largest >> 20, int(view.short_memory), guest_held >> 20);
+        ReportHeap("every 20 s");
+    }
     // The heap's empty spaces go back to the pool while it is short (every 2 s at most).
     static std::atomic<long long> trimmed_ns{0};
     if (view.short_memory && now - trimmed_ns.load(std::memory_order_relaxed) >= 2'000'000'000) {
@@ -423,6 +435,7 @@ void ReportHeap(const char* why) {
     std::fprintf(stderr, "[EglantinePS5] heap: holds %zu MiB (%zu MiB of pieces, %zu MiB in %u large blocks), "
                          "%zu MiB of it in use; %zu MiB given back so far (%s)\n",
                  held >> 20, (held - large) >> 20, large >> 20, large_blocks, in_use >> 20, returned >> 20, why);
+    if (eden_heap_sites_report) eden_heap_sites_report();
 }
 
 std::size_t TrimHeap(const char* why) {

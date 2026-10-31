@@ -453,6 +453,7 @@ ALLOCATOR_REFUSED = """    VkResult created = CALL;
                          int(created), free_block ? free_block() >> 20 : 0ull, blocks >> 20, used >> 20,
                          static_cast<unsigned long long>(guest_held >> 20),
                          static_cast<unsigned long long>(eden_heap_committed() >> 20));
+            ::Eden::Performance::ReportHeap("a buffer was refused");
         }
     }
     vk::Check(created);
