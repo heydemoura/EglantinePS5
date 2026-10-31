@@ -48,6 +48,7 @@ prepare: deps ## Build cache, Eden source, FFmpeg, packaging tool, driver stub, 
 deps: ## Fetch missing dependencies at their pinned revisions (and the Eglantine submodule)
 	git submodule update --init Eglantine
 	$(PYTHON) tools/deps.py fetch
+	bash tools/apply-eglantine-patches.sh
 
 update: ## Move the Eglantine submodule to the newest commit of its default branch and check the port still applies
 	bash tools/update-eglantine.sh

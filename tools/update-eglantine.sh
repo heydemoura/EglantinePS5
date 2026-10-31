@@ -9,6 +9,8 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
 git submodule update --init Eglantine
+# The patches (tools/eglantine-patches) come out first, so the submodule moves from a clean tree.
+bash tools/apply-eglantine-patches.sh --revert
 before=$(git -C Eglantine rev-parse HEAD)
 git submodule update --remote Eglantine
 after=$(git -C Eglantine rev-parse HEAD)
@@ -22,6 +24,8 @@ else
     git -C Eglantine log --oneline "$before..$after" | head -40
     echo "($(git -C Eglantine rev-list --count "$before..$after") commits, $(git -C Eglantine diff --shortstat "$before" "$after"))"
 fi
+# Put them back on the new commit: if one no longer applies, say so now.
+bash tools/apply-eglantine-patches.sh
 scratch=$(mktemp -d)
 trap 'rm -rf "$scratch"' EXIT
 if ! python3 -I tools/prepare-vulkan-port.py --report Eglantine "$scratch" >/dev/null; then

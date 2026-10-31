@@ -465,6 +465,15 @@ BUFFER_VALUES = 'static_cast<unsigned long long>(ci.size), unsigned(ci.usage)'
 adapt('src/video_core/vulkan_common/vulkan_memory_allocator.cpp', 'vulkan_memory_allocator.cpp', [
     ('#include "video_core/vulkan_common/vulkan_memory_allocator.h"\n',
      '#include "video_core/vulkan_common/vulkan_memory_allocator.h"\n#include <atomic>\n#include <cstddef>\n#include <cstdio>\n#include "performance.h"\nnamespace Common { void GuestMemoryUsage(std::size_t* span, std::size_t* held) noexcept; }\nextern "C" std::size_t eden_heap_committed(void);\n'),
+    # What an image was that the allocator could not make at all, for stderr.log.
+    ('    if (result != VK_SUCCESS) {\n        LOG_CRITICAL(Render_Vulkan, "Image {}x{}x{} ({} levels, {} layers, format {}) failed: {}",',
+     """    if (result != VK_SUCCESS) {
+        std::fprintf(stderr, "EDEN_IMAGE_REFUSED %ux%ux%u, %u layers, %u levels, format %d, type %d, usage 0x%x, flags 0x%x, "
+                     "tiling %d, samples %d, result %d, huge %d, texels %llu\\n",
+                     ci.extent.width, ci.extent.height, ci.extent.depth, ci.arrayLayers, ci.mipLevels, int(ci.format),
+                     int(ci.imageType), unsigned(ci.usage), unsigned(ci.flags), int(ci.tiling), int(ci.samples),
+                     int(result), int(huge), static_cast<unsigned long long>(texels));
+        LOG_CRITICAL(Render_Vulkan, "Image {}x{}x{} ({} levels, {} layers, format {}) failed: {}","""),
     # An image with nothing bound (the sparse virtual texture arrays no pool could hold): when the driver refuses
     # it with residency, it is asked for again with binding alone, and what it said is written down.
     ('    if (device.GetDispatchLoader().vkCreateImage(*device.GetLogical(), &sparse_ci, nullptr,\n'
@@ -481,6 +490,22 @@ adapt('src/video_core/vulkan_common/vulkan_memory_allocator.cpp', 'vulkan_memory
                      ci.extent.width, ci.extent.height, ci.extent.depth, ci.arrayLayers, ci.mipLevels, int(ci.format),
                      unsigned(ci.usage), unsigned(ci.flags), int(ci.tiling), int(sparse_result), int(second));
         if (second != VK_SUCCESS) {
+            // Once: which smaller sizes does the driver accept? Each probe is made and destroyed at once.
+            static std::atomic<bool> probed{false};
+            if (!probed.exchange(true)) {
+                for (u32 layers = ci.arrayLayers / 2; layers >= 1; layers /= 2) {
+                    VkImageCreateInfo probe = sparse_ci;
+                    probe.arrayLayers = layers;
+                    VkImage probe_image{};
+                    const VkResult probed_result =
+                        device.GetDispatchLoader().vkCreateImage(*device.GetLogical(), &probe, nullptr, &probe_image);
+                    std::fprintf(stderr, "EDEN_SPARSE_PROBE %u layers: %d\\n", layers, int(probed_result));
+                    if (probed_result == VK_SUCCESS) {
+                        device.GetDispatchLoader().vkDestroyImage(*device.GetLogical(), probe_image, nullptr);
+                    }
+                    if (layers == 1) break;
+                }
+            }
             return vk::Image{};
         }
     }
