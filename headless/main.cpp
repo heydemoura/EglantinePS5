@@ -529,9 +529,12 @@ int main(int argc, char** argv) {
             }
             if (!selected_game.empty()) break;
         }
-        if (selected_game.empty())
-            throw std::runtime_error("Development ROM not found");
-        } else {
+        if (selected_game.empty()) {
+            Eden::BootTrace::Line("development game %s not found; opening launcher", development_id.c_str());
+            launch_error = "Configured game was not found. Select another game.";
+        }
+        }
+        if (selected_game.empty()) {
             Eden::BootTrace::Line("opening the launcher");
             selected_game = SelectEglantinePS5Game(rooms, launch_error);
         }
