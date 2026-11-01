@@ -3,6 +3,7 @@
 from pathlib import Path
 import subprocess
 import tempfile
+import re
 
 root = Path(__file__).resolve().parents[1]
 cache = Path((root / '.local/headless-cache').read_text().strip())
@@ -11,8 +12,7 @@ generated = cache / 'native-local/headless/gpu_thread.cpp'
 source = (upstream / 'video_core/gpu_thread.cpp').read_text()
 worker = generated.read_text()
 body = source.split('thread = std::jthread([&](std::stop_token stop_token) {', 1)[1].split('\n    });', 1)[0]
-dispatch_call = ('                Profile::Scope scope{Profile::Zone::Push};\n'
-                 '                scheduler.Push(system.GPU(), submit_list->channel, std::move(submit_list->entries));')
+dispatch_call = re.search(r'\n( {16}Profile::Scope scope\{Profile::Zone::Push\};\n.*?scheduler\.Push\(system\.GPU\(\), submit_list->channel, std::move\(submit_list->entries\)\);)', source, re.S).group(1)
 idle_call = ('                Profile::Scope scope{Profile::Zone::Idle};\n'
              '                state.queue.PopWait(next, stop_token);')
 development = 'EDEN_DEV_PROFILE:BOOL=ON' in (cache / 'native-local/CMakeCache.txt').read_text()

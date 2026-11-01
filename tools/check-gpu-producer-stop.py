@@ -12,6 +12,7 @@ main=(root/'headless/main.cpp').read_text()
 assert 'system.Pause();' not in main
 code=r'''
 #include <array>
+#include <variant>
 #include <atomic>
 #include <cassert>
 #include <chrono>
@@ -22,16 +23,19 @@ code=r'''
 #include <thread>
 #include "common/bounded_threadsafe_queue.h"
 using u64=unsigned long long;
-using CommandData=int;
+struct CpuReadCommand { struct Diagnostic { unsigned before_lock{}; }* diagnostic{}; };
+using CommandData=std::variant<int,CpuReadCommand>;
+namespace ReadbackDependencyDiagnostics { inline unsigned Now() { return 0; } }
 namespace VideoCommon { struct GpuSplit { static GpuSplit& Get() { static GpuSplit split; return split; } void Stop() {} }; }
-struct Item { int command{}; u64 fence{}; bool block{}; };
+struct Item { CommandData command{}; u64 fence{}; bool block{}; u64 sequence{}; };
 struct ThreadManager {
- struct { std::mutex write_lock; u64 last_fence{}; std::atomic<u64> signaled_fence{};
+ struct { std::mutex write_lock; u64 last_fence{}; std::atomic<u64> signaled_fence{},published_work_sequence{}; bool shutting_down{};
           Common::SPSCQueue<Item,2> queue; std::condition_variable_any cv; } state;
  std::stop_source stop_source;
  u64 PushCommand(CommandData&&,bool,bool);
  // The worker file defines these after PushCommand; here there is no worker to end.
  void NotifyShutdown();
+ void InvalidateReadbackCache() {}
  void Stop() { stop_source.request_stop(); }
 };
 // headless/CMakeLists.txt times a push that found the queue full (gpu_queue_full), so the body
@@ -56,8 +60,8 @@ int main() {
  manager.stop_source.request_stop();
  assert(blocked.wait_for(std::chrono::seconds(1))==std::future_status::ready);
  assert(blocked.get()==0);
- Item item; assert(manager.state.queue.TryPop(item)&&item.command==1);
- assert(manager.state.queue.TryPop(item)&&item.command==2);
+ Item item; assert(manager.state.queue.TryPop(item)&&std::get<int>(item.command)==1);
+ assert(manager.state.queue.TryPop(item)&&std::get<int>(item.command)==2);
  assert(!manager.state.queue.TryPop(item));
  assert(manager.PushCommand(4,false,true)==0);
  assert(!manager.state.queue.TryPop(item));

@@ -15,18 +15,25 @@ methods = '\n'.join(re.search(r'void EmitX64::' + name + r'\([^\n]*\) \{.*?^}',
 program = r'''
 #include <cassert>
 #include <cstddef>
+#include <array>
+#include <cstdint>
+#include <memory>
+using u8 = std::uint8_t; using u32 = std::uint32_t;
 #include <map>
 #include <vector>
 namespace IR { using LocationDescriptor = unsigned; }
-using CodePtr = size_t;
+using CodePtr = const unsigned char*;
+constexpr unsigned char arena[2048]{};
 struct EmitX64 {
     struct Code {
-        CodePtr cursor = 999;
+        CodePtr cursor = arena + 999;
         unsigned moves = 0;
         CodePtr getCurr() const { return cursor; }
+        CodePtr getCode() const { return arena; }
         void SetCodePtr(CodePtr value) { cursor = value; ++moves; }
     } code;
-    struct PatchInformation { std::vector<CodePtr> jg, jz, jmp, mov_rcx; };
+    enum class PatchKind : u32 { Jg, Jz, Jmp, MovRcx };
+    struct PatchInformation { std::array<u32, 2> first{}; std::unique_ptr<std::vector<u32>> rest; };
     std::map<IR::LocationDescriptor, PatchInformation> patch_information;
     std::map<CodePtr, CodePtr> targets;
     void EmitPatchJg(unsigned, CodePtr target) { targets[code.cursor] = target; }
@@ -39,20 +46,21 @@ struct EmitX64 {
 METHODS
 int main() {
     EmitX64 emitter;
-    for (unsigned i = 0; i < 350000; ++i) emitter.Patch(i, 123);
+    for (unsigned i = 0; i < 350000; ++i) emitter.Patch(i, arena + 123);
     assert(emitter.patch_information.empty());
-    assert(emitter.code.moves == 0 && emitter.code.cursor == 999);
-    emitter.patch_information[7] = {{10, 20}, {30}, {40}, {50}};
-    emitter.Patch(7, 123);
-    assert(emitter.targets.size() == 5 && emitter.code.cursor == 999);
-    for (const auto& [site, target] : emitter.targets) assert(target == 123);
+    assert(emitter.code.moves == 0 && emitter.code.cursor == arena + 999);
+    emitter.patch_information[7].first = {40, 81};
+    emitter.patch_information[7].rest = std::make_unique<std::vector<u32>>(std::initializer_list<u32>{122, 163, 200});
+    emitter.Patch(7, arena + 123);
+    assert(emitter.targets.size() == 5 && emitter.code.cursor == arena + 999);
+    for (const auto& [site, target] : emitter.targets) assert(target == arena + 123);
     emitter.Unpatch(7);
     for (const auto& [site, target] : emitter.targets) assert(target == 0);
-    assert(emitter.code.cursor == 999 && emitter.patch_information.size() == 1);
-    emitter.Patch(7, 456); // Retain incoming sites for recompilation/relinking.
-    for (const auto& [site, target] : emitter.targets) assert(target == 456);
+    assert(emitter.code.cursor == arena + 999 && emitter.patch_information.size() == 1);
+    emitter.Patch(7, arena + 456); // Retain incoming sites for recompilation/relinking.
+    for (const auto& [site, target] : emitter.targets) assert(target == arena + 456);
     emitter.Unpatch(8);
-    assert(emitter.patch_information.size() == 1 && emitter.code.cursor == 999);
+    assert(emitter.patch_information.size() == 1 && emitter.code.cursor == arena + 999);
 }
 '''.replace('METHODS', methods.replace('nullptr', '0'))
 with tempfile.TemporaryDirectory(prefix='eden-jit-patch-') as tmp:

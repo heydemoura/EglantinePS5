@@ -12,6 +12,11 @@ builds on the following projects, each under its own license.
   simpleini, sirit, SPIRV-Headers, Vulkan-Headers, Vulkan-Utility-Libraries,
   Vulkan Memory Allocator, ENet, frozen, cpp-httplib, nlohmann/json, and the time
   zone data. Each keeps its upstream license.
+- **[Zortos Eglantine fork](https://github.com/zortos293/Eglantine)**,
+  GPL-3.0-or-later. Referenced directly by the `Eglantine` submodule, including its
+  core, native shader, readback, service, runtime and test changes.
+- **[Catch2](https://github.com/catchorg/Catch2)**, BSL-1.0. Used by the focused
+  host regression check at the version and source hash pinned by the core.
 - **[FFmpeg](https://ffmpeg.org)**, LGPL-2.1-or-later. Built from Eden's pinned
   source with only the H.264, VP8 and VP9 decoders.
 - **[OpenSSL](https://www.openssl.org)**, Apache-2.0, and
