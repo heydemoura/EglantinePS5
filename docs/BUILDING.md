@@ -83,12 +83,22 @@ Inside this repository, in `.deps/`:
   submodule records; `git clone --recurse-submodules`, or `git submodule update --init` after a plain
   clone. The build copies it into its cache (`tools/sync-eden-source.sh`) and uses Eden's own
   hash-pinned packages, which its configure step downloads. The PS5 frontend in `headless/` replaces
-  and derives sources at configure time (`headless/inject.cmake`). The few changes to the core itself
-  are the patches in `tools/eglantine-patches/`, applied to the submodule's working tree by
-  `tools/apply-eglantine-patches.sh` (from `make deps`; `make update` takes them out first and puts
-  them back). The submodule's commit does not change, so never `git add Eglantine` for them; a patch
-  that no longer applies stops the build and has to be made again. To move to a newer Eglantine:
-  `make update`, then `make test`, then commit the submodule (`git add Eglantine`).
+  and derives sources at configure time (`headless/inject.cmake`). The submodule
+  references Zortos's core directly; no core backport patch or Bananza terrain-counter
+  workaround is needed. The PS5 memory, loader, JIT and GPU worker adaptations stay
+  in the port's generated-source rules.
+  `tools/apply-eglantine-patches.sh` remains available for optional local patches in
+  `tools/eglantine-patches/`; it is a no-op when there are none. To move to a newer
+  Eglantine, run `make update`, then `make test`, and commit the new submodule reference.
+- **Catch2** at the core's pinned version/hash, fetched by `tools/check-nx2-core.py`
+  into `.local/nx2-core-check` for focused native shader, readback, mapping, command
+  synchronization tests. The two full shader-IR integration
+  tests remain in the core's regular `tests` target. `EDEN_CATCH2_SOURCE` can point
+  at a matching existing Catch2 checkout for offline builds.
+  Console comparison builds can set `env=EDEN_DEV_CAPTURE_EARLY=1` in
+  `dev-settings.txt` to honour an explicit `capture-once.txt` request during the
+  first minute. This requires a DEV Vulkan build; production builds do not read
+  this switch or capture frames automatically.
 - **FFmpeg** at the commit Eden pins, built with only the decoders games use.
 - **PS5 OpenGL 4.6 SDK 1.0.2** (release archive), for the launcher and the OpenGL renderer.
 - **OpenSSL, zlib, libcurl and libpsl** from pacbrew v0.40.2.

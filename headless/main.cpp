@@ -1697,7 +1697,8 @@ int main(int argc, char** argv) {
                             lock.unlock();
 #ifdef EDEN_DEV_VULKAN
                             std::error_code capture_error;
-                            const bool capture_requested = performance_run && sample >= 11 &&
+                            const bool capture_requested = performance_run &&
+                                (sample >= 11 || std::getenv("EDEN_DEV_CAPTURE_EARLY")) &&
                                 std::filesystem::remove(Eden::AppFile("capture-once.txt"), capture_error);
                             if (!performance_run || capture_requested)
 #endif

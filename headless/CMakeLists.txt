@@ -85,6 +85,10 @@ get_target_property(common_sources common SOURCES)
 list(REMOVE_ITEM common_sources host_memory.cpp sparse_large_vector.cpp)
 set_property(TARGET common PROPERTY SOURCES "${common_sources}")
 target_sources(common PRIVATE "${PORT_ROOT}/src/host_memory.cpp" "${PORT_ROOT}/src/memory_pages.cpp")
+file(READ "${PROJECT_SOURCE_DIR}/src/common/host_memory.h" port_host_memory_header)
+if(port_host_memory_header MATCHES "enum class BackingMode")
+    target_compile_definitions(common PRIVATE EDEN_HOST_MEMORY_BACKING_MODE=1)
+endif()
 
 # Eden's large tables (the guest page table, the GPU's address tables) stay sparse on the PS5:
 # their vector reserves its range with AllocateSparsePages and announces a first write to
@@ -163,6 +167,12 @@ include("${EDEN_PORT_DIR}/jit-alias.cmake")
         "#include \"dynarmic/backend/x64/block_of_code.h\"\n#include \"${EDEN_PORT_DIR}/jit-allocator.h\"" code_source "${code_source}")
     string(REPLACE "        , nullptr)\n    , constant_pool"
         "        , EdenJitAllocator())\n    , constant_pool" code_source "${code_source}")
+    string(REPLACE "        , nullptr)\n#endif\n    , constant_pool"
+        "        , EdenJitAllocator())\n#endif\n    , constant_pool" code_source "${code_source}")
+    string(FIND "${code_source}" ", EdenJitAllocator())" port_jit_allocator)
+    if(port_jit_allocator LESS 0)
+        message(FATAL_ERROR "JIT allocator adapter did not apply")
+    endif()
 if(PS5_NATIVE)
     string(PREPEND code_source "#define EDEN_JIT_ALIAS_NATIVE 1\n")
     string(REPLACE "    GenRunCode(rcp);"
@@ -263,7 +273,13 @@ if(EDEN_SHARED_JIT)
     eden_shared_jit_sources()
 endif()
 if(PS5_NATIVE OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    eden_reg_alloc_sources()
+    file(READ "${PROJECT_SOURCE_DIR}/src/dynarmic/src/dynarmic/backend/x64/reg_alloc.h" port_regalloc_header)
+    string(FIND "${port_regalloc_header}" "if (!iter.IsReleased())" port_released_check)
+    if(NOT port_released_check LESS 0)
+        file(REMOVE "${PORT_BUILD_DIR}/include/dynarmic/backend/x64/reg_alloc.h")
+    else()
+        eden_reg_alloc_sources()
+    endif()
 endif()
 
 # Patch lookup must not create a large empty record for every compiled block.
@@ -272,7 +288,10 @@ file(READ "${PROJECT_SOURCE_DIR}/src/dynarmic/src/dynarmic/backend/x64/emit_x64.
 set(patch_lookup "    const PatchInformation& patch_info = patch_information[target_desc];")
 string(FIND "${emitter}" "${patch_lookup}" patch_lookup_offset)
 if(patch_lookup_offset LESS 0)
-    message(FATAL_ERROR "Pinned JIT patch lookup changed")
+    string(FIND "${emitter}" "const auto it = patch_information.find(target_desc);" existing_patch_lookup)
+    if(existing_patch_lookup LESS 0)
+        message(FATAL_ERROR "Pinned JIT patch lookup changed")
+    endif()
 endif()
 string(REPLACE "${patch_lookup}"
     "    const auto patch = patch_information.find(target_desc);\n    if (patch == patch_information.end()) return;\n    const PatchInformation& patch_info = patch->second;" emitter "${emitter}")
@@ -466,6 +485,7 @@ string(REPLACE "${mark_test}" [=[        if (*ctx.conf.page_table_marked_bit == 
     endforeach()
     string(REPLACE "fastmem_patch_info.emplace(" "if (fastmem_marker) fastmem_patch_info.emplace("
         memory_exclusive "${memory_exclusive}")
+    string(REPLACE "            AddFastmemPatch(" "            if (fastmem_marker) AddFastmemPatch(" memory_exclusive "${memory_exclusive}")
     set(memory_source "${memory_prefix}${memory_exclusive}")
     include("${EDEN_PORT_DIR}/scalar-memory.cmake")
     if(EDEN_A32_FASTMEM)
@@ -473,6 +493,16 @@ string(REPLACE "${mark_test}" [=[        if (*ctx.conf.page_table_marked_bit == 
     endif()
     if(EDEN_SHARED_JIT)
         eden_shared_jit_memory_inc()
+    endif()
+    if(memory_source MATCHES "void AxxEmitX64::AddFastmemPatch")
+        foreach(callback wrapped_fn fault_entry)
+            set(port_old_patch "                fastmem_patch_info.emplace(\n                    std::bit_cast<u64>(location),\n                    FastmemPatchInfo{\n                        std::bit_cast<u64>(code.getCurr()),\n                        std::bit_cast<u64>(${callback}),\n                        *fastmem_marker,\n                        conf.recompile_on_fastmem_failure,\n                    });")
+            set(port_callback "${callback}")
+            if(callback STREQUAL "fault_entry")
+                set(port_callback "std::bit_cast<void (*)()>(fault_entry)")
+            endif()
+            string(REPLACE "${port_old_patch}" "                AddFastmemPatch(location, code.getCurr(), ${port_callback}, *fastmem_marker, conf.recompile_on_fastmem_failure);" memory_source "${memory_source}")
+        endforeach()
     endif()
     write_derived("${PORT_BUILD_DIR}/include/${memory_inc}" "${memory_source}")
 set(exclusive_lookup [=[template<typename EmitContext>
@@ -995,6 +1025,10 @@ get_target_property(core_sources core SOURCES)
 if(PS5_NATIVE)
     file(READ "${PROJECT_SOURCE_DIR}/src/core/loader/nso.cpp" nso_source)
     set(old_nso_image "    Kernel::CodeSet codeset;\n    codeset.memory.resize(module_start + last_segment_it->location + last_segment_it->size);")
+    string(FIND "${nso_source}" "const auto& last_segment = nso_header.segments.back();" port_new_nso)
+    if(NOT port_new_nso LESS 0)
+        set(old_nso_image "    Kernel::CodeSet codeset;\n    codeset.memory.resize(module_start + segment_end);")
+    endif()
     set(new_nso_image [=[    const u64 initialized_size = module_start + u64(last_segment_it->location) + u64(last_segment_it->size);
     const u64 argument_size = should_pass_arguments && !Settings::values.program_args.GetValue().empty()
         ? NSO_ARGUMENT_DATA_ALLOCATION_SIZE : 0;
@@ -1025,6 +1059,11 @@ if(PS5_NATIVE)
     // BSS belongs in guest memory, not a second almost-2-GiB heap buffer.
     codeset.memory.reserve(full_image ? final_size : initialized_size + argument_size);
     codeset.memory.resize(initialized_size);]=])
+    if(NOT port_new_nso LESS 0)
+        string(REPLACE "last_segment_it->location" "last_segment.location" new_nso_image "${new_nso_image}")
+        string(REPLACE "last_segment_it->size" "last_segment.size" new_nso_image "${new_nso_image}")
+        string(REPLACE "last_segment_it->bss_size" "last_segment.bss_size" new_nso_image "${new_nso_image}")
+    endif()
     string(FIND "${nso_source}" "${old_nso_image}" nso_offset)
     if(nso_offset LESS 0)
         message(FATAL_ERROR "Pinned NSO loader changed")
@@ -1035,6 +1074,7 @@ if(PS5_NATIVE)
         "    if (patched || full_image) {" nso_source "${nso_source}")
     string(REPLACE "    // Load codeset for current process"
         "    // Initialize BSS and page padding directly, including reused guest pages.\n    if (codeset.memory.size() < image_size &&\n        !process.GetMemory().ZeroBlock(load_base + codeset.memory.size(), image_size - codeset.memory.size()))\n        return std::nullopt;\n\n    // Load codeset for current process" nso_source "${nso_source}")
+    if(port_new_nso LESS 0)
     set(old_nso_decode [=[        std::vector<u8> decompressed_size(std::ranges::max_element(nso_header.segments, [](auto const& a, auto const& b) {
             return a.size < b.size;
         })->size);]=])
@@ -1094,6 +1134,7 @@ if(PS5_NATIVE)
                 }
             }
 ]=] nso_source "${nso_source}")
+    endif()
     # Cheats address the game's main module. Eden registers a cheat list for every module that
     # has one, and the last registration wins: a cheat file without a build ID in its name
     # (mods/<title ID>/cheat_<name>.txt) matches every module, so its cheats were applied
@@ -1790,7 +1831,10 @@ string(REPLACE "${group_site}"
 set(optimized_fill_site "            std::memset(ptr + offset * PageSize, fill_pattern, PageSize);")
 string(FIND "${pool_source}" "${optimized_fill_site}" optimized_fill_at)
 if(optimized_fill_at LESS 0)
-    message(FATAL_ERROR "Pinned optimized allocation fill changed; review the guest memory service.")
+    string(FIND "${pool_source}" "device_memory.buffer.ClearBackingRegion(" upstream_backing_clear)
+    if(upstream_backing_clear LESS 0)
+        message(FATAL_ERROR "Pinned optimized allocation fill changed; review the guest memory service.")
+    endif()
 endif()
 string(REPLACE "${optimized_fill_site}"
     "            ::Common::FillGuestMemory(ptr + offset * PageSize, fill_pattern, PageSize);"
@@ -2024,6 +2068,7 @@ if(EDEN_PS5_OPENGL)
             "    void Stop();" gpu_thread_header "${gpu_thread_header}")
         string(REPLACE "    std::jthread thread;"
             "    void RunWorker(VideoCore::RendererBase&, Core::Frontend::GraphicsContext&, Tegra::Control::Scheduler&);\n    pthread_t thread{};\n    std::stop_source stop_source;\n    bool thread_joinable{};" gpu_thread_header "${gpu_thread_header}")
+        string(REPLACE "return thread.get_id() == std::this_thread::get_id();" "return thread && pthread_equal(thread, pthread_self()) != 0;" gpu_thread_header "${gpu_thread_header}")
         file(READ "${PROJECT_SOURCE_DIR}/src/video_core/gpu_thread.cpp" gpu_worker)
         set(worker_start "void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Frontend::GraphicsContext& context, Tegra::Control::Scheduler& scheduler) {\n    rasterizer = renderer.ReadRasterizer();\n    thread = std::jthread([&](std::stop_token stop_token) {")
         string(FIND "${gpu_worker}" "${worker_start}" worker_start_offset)
@@ -2037,16 +2082,43 @@ if(EDEN_PS5_OPENGL)
         string(REPLACE "ThreadManager::~ThreadManager() = default;" "ThreadManager::~ThreadManager() { Stop(); }" gpu_worker "${gpu_worker}")
         # Eden's own shutdown of its std::jthread worker: the worker here is a pthread, ended by Stop.
         set(worker_shutdown "void ThreadManager::NotifyShutdown() {\n    if (thread.joinable()) {\n        thread.request_stop();\n        thread.join();\n    }\n    VideoCommon::GpuSplit::Get().Stop();\n}")
+        string(FIND "${gpu_worker}" "state.shutting_down = true;" port_shutdown_state)
+        if(NOT port_shutdown_state LESS 0)
+            set(worker_shutdown "void ThreadManager::NotifyShutdown() {\n    if (thread.joinable()) {\n        {\n            std::scoped_lock lk{state.write_lock};\n            state.shutting_down = true;\n            InvalidateReadbackCache();\n            thread.request_stop();\n        }\n        thread.join();\n    }\n    VideoCommon::GpuSplit::Get().Stop();\n}")
+        endif()
         string(FIND "${gpu_worker}" "${worker_shutdown}" worker_shutdown_at)
         if(worker_shutdown_at LESS 0)
             message(FATAL_ERROR "Pinned GPU worker shutdown changed")
         endif()
-        string(REPLACE "${worker_shutdown}" "void ThreadManager::NotifyShutdown() {\n    Stop();\n    VideoCommon::GpuSplit::Get().Stop();\n}" gpu_worker "${gpu_worker}")
+        set(port_worker_shutdown "void ThreadManager::NotifyShutdown() {\n    Stop();\n    VideoCommon::GpuSplit::Get().Stop();\n}")
+        if(NOT port_shutdown_state LESS 0)
+            set(port_worker_shutdown "void ThreadManager::NotifyShutdown() {\n    {\n        std::scoped_lock lk{state.write_lock};\n        state.shutting_down = true;\n        InvalidateReadbackCache();\n    }\n    Stop();\n    VideoCommon::GpuSplit::Get().Stop();\n}")
+        endif()
+        string(REPLACE "${worker_shutdown}" "${port_worker_shutdown}" gpu_worker "${gpu_worker}")
         string(REPLACE "        CommandDataContainer next;" "        unsigned dispatches = 0;\n        CommandDataContainer next;" gpu_worker "${gpu_worker}")
-        set(dispatch_call "                Profile::Scope scope{Profile::Zone::Push};\n                scheduler.Push(system.GPU(), submit_list->channel, std::move(submit_list->entries));")
+        set(dispatch_begin "\n                Profile::Scope scope{Profile::Zone::Push};\n")
+        string(FIND "${gpu_worker}" "${dispatch_begin}" dispatch_offset)
+        if(dispatch_offset LESS 0)
+            message(FATAL_ERROR "Pinned GPU dispatch scope changed")
+        endif()
+        math(EXPR dispatch_offset "${dispatch_offset} + 1")
+        string(SUBSTRING "${gpu_worker}" ${dispatch_offset} -1 dispatch_tail)
+        set(dispatch_end "scheduler.Push(system.GPU(), submit_list->channel, std::move(submit_list->entries));")
+        string(FIND "${dispatch_tail}" "${dispatch_end}" dispatch_length)
+        if(dispatch_length LESS 0)
+            message(FATAL_ERROR "Pinned GPU dispatch call changed")
+        endif()
+        string(LENGTH "${dispatch_end}" dispatch_end_length)
+        math(EXPR dispatch_length "${dispatch_length} + ${dispatch_end_length}")
+        string(SUBSTRING "${dispatch_tail}" 0 ${dispatch_length} dispatch_call)
         string(REPLACE "${dispatch_call}"
             "                const auto count = ++dispatches;\n                if (count <= 3) LOG_INFO(Render_OpenGL, \"EDEN_GPU_DISPATCH_BEGIN count={}\", count);\n${dispatch_call}\n                if (count <= 3) LOG_INFO(Render_OpenGL, \"EDEN_GPU_DISPATCH_END count={}\", count);" gpu_worker "${gpu_worker}")
         # A full queue must not retain a producer after its consumer stops.
+        string(REPLACE "    state.queue.EmplaceWait(std::move(command_data), fence, block,\n                            state.published_work_sequence.load(std::memory_order_acquire));"
+            "    while (!stop_source.stop_requested() &&\n           !state.queue.TryEmplace(std::move(command_data), fence, block,\n                                  state.published_work_sequence.load(std::memory_order_acquire)))\n        std::this_thread::sleep_for(std::chrono::microseconds(100));\n    if (stop_source.stop_requested())\n        return state.signaled_fence.load(std::memory_order_relaxed);"
+            gpu_worker "${gpu_worker}")
+        string(REPLACE "while (signaled < fence) {" "while (signaled < fence && !stop_source.stop_requested()) {" gpu_worker "${gpu_worker}")
+        string(REPLACE "state.signaled_fence.wait(signaled, std::memory_order_acquire);" "std::this_thread::sleep_for(std::chrono::microseconds(100));" gpu_worker "${gpu_worker}")
         string(REPLACE "    state.queue.EmplaceWait(std::move(command_data), fence, block);"
             "    while (!stop_source.stop_requested() &&\n           !state.queue.TryEmplace(std::move(command_data), fence, block))\n        std::this_thread::sleep_for(std::chrono::microseconds(100));\n    if (stop_source.stop_requested())\n        return state.signaled_fence.load(std::memory_order_relaxed);"
             gpu_worker "${gpu_worker}")
@@ -2077,13 +2149,17 @@ if(EDEN_PS5_OPENGL)
                 "if (count <= 3 || ::Eden::Performance::BootTrace()) LOG_INFO(Render_OpenGL, \"EDEN_GPU_DISPATCH_"
                 gpu_worker "${gpu_worker}")
             # Time guest-side back-pressure: pushes that found the 8-entry queue full.
-            set(full_wait "    while (!stop_source.stop_requested() &&\n           !state.queue.TryEmplace(std::move(command_data), fence, block))\n        std::this_thread::sleep_for(std::chrono::microseconds(100));")
+            set(queue_publish "")
+            if(NOT port_shutdown_state LESS 0)
+                set(queue_publish ",\n                                  state.published_work_sequence.load(std::memory_order_acquire)")
+            endif()
+            set(full_wait "    while (!stop_source.stop_requested() &&\n           !state.queue.TryEmplace(std::move(command_data), fence, block${queue_publish}))\n        std::this_thread::sleep_for(std::chrono::microseconds(100));")
             string(FIND "${gpu_worker}" "${full_wait}" full_wait_offset)
             if(full_wait_offset LESS 0)
                 message(FATAL_ERROR "Pinned GPU queue push changed")
             endif()
             string(REPLACE "${full_wait}"
-                "    if (stop_source.stop_requested() ||\n        !state.queue.TryEmplace(std::move(command_data), fence, block)) {\n        ::Eden::Performance::Timer full_timer(::Eden::Performance::gpu_queue_full);\n${full_wait}\n    }"
+                "    if (stop_source.stop_requested() ||\n        !state.queue.TryEmplace(std::move(command_data), fence, block${queue_publish})) {\n        ::Eden::Performance::Timer full_timer(::Eden::Performance::gpu_queue_full);\n${full_wait}\n    }"
                 gpu_worker "${gpu_worker}")
         endif()
         write_derived("${PORT_BUILD_DIR}/gpu_thread.cpp" "${gpu_worker}")

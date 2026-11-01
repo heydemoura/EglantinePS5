@@ -7,6 +7,9 @@ body=t[t.index('    const size_t module_start'):t.index('    // Apply patches if
 zero=t[t.index('    // Initialize BSS and page padding directly'):t.index('    // Load codeset for current process')]
 code=r'''
 #include <algorithm>
+#include <limits>
+#define LOG_ERROR(...) ((void)0)
+namespace Core::Memory { constexpr unsigned YUZU_PAGEMASK = 4095; }
 #include <cstdio>
 #include <array>
 #include <vector>

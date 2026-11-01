@@ -11,6 +11,16 @@ broken = []
 def adapt(relative, destination, replacements):
     text = (source / relative).read_text()
     for old, new in replacements:
+        if relative.endswith('/vk_rasterizer.cpp') and old.endswith('// update engine as channel may be different.') and old not in text:
+            marker = '// Donkey Kong Bananza\'s terrain:'
+            if marker in text:
+                old = old.replace('// update engine as channel may be different.', marker)
+                new = new.replace('// update engine as channel may be different.', marker)
+        if relative.endswith('/vulkan_memory_allocator.cpp') and old.startswith('    vk::Check(vmaCreateBuffer(') and old not in text:
+            if 'VkResult result = vmaCreateBuffer(' in text:
+                # This core already retries outside the driver budget on allocation failure.
+                if 'host_ci.flags &= ~VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;' in text:
+                    continue
         if text.count(old) != 1:
             if report:
                 broken.append(f"{relative}: {old[:70]!r} (matches {text.count(old)})")
@@ -886,12 +896,15 @@ download_prefix = download_source[download_begin:download_loop]
 # pressure policy changes. Fail on source drift rather than inventing a budget.
 delete_begin = download_source.index('    if (image.HasScaled()) {', download_source.index('void TextureCache<P>::DeleteImage('))
 delete_end = download_source.index('    const GPUVAddr gpu_addr', delete_begin)
-reclaimed_bytes = download_source[delete_begin:delete_end].replace('total_used_memory -=', 'bytes +=')
+reclaimed_bytes = (download_source[delete_begin:delete_end]
+                   .replace('total_used_memory -=', 'bytes +=')
+                   .replace('slot_images[image_id]', 'image'))
+assert 'image_id' not in reclaimed_bytes, 'DeleteImage accounting needs adapting to an image reference'
 gc_begin = download_source.index('void TextureCache<P>::RunGarbageCollector() {')
 gc_end = download_source.index('\ntemplate <class P>', gc_begin)
 gc_original = download_source[gc_begin:gc_end]
 gc = gc_original
-gc_setup = '''    const auto ReclaimedBytes = [&](const ImageBase& image) {
+gc_setup = '''    const auto ReclaimedBytes = [&](const Image& image) {
         u64 bytes = 0;
 ''' + reclaimed_bytes + '''        return bytes;
     };
@@ -1092,9 +1105,15 @@ shader_costs = [
      '        }\n'
      '    }\n'
      '    return BuiltPipeline(current_pipeline);\n}'),
-    ('    if (!is_new) {\n        return pipeline.get();\n    }\n    pipeline = CreateComputePipeline(key, shader);\n    return pipeline.get();\n}',
+    ('    if (!is_new) {\n        return pipeline.get();\n    }\n'
+     '    try {\n        pipeline = CreateComputePipeline(key, shader);\n'
+     '    } catch (const Shader::TensorRejected&) {\n        compute_cache.erase(pair);\n'
+     '        rejected_tensor_pipelines.emplace(key, std::current_exception());\n        throw;\n    }\n'
+     '    return pipeline.get();\n}',
      '    if (is_new) {\n'
-     '        pipeline = CreateComputePipeline(key, shader);\n'
+     '        try {\n            pipeline = CreateComputePipeline(key, shader);\n'
+     '        } catch (const Shader::TensorRejected&) {\n            compute_cache.erase(pair);\n'
+     '            rejected_tensor_pipelines.emplace(key, std::current_exception());\n            throw;\n        }\n'
      '    }\n'
      '    if (::Eden::DevVulkan::trace_pipelines && pipeline) {\n'
      '        static std::unordered_set<const void*> traced;\n'
@@ -1126,6 +1145,8 @@ shader_costs = [
 # Time both graphics and compute preparation, without modifying the compiler or
 # reading guest state on another thread. These intervals overlap shader_prepare.
 shader_source = (source / 'src/video_core/renderer_vulkan/vk_pipeline_cache.cpp').read_text()
+shader_source = shader_source.replace('    auto it{graphics_cache.find(graphics_key)};\n    if (it == graphics_cache.end()) {',
+                                      '    auto it{graphics_cache.find(graphics_key)};\n    const bool is_new = it == graphics_cache.end();\n    if (is_new) {')
 for expression, index, count in (
     ('main_pools.ReleaseContents()', 19, 2),
     ('TranslateProgram(pools.inst, pools.block, env, cfg, host_info)', 21, 3),
