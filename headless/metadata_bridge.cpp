@@ -1,5 +1,6 @@
 #include "game_name.h"
 #include "metadata_bridge.h"
+#include "npdm_title_id.h"
 #include "assets_dir.h"
 #include "diagnostics.h"
 #include "profiles.h"
@@ -194,15 +195,7 @@ uint64_t eden_game_title_id(const char* rom_path) {
     if (const std::string_view named{rom_path}; named.ends_with("/exefs/main")) {
         const std::string npdm = std::string{named.substr(0, named.size() - 4)} + "main.npdm";
         std::unique_ptr<FILE, int (*)(FILE*)> file(std::fopen(npdm.c_str(), "rb"), std::fclose);
-        unsigned char header[0x400]{};
-        const std::size_t size = file ? std::fread(header, 1, sizeof(header), file.get()) : 0;
-        if (size < 0x80 || std::memcmp(header, "META", 4) != 0) return 0;
-        std::uint32_t aci = 0;
-        std::memcpy(&aci, header + 0x70, sizeof(aci));
-        if (aci + 0x18 > size || std::memcmp(header + aci, "ACI0", 4) != 0) return 0;
-        std::uint64_t title = 0;
-        std::memcpy(&title, header + aci + 0x10, sizeof(title));
-        return title;
+        return Eden::ReadNpdmTitleId(file.get());
     }
     FileSys::RealVfsFilesystem vfs;
     const auto file = vfs.OpenFile(rom_path, FileSys::OpenMode::Read);

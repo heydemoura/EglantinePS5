@@ -15,7 +15,7 @@ src="$root/Eglantine"
 commit=$(git -C "$src" rev-parse HEAD)
 stamp=eglantine-$commit
 if [[ -n $(git -C "$src" status --porcelain --untracked-files=all) ]]; then
-    stamp+=-$( { git -C "$src" diff HEAD; git -C "$src" ls-files --others --exclude-standard -z | xargs -0 -r sha256sum; } | sha256sum | cut -c1-12)
+    stamp+=-$( (cd -- "$src"; git diff HEAD; git ls-files --others --exclude-standard -z | xargs -0 -r sha256sum) | sha256sum | cut -c1-12)
 fi
 
 if [[ ! -f $tree/CMakeLists.txt || $(cat "$tree/.unpacked-from" 2>/dev/null) != "$stamp" ]]; then

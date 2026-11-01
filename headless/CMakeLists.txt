@@ -1561,20 +1561,14 @@ if(EDEN_DEV_PROFILE)
         }
         worker_task_manager.WaitForRequests();
         eden_mark("worker_tasks");]=])
+    # Keep upstream's process/fastmem cleanup intact while timing its boundaries.
     eden_patch_kernel([=[        CloseServices();
-
-        if (application_process) {
-            application_process->Close(system.Kernel());
-            application_process = nullptr;
-        }
 ]=] [=[        CloseServices();
         eden_mark("close_services");
-
-        if (application_process) {
-            application_process->Close(system.Kernel());
-            application_process = nullptr;
-        }
-        eden_mark("application_process");
+]=])
+    eden_patch_kernel([=[        next_object_id = 0;
+]=] [=[        eden_mark("application_process");
+        next_object_id = 0;
 ]=])
     eden_patch_kernel([=[        CleanupObject(system_resource_limit);
 ]=] [=[        CleanupObject(system_resource_limit);
@@ -2271,6 +2265,20 @@ list(APPEND common_sources "${PORT_BUILD_DIR}/multi_level_page_table.cpp")
     # The older SDK omits DCCP's IP protocol name (wire value 33, also used by
     # Service::Sockets::Protocol). socket() still decides runtime support.
     get_target_property(core_sources core SOURCES)
+    # A loose RomFS reads thousands of small files. The PS5's native resource budget
+    # is lower than RLIMIT_NOFILE: a large cache can make fopen and lazy mutex
+    # creation fail with ENOMEM even when physical memory is plentiful.
+    file(READ "${PROJECT_SOURCE_DIR}/src/core/file_sys/vfs/vfs_real.cpp" vfs_real_source)
+    eden_patch(vfs_real_source
+        "    return (std::min)(size_t{8192}, limit);"
+        "    return (std::min)(size_t{128}, limit);")
+    eden_patch(vfs_real_source
+        "RealVfsFilesystem::RealVfsFilesystem() : VfsFilesystem(nullptr) {}"
+        "RealVfsFilesystem::RealVfsFilesystem() : VfsFilesystem(nullptr) {\n    std::fprintf(stderr, \"EDEN_VFS_CACHE max_open_files=%zu\\n\", MaxOpenFiles());\n}")
+    string(PREPEND vfs_real_source "#include <cstdio>\n")
+    write_derived("${PORT_BUILD_DIR}/vfs_real.cpp" "${vfs_real_source}")
+    list(REMOVE_ITEM core_sources file_sys/vfs/vfs_real.cpp)
+    list(APPEND core_sources "${PORT_BUILD_DIR}/vfs_real.cpp")
     # Keep immutable firmware outside the small writable title-data quota.
     file(READ "${PROJECT_SOURCE_DIR}/src/core/file_sys/bis_factory.h" bis_header)
     string(REPLACE "VirtualDir dump_root);" "VirtualDir dump_root, VirtualDir firmware_root = {});" bis_header "${bis_header}")

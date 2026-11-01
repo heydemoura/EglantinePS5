@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Applies the patches in tools/eglantine-patches/ to the Eglantine submodule's working tree, which is
-# what the build reads. They are commits of Eglantine's nx2-experimental branch that nx2 does not have
-# yet (the JIT's compact per-block tables, auto-stubbed commands reported once, a smaller host copy of
-# huge ASTC arrays on small GPUs). Safe to run again: a patch that is already in is left alone.
+# what the build reads. These include upstream nx2-experimental changes and local compatibility
+# fixes for service logging, large texture arrays, Switch 2 storage buffers and native shaders.
+# Safe to run again: a patch that is already in is left alone.
 # --revert takes them out (make update does, before it moves the submodule).
 set -euo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
