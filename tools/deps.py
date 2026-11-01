@@ -101,6 +101,8 @@ def extract(archive, destination, strip, only=()):
     """Extracts into destination through a temporary folder beside it (no partial trees).
     `only` keeps the members whose path (after strip) is one of these files or lies in one of
     these folders."""
+    # Keep staging on the destination filesystem when .deps is a symlink.
+    destination = destination.resolve()
     destination.parent.mkdir(parents=True, exist_ok=True)
     staging = pathlib.Path(tempfile.mkdtemp(prefix='.deps-', dir=destination.parent))
     try:

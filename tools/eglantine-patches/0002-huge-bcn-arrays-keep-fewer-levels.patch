@@ -1,9 +1,9 @@
 diff --git a/src/video_core/renderer_vulkan/vk_texture_cache.cpp b/src/video_core/renderer_vulkan/vk_texture_cache.cpp
-index 6eb22fa263..833a60f5f7 100644
+index 5ba36feee9..2eef5923c5 100644
 --- a/src/video_core/renderer_vulkan/vk_texture_cache.cpp
 +++ b/src/video_core/renderer_vulkan/vk_texture_cache.cpp
 @@ -257,15 +257,57 @@ constexpr std::array<VkFormat, 2> OpaqueAstcViewFormats{VK_FORMAT_BC1_RGBA_UNORM
-           info.size.depth == 1;
+            info.size.depth == 1;
  }
  
 +// A native BCn 2D array whose mip chain is over 1.5 GiB (title 1's BC6H terrain arrays: 8192x8192x68,
@@ -62,10 +62,10 @@ index 6eb22fa263..833a60f5f7 100644
          u64 bytes = 0;
          for (s32 level = static_cast<s32>(skip); level < info.resources.levels; ++level) {
 diff --git a/src/video_core/texture_cache/texture_cache.h b/src/video_core/texture_cache/texture_cache.h
-index 63abffed0f..5eae442134 100644
+index c8aaf8dff5..45c3d88e07 100644
 --- a/src/video_core/texture_cache/texture_cache.h
 +++ b/src/video_core/texture_cache/texture_cache.h
-@@ -1406,7 +1406,10 @@ bool TextureCache<P>::UploadWrittenLayers(Image& image) {
+@@ -1411,7 +1411,10 @@ bool TextureCache<P>::UploadWrittenLayers(Image& image) {
              }
          }
          image.dirty_layers.clear();
@@ -77,7 +77,7 @@ index 63abffed0f..5eae442134 100644
              return false;
          }
          UploadLayers(image, layers);
-@@ -1449,6 +1452,14 @@ void TextureCache<P>::UploadLayers(Image& image, std::span<const u32> layers) {
+@@ -1470,6 +1473,14 @@ void TextureCache<P>::UploadLayers(Image& image, std::span<const u32> layers) {
      if constexpr (requires { &Runtime::AccelerateImageUploadLayers; }) {
          if (False(image.flags & ImageFlagBits::AcceleratedUpload)) {
              // Plain formats: each layer unswizzled on its own into its layer of the image.
@@ -92,7 +92,7 @@ index 63abffed0f..5eae442134 100644
              ImageInfo layer_info = image.info;
              layer_info.resources.layers = 1;
              const size_t layer_size = CalculateUnswizzledSizeBytes(layer_info);
-@@ -1463,6 +1474,11 @@ void TextureCache<P>::UploadLayers(Image& image, std::span<const u32> layers) {
+@@ -1484,6 +1495,11 @@ void TextureCache<P>::UploadLayers(Image& image, std::span<const u32> layers) {
                      UnswizzleImage(*gpu_memory, layer_addr, layer_info, swizzle_data,
                                     staging.mapped_span.subspan(i * layer_size, layer_size));
                  for (BufferImageCopy copy : layer_copies) {

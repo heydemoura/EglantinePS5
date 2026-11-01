@@ -448,6 +448,13 @@ int main(int argc, char** argv) {
             std::ifstream dev_settings(Eden::AppFile("dev-settings.txt"));
             for (std::string entry; dev_settings >> entry;) {
                 if (entry.starts_with("rom=") && entry.size() == 20) development_id = entry.substr(4);
+#ifdef EDEN_DEV_ROM_ID
+                // Compatibility probes need environment switches without the full profiler.
+                if (entry.starts_with("env=") && entry.find('=', 4) != std::string::npos) {
+                    const auto split = entry.find('=', 4);
+                    setenv(entry.substr(4, split - 4).c_str(), entry.c_str() + split + 1, 1);
+                }
+#endif
                 // dev-settings launcher=first opens the launcher instead of the development title
                 // (launcher work: its captures and file-driven input need a development build).
                 if (entry == "launcher=first") autoboot_pending = false;
@@ -1685,9 +1692,9 @@ int main(int argc, char** argv) {
                             lock.lock();
                         }
 #elif defined(EDEN_DEV_ROM_ID)
-                        // Bounded compatibility probe (10 minutes; the runner usually closes
-                        // the title first); use the ordinary teardown path.
-                        constexpr unsigned observation_samples = 120;
+                        // Compatibility probes are bounded to ten minutes by default. Shader
+                        // debugging can opt into an hour without enabling the full profiler.
+                        const unsigned observation_samples = std::getenv("EDEN_DEV_LONG_PROBE") ? 720 : 120;
                         for (unsigned sample = 0; sample < observation_samples; ++sample) {
                             if (completion->wake.wait_for(lock, std::chrono::seconds(5), completed)) break;
                             if (sample == observation_samples - 1) {

@@ -886,12 +886,15 @@ download_prefix = download_source[download_begin:download_loop]
 # pressure policy changes. Fail on source drift rather than inventing a budget.
 delete_begin = download_source.index('    if (image.HasScaled()) {', download_source.index('void TextureCache<P>::DeleteImage('))
 delete_end = download_source.index('    const GPUVAddr gpu_addr', delete_begin)
-reclaimed_bytes = download_source[delete_begin:delete_end].replace('total_used_memory -=', 'bytes +=')
+reclaimed_bytes = (download_source[delete_begin:delete_end]
+                   .replace('total_used_memory -=', 'bytes +=')
+                   .replace('slot_images[image_id]', 'image'))
+assert 'image_id' not in reclaimed_bytes, 'DeleteImage accounting needs adapting to an image reference'
 gc_begin = download_source.index('void TextureCache<P>::RunGarbageCollector() {')
 gc_end = download_source.index('\ntemplate <class P>', gc_begin)
 gc_original = download_source[gc_begin:gc_end]
 gc = gc_original
-gc_setup = '''    const auto ReclaimedBytes = [&](const ImageBase& image) {
+gc_setup = '''    const auto ReclaimedBytes = [&](const Image& image) {
         u64 bytes = 0;
 ''' + reclaimed_bytes + '''        return bytes;
     };

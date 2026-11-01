@@ -13,7 +13,7 @@ from check import fixture
 ROOT = Path(__file__).resolve().parents[1]
 APP = Path(os.environ.get('EDEN_PACKAGE_DIR', ROOT / 'dist/headless/PPSA98515')).resolve()
 if 'EDEN_PACKAGE_DIR' in os.environ:
-    assert APP.is_relative_to(ROOT/'build') and APP.name == 'PPSA98515'
+    assert APP.is_relative_to((ROOT / 'build').resolve()) and APP.name == 'PPSA98515'
 OUT = ROOT / 'build/headless-native'
 BASE_REQUIRED = {'eboot.bin', 'core-homebrew.nro', 'sce_module/libc.prx',
             'sce_sys/param.json', 'sce_sys/icon0.png', 'sce_sys/pic0.dds', 'sce_sys/pic1.dds',
