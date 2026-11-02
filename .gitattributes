@@ -1,1 +1,4 @@
 * text=auto eol=lf
+
+# Preserve upstream line endings inside reproducible source patches.
+*.patch -text

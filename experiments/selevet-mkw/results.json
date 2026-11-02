@@ -1,0 +1,294 @@
+{
+  "date": "2026-11-02",
+  "starting_root": "ce763b18de2099fe9b9440815e4415523b6315ff",
+  "reference_core": "3140648a668aaebf87bae2dea17512fdca125ba0",
+  "candidate_core": "e902aca643b4abfb8217c5df5bf5b7e822962ef9",
+  "core_patch_sha256": "303b9a49c9baa68389541796379c5489a980b3e2d1d86cc578b41c4ee3c9deae",
+  "root_snapshot_sha256": "dca2be339a5869c3833ae72457027b9f586b368b567fb5c8935778ce52e77f48",
+  "host_mapping": {
+    "random_operations": 200000,
+    "reference_us_per_update": 111.667,
+    "selevet_us_per_update": 3.09009,
+    "ratio": 36.1371,
+    "candidate_header_sha256": "b9d929a7e6598cef2787e998c88387bec9d8f72a8440363dc78d5ae32b9ea766",
+    "reference_header_sha256": "9731f692fc3d8525b36f27e23f99d7b09f73fec7cf090f4b3317648c97b24ee7",
+    "candidate_core": "e902aca643b4abfb8217c5df5bf5b7e822962ef9",
+    "reference_core": "3140648a668aaebf87bae2dea17512fdca125ba0"
+  },
+  "builds": {
+    "base": {
+      "eboot_sha256": "5a8ff195572515722738bd283253baff30bff4a01ddd72bf66b413d6209b3e70",
+      "elf_sha256": "4f79ca93e2d6694a77f703502832441b46059ee81ae702c93dc28fa9a59cefec",
+      "flags": {
+        "EDEN_A32_FASTMEM:BOOL": "ON",
+        "EDEN_DEVICE_FRONTEND:BOOL": "OFF",
+        "EDEN_DEV_PROFILE:BOOL": "OFF",
+        "EDEN_DEV_PROFILE_TITLE:STRING": "",
+        "EDEN_DEV_ROM_ID:STRING": "0400C3F00006E000",
+        "EDEN_DEV_VULKAN:BOOL": "ON",
+        "EDEN_DEV_WAIT_CALLERS:BOOL": "OFF",
+        "EDEN_GPU_PROBE:BOOL": "OFF",
+        "EDEN_HEAP_ARENAS:BOOL": "ON",
+        "EDEN_HEAP_GUARD:BOOL": "OFF",
+        "EDEN_HOST_ASAN:BOOL": "OFF",
+        "EDEN_INLINE_EXCLUSIVES:BOOL": "ON",
+        "EDEN_MKW_DIAGNOSTICS:BOOL": "OFF",
+        "EDEN_PGO_PROFILE:FILEPATH": "",
+        "EDEN_PS5_FRAMEGEN:BOOL": "ON",
+        "EDEN_PS5_OPENGL:BOOL": "ON",
+        "EDEN_PS5_VULKAN:BOOL": "ON",
+        "EDEN_VULKAN_DRIVER:STRING": "RADV",
+        "ENABLE_LTO:BOOL": "OFF",
+        "YUZU_BUILD_PRESET:STRING": "custom",
+        "EDEN_VULKAN_DRIVER-STRINGS:INTERNAL": "CUSTOM;RADV"
+      },
+      "checks": {
+        "native": "PASS native-build15.log terminal0",
+        "package": "PASS base-package.log terminal0",
+        "core_host": "171cases2239770assertions",
+        "texture_asan_ubsan": "565112assertions11cases"
+      },
+      "compiler": "Clang18",
+      "runtime_conclusion": "No controlled gameplay FPS result"
+    },
+    "zen2": {
+      "eboot_sha256": "172dcc67348d1b9fd283ec863daa50b844ffc62f5ef98180090eb97c3a1e4a5f",
+      "elf_sha256": "1ef452c4c86a92e2b88d535cba9c6ec75f554202d0028008bb4fd4c221b8c085",
+      "flags": {
+        "EDEN_A32_FASTMEM:BOOL": "ON",
+        "EDEN_DEVICE_FRONTEND:BOOL": "OFF",
+        "EDEN_DEV_PROFILE:BOOL": "OFF",
+        "EDEN_DEV_PROFILE_TITLE:STRING": "",
+        "EDEN_DEV_ROM_ID:STRING": "0400C3F00006E000",
+        "EDEN_DEV_VULKAN:BOOL": "ON",
+        "EDEN_DEV_WAIT_CALLERS:BOOL": "OFF",
+        "EDEN_GPU_PROBE:BOOL": "OFF",
+        "EDEN_HEAP_ARENAS:BOOL": "ON",
+        "EDEN_HEAP_GUARD:BOOL": "OFF",
+        "EDEN_HOST_ASAN:BOOL": "OFF",
+        "EDEN_INLINE_EXCLUSIVES:BOOL": "ON",
+        "EDEN_MKW_DIAGNOSTICS:BOOL": "OFF",
+        "EDEN_PGO_PROFILE:FILEPATH": "",
+        "EDEN_PS5_FRAMEGEN:BOOL": "ON",
+        "EDEN_PS5_OPENGL:BOOL": "ON",
+        "EDEN_PS5_VULKAN:BOOL": "ON",
+        "EDEN_VULKAN_DRIVER:STRING": "RADV",
+        "ENABLE_LTO:BOOL": "OFF",
+        "YUZU_BUILD_PRESET:STRING": "zen2",
+        "EDEN_VULKAN_DRIVER-STRINGS:INTERNAL": "CUSTOM;RADV"
+      },
+      "checks": {
+        "native": "PASS zen2-build.log terminal0",
+        "package": "PASS zen2-package.log terminal0",
+        "core_host": "171cases2239770assertions",
+        "texture_asan_ubsan": "565112assertions11cases"
+      },
+      "compiler": "Clang18",
+      "runtime_conclusion": "No controlled gameplay FPS result",
+      "verified_generated_flags": [
+        {
+          "file": "arm_dynarmic_64.cpp",
+          "flags": [
+            "-march=znver2",
+            "-mtune=znver2",
+            "-O3"
+          ]
+        },
+        {
+          "file": "texture_cache.cpp",
+          "flags": [
+            "-march=znver2",
+            "-mtune=znver2",
+            "-O3"
+          ]
+        },
+        {
+          "file": "main.cpp",
+          "flags": [
+            "-march=znver2",
+            "-mtune=znver2",
+            "-O3"
+          ]
+        }
+      ]
+    },
+    "thinlto": {
+      "eboot_sha256": "676d5d4f11ce36c8924a6c3d6bcb0e29f67a9736561f97a5deca80aa6a1fdddf",
+      "elf_sha256": "d509759f66ec82157dde6a635cd3ec5571b26571e1500cd3d47d2f5ac029df33",
+      "flags": {
+        "EDEN_A32_FASTMEM:BOOL": "ON",
+        "EDEN_DEVICE_FRONTEND:BOOL": "OFF",
+        "EDEN_DEV_PROFILE:BOOL": "OFF",
+        "EDEN_DEV_PROFILE_TITLE:STRING": "",
+        "EDEN_DEV_ROM_ID:STRING": "0400C3F00006E000",
+        "EDEN_DEV_VULKAN:BOOL": "ON",
+        "EDEN_DEV_WAIT_CALLERS:BOOL": "OFF",
+        "EDEN_GPU_PROBE:BOOL": "OFF",
+        "EDEN_HEAP_ARENAS:BOOL": "ON",
+        "EDEN_HEAP_GUARD:BOOL": "OFF",
+        "EDEN_HOST_ASAN:BOOL": "OFF",
+        "EDEN_INLINE_EXCLUSIVES:BOOL": "ON",
+        "EDEN_MKW_DIAGNOSTICS:BOOL": "OFF",
+        "EDEN_PGO_PROFILE:FILEPATH": "",
+        "EDEN_PS5_FRAMEGEN:BOOL": "ON",
+        "EDEN_PS5_OPENGL:BOOL": "ON",
+        "EDEN_PS5_VULKAN:BOOL": "ON",
+        "EDEN_VULKAN_DRIVER:STRING": "RADV",
+        "ENABLE_LTO:BOOL": "ON",
+        "YUZU_BUILD_PRESET:STRING": "custom",
+        "EDEN_VULKAN_DRIVER-STRINGS:INTERNAL": "CUSTOM;RADV"
+      },
+      "checks": {
+        "native": "PASS thinlto-checks2.log terminal0",
+        "package": "PASS thinlto-package.log terminal0",
+        "core_host": "171cases2239770assertions",
+        "texture_asan_ubsan": "565112assertions11cases",
+        "inventory": "PASS thinlto-inventory.log terminal0"
+      },
+      "compiler": "Clang18",
+      "runtime_conclusion": "No controlled gameplay FPS result",
+      "verified_generated_flags": [
+        {
+          "file": "arm_dynarmic_64.cpp",
+          "flags": [
+            "-O3",
+            "-flto=thin"
+          ]
+        },
+        {
+          "file": "texture_cache.cpp",
+          "flags": [
+            "-O3",
+            "-flto=thin"
+          ]
+        },
+        {
+          "file": "main.cpp",
+          "flags": [
+            "-O3",
+            "-flto=thin"
+          ]
+        }
+      ]
+    }
+  },
+  "console_runs": [
+    {
+      "variant": "base",
+      "drain": false,
+      "candidate_eboot_sha256": "5a8ff195572515722738bd283253baff30bff4a01ddd72bf66b413d6209b3e70",
+      "pid": 530,
+      "visually_reviewed_scene": "MKW1.8.0 title and subsequent camera transition",
+      "approximate_title_hud_fps": "4\u20135",
+      "controlled_gameplay_fps": null,
+      "failure": "GPU-thread std::bad_alloc at394s; largest free block24MiB",
+      "initial_restoration": "Failed before mutation due backup directory name; shared warning and preservation of later peer experiment. Subsequent experiments restored their own prior executable/settings."
+    },
+    {
+      "variant": "base",
+      "drain": true,
+      "candidate_eboot_sha256": "5a8ff195572515722738bd283253baff30bff4a01ddd72bf66b413d6209b3e70",
+      "boot": "[EglantinePS5 diag] +0ms diagnostic build 01.000.000 (Nov  2 2026 10:03:58), firmware sdk_version 0x12200005, pid 535, uid 1/1",
+      "measurements": [
+        {
+          "frames": 0,
+          "seconds": 20.003781809995417,
+          "fps": 0.0,
+          "samples": [
+            {
+              "seconds": 5.000090101995738,
+              "frames": 455
+            },
+            {
+              "seconds": 10.004231607978,
+              "frames": 455
+            },
+            {
+              "seconds": 15.008449016982922,
+              "frames": 455
+            },
+            {
+              "seconds": 20.000085990992375,
+              "frames": 455
+            }
+          ]
+        }
+      ],
+      "restored": true,
+      "visually_reviewed_scene": "MKW loading map, not gameplay",
+      "conclusion": "No forward frame progress during measured interval"
+    },
+    {
+      "variant": "zen2",
+      "drain": false,
+      "candidate_eboot_sha256": "172dcc67348d1b9fd283ec863daa50b844ffc62f5ef98180090eb97c3a1e4a5f",
+      "boot": "[EglantinePS5 diag] +0ms diagnostic build 01.000.000 (Nov  2 2026 10:36:56), firmware sdk_version 0x12200005, pid 537, uid 1/1",
+      "measurements": [
+        {
+          "frames": 0,
+          "seconds": 20.00381511100568,
+          "fps": 0.0,
+          "samples": [
+            {
+              "seconds": 5.000087439984782,
+              "frames": 501
+            },
+            {
+              "seconds": 10.004495407978538,
+              "frames": 501
+            },
+            {
+              "seconds": 15.008321047003847,
+              "frames": 501
+            },
+            {
+              "seconds": 20.000088542990852,
+              "frames": 501
+            }
+          ]
+        }
+      ],
+      "restored": true,
+      "visually_reviewed_scene": "MKW loading map, not gameplay",
+      "conclusion": "No forward frame progress during measured interval"
+    },
+    {
+      "variant": "thinlto",
+      "drain": false,
+      "candidate_eboot_sha256": "676d5d4f11ce36c8924a6c3d6bcb0e29f67a9736561f97a5deca80aa6a1fdddf",
+      "boot": "[EglantinePS5 diag] +0ms diagnostic build 01.000.000 (Nov  2 2026 10:53:42), firmware sdk_version 0x12200005, pid 540, uid 1/1",
+      "manual_observation": {
+        "boot": "[EglantinePS5 diag] +0ms diagnostic build 01.000.000 (Nov  2 2026 10:53:42), firmware sdk_version 0x12200005, pid 540, uid 1/1",
+        "samples": [
+          {
+            "seconds": 0.0033976830018218607,
+            "frames": 0
+          },
+          {
+            "seconds": 5.007286064006621,
+            "frames": 0
+          },
+          {
+            "seconds": 10.011098371003754,
+            "frames": 0
+          },
+          {
+            "seconds": 15.014890940015903,
+            "frames": 0
+          },
+          {
+            "seconds": 20.01863791400683,
+            "frames": 0
+          }
+        ],
+        "scene": "Starting the game98percent; no presented game frame",
+        "action": "End trial after bounded observation, restore prior executable/settings"
+      },
+      "restored": true,
+      "termination": "Driver interrupted after bounded no-frame observation; launcher subprocess.call killed child before its finally completed. Acquired a fresh lease and restored only after candidate SHA256 guard passed."
+    }
+  ],
+  "host_mapping_scope": "Synthetic host benchmark, not a gameplay FPS multiplier",
+  "pgo": "Bundled profile rejected by LLVM18 and21 for unsupported instrumentation format; no PS5 training performed",
+  "private_evidence": "Logs, screenshots, game-derived carriers and decompilation retained locally; excluded from public source"
+}

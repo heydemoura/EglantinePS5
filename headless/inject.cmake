@@ -1,6 +1,13 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Add our frontend after the pinned project's real core targets exist.
 set(EDEN_PORT_DIR "${CMAKE_CURRENT_LIST_DIR}")
+set(EDEN_PGO_PROFILE "" CACHE FILEPATH "Optional matching LLVM instrumentation profile")
+if(EDEN_PGO_PROFILE)
+    if(NOT EXISTS "${EDEN_PGO_PROFILE}")
+        message(FATAL_ERROR "PGO profile is missing: ${EDEN_PGO_PROFILE}")
+    endif()
+    add_compile_options("-fprofile-use=${EDEN_PGO_PROFILE}")
+endif()
 function(add_eden_headless)
     include("${EDEN_PORT_DIR}/CMakeLists.txt")
 endfunction()

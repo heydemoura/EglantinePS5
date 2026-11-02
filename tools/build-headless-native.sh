@@ -10,8 +10,19 @@ if [[ ${1:-} == --graphics ]]; then graphics=ON; fi
 if [[ ${1:-} == --gpu-probe ]]; then graphics=ON; probe=ON; fi
 jobs=${EDEN_BUILD_JOBS:-$(nproc)}
 [[ "$jobs" =~ ^[1-9][0-9]*$ ]] || { echo "Invalid EDEN_BUILD_JOBS: $jobs" >&2; exit 1; }
+build_preset=${EDEN_BUILD_PRESET:-custom}
+[[ "$build_preset" =~ ^(custom|generic|v3|zen2)$ ]] || { echo "Invalid PS5 build preset: $build_preset" >&2; exit 1; }
+native_lto=${EDEN_NATIVE_LTO:-OFF}
+[[ "$native_lto" =~ ^(ON|OFF)$ ]] || { echo "Invalid EDEN_NATIVE_LTO: $native_lto" >&2; exit 1; }
+pgo_profile=${EDEN_PGO_PROFILE:-}
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 command -v ninja >/dev/null
+if [[ -n "$pgo_profile" ]]; then
+    [[ -f "$pgo_profile" ]] || { echo "PGO profile is missing: $pgo_profile" >&2; exit 1; }
+    # The port uses Clang 18. Reject incompatible profiles before configuring.
+    llvm-profdata-18 show "$pgo_profile" >/dev/null
+    pgo_profile=$(realpath "$pgo_profile")
+fi
 cache=$(command -v ccache)
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
@@ -41,13 +52,15 @@ ffmpeg="$scratch/ffmpeg-native/install"
 test -f "$ffmpeg/lib/libavcodec.a" || { echo 'Run tools/build-headless-ffmpeg.sh first.' >&2; exit 1; }
 cmake -S "$scratch/source" -B "$scratch/native-local" -G Ninja \
     -DCMAKE_TOOLCHAIN_FILE="$root/headless/ps5.cmake" -DPS5_NATIVE=ON -DEDEN_DEVICE_FRONTEND="$devices" \
-    -DCMAKE_BUILD_TYPE=Release -DENABLE_LTO=OFF \
+    -DCMAKE_BUILD_TYPE=Release -DENABLE_LTO="$native_lto" \
+    -DYUZU_BUILD_PRESET="$build_preset" -DEDEN_PGO_PROFILE="$pgo_profile" \
     -DEDEN_PS5_VULKAN="${EDEN_PS5_VULKAN:-OFF}" \
     -DEDEN_VULKAN_DRIVER="${EDEN_VULKAN_DRIVER:-CUSTOM}" \
     -DEDEN_DEV_VULKAN="${EDEN_DEV_VULKAN:-OFF}" \
     -DCMAKE_C_COMPILER_LAUNCHER="$cache" -DCMAKE_CXX_COMPILER_LAUNCHER="$cache" \
     -DEDEN_DEV_ROM_ID="${EDEN_DEV_ROM_ID:-}" \
     -DEDEN_DEV_PROFILE="${EDEN_DEV_PROFILE:-OFF}" \
+    -DEDEN_MKW_DIAGNOSTICS="${EDEN_MKW_DIAGNOSTICS:-OFF}" \
     -DEDEN_DEV_PROFILE_TITLE="${EDEN_DEV_PROFILE_TITLE:-$(cat "$root/.local/dev-profile-title" 2>/dev/null || true)}" \
     -DEDEN_DEV_WAIT_CALLERS="${EDEN_DEV_WAIT_CALLERS:-OFF}" \
     -DCMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH=ON \
@@ -101,6 +114,9 @@ fi
 if [[ "$graphics" == ON ]]; then
     python3 -B "$root/tools/check-native-gpu-thread.py"
     python3 -B "$root/tools/check-gpu-producer-stop.py"
+    if [[ "${EDEN_PS5_VULKAN:-OFF}" == ON ]]; then
+        python3 -B "$root/tools/check-staging-pressure.py"
+    fi
     python3 -B "$root/tools/check-gpu-sync-stop.py"
     python3 -B "$root/tools/check-nvdrv-process-lifetime.py"
     python3 -B "$root/tools/check-integer-buffer-clear.py"

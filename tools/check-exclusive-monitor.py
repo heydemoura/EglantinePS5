@@ -64,8 +64,14 @@ with tempfile.TemporaryDirectory(prefix='eden-monitor-') as tmp:
 native = cache / 'native-local/bin/eden-headless'
 symbols = subprocess.check_output(['llvm-nm-18', '--defined-only', str(native)], text=True)
 outlined = '_ZN8Dynarmic8SpinLock4LockEv' in symbols
-names = ('_ZN8Dynarmic8SpinLock4LockEv,_ZN8Dynarmic8SpinLock6UnlockEv' if outlined
-         else '_ZN8Dynarmic16ExclusiveMonitor14ClearProcessorEm')
+if outlined:
+    names = '_ZN8Dynarmic8SpinLock4LockEv,_ZN8Dynarmic8SpinLock6UnlockEv'
+elif '_ZN8Dynarmic16ExclusiveMonitor14ClearProcessorEm' in symbols:
+    names = '_ZN8Dynarmic16ExclusiveMonitor14ClearProcessorEm'
+else:
+    # Whole-application ThinLTO inlines ClearProcessor into its core wrapper.
+    # Inspect that actual caller with the same lock/fence requirements below.
+    names = '_ZN4Core24DynarmicExclusiveMonitor14ClearExclusiveEm'
 assembly = subprocess.check_output(['llvm-objdump-18',
     '--disassemble-symbols=' + names,
     str(native)], text=True)

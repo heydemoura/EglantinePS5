@@ -8,11 +8,16 @@ output=$1
 shift
 libraries=()
 radv_archive=""
+thin_lto=OFF
 for argument in "$@"; do
     case "$argument" in
         */libvulkan_radeon.ps5.a) radv_archive="$argument" ;;
         # These functions are supplied by the native libc/kernel providers.
         -Xlinker|-pthread|-lpthread|-ldl|-lrt|-lm) ;;
+        # CMake IPO supplies compiler-driver flags. This recipe calls lld directly;
+        # it recognizes the bitcode objects without those driver switches.
+        -flto|-flto=thin) thin_lto=ON ;;
+        -fno-fat-lto-objects) ;;
         # Native titles load libkernel, not the web-process provider. Preserve
         # Eden's qualified sysconf/pthread imports when consuming the GL SDK.
         -lkernel_web) libraries+=("$sdk/target/lib/libkernel.so") ;;
@@ -22,6 +27,12 @@ for argument in "$@"; do
 done
 radv_link_flags=()
 radv_link_inputs=()
+lto_flags=()
+if [[ $thin_lto == ON ]]; then
+    thin_jobs=${EDEN_THINLTO_JOBS:-4}
+    [[ "$thin_jobs" =~ ^[1-9][0-9]*$ ]] || { echo "Invalid EDEN_THINLTO_JOBS: $thin_jobs" >&2; exit 1; }
+    lto_flags+=("--thinlto-jobs=$thin_jobs")
+fi
 tls_flags=(--defsym=__cxa_thread_atexit_impl=0)
 if [[ -n $radv_archive ]]; then
     source "$root/tools/radv-link-eden.sh"
@@ -40,7 +51,7 @@ fi
 # The SDK's dlfcn wrappers explicitly return unavailable when these optional
 # weak hooks are null. This static frontend supplies no dynamic-loader hooks.
 "$template/.deps/native/ps5-payload-sdk/bin/prospero-lld" \
-    "${tls_flags[@]}" "${radv_link_flags[@]}" -L "$sdk/target/lib" \
+    "${tls_flags[@]}" "${radv_link_flags[@]}" "${lto_flags[@]}" -L "$sdk/target/lib" \
     --defsym=__dlopen=0 --defsym=__dlsym=0 --defsym=__dladdr=0 \
     --defsym=__dlclose=0 --defsym=__dlerror=0 \
     -T "$template/tooling/native/ps5-pie.ld" -T "$root/tools/unwind.ld" \

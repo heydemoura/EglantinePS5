@@ -15,6 +15,11 @@ builds on the following projects, each under its own license.
 - **[Zortos Eglantine fork](https://github.com/zortos293/Eglantine)**,
   GPL-3.0-or-later. Referenced directly by the `Eglantine` submodule, including its
   core, native shader, readback, service, runtime and test changes.
+- **[Selevet Eglantine fork](https://github.com/sylvieistaken/selevet-eglantine)**,
+  GPL-3.0-or-later. The optional Mario Kart World experiment pins commit
+  `e902aca643b4abfb8217c5df5bf5b7e822962ef9`; its source and retained Zortos/PS5
+  adaptations are recorded in the experimental patch described in
+  `docs/SELEVET-MKW-EXPERIMENT.md`.
 - **[Catch2](https://github.com/catchorg/Catch2)**, BSL-1.0. Used by the focused
   host regression check at the version and source hash pinned by the core.
 - **[FFmpeg](https://ffmpeg.org)**, LGPL-2.1-or-later. Built from Eden's pinned
