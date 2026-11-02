@@ -53,6 +53,7 @@
 #endif
 #ifdef PS5_NATIVE
 #include "native_directory.h"
+#include "extracted_game.h"
 #include "cache_budget.h"
 #include "performance.h"
 #include "stall_watchdog.h"
@@ -421,7 +422,8 @@ int main(int argc, char** argv) {
         std::string forwarded_game;
         bool forwarded_session = false;
         if (!forwarded.rom.empty() && last_crash.report.empty()) {
-            const std::string path = Eden::ResolveForwardedRom(forwarded.rom, Eden::AssetsPath("roms"));
+            std::string path = Eden::ResolveForwardedRom(forwarded.rom, Eden::AssetsPath("roms"));
+            if (const auto main = Eden::ExtractedGameMain(path); !main.empty()) path = main;
             if (!path.empty() && Eden::FileExists(path)) forwarded_game = path;
             else launch_error = "Forwarded game not found: " + (path.empty() ? forwarded.rom : path);
             Eden::BootTrace::Line("forwarded game: %s", forwarded_game.empty() ? "not found" : "found");
@@ -450,7 +452,10 @@ int main(int argc, char** argv) {
                 if (entry.starts_with("rom=") && entry.size() == 20) development_id = entry.substr(4);
                 // dev-settings launcher=first opens the launcher instead of the development title
                 // (launcher work: its captures and file-driven input need a development build).
-                if (entry == "launcher=first") autoboot_pending = false;
+                if (entry == "launcher=first") {
+                    autoboot_pending = false;
+                    forwarded_game.clear();
+                }
             }
             // After a crash the launcher opens with its notice, not the development title again.
             if (!last_crash.report.empty()) autoboot_pending = false;
