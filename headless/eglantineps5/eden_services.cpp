@@ -14,6 +14,7 @@
 #include "update_notice.h"
 #include "game_name.h"
 #include "native_directory.h"
+#include "extracted_game.h"
 #include "pe/core/strings.hpp"
 #include "radio_input.h"
 #include "remote/backends.h"
@@ -246,8 +247,8 @@ static bool IsFolderGame(const std::string& file) { return file.size() > 4 && fi
 static std::string RomPath(const std::string& file) {
     if (std::string shelf; ShelfPath(file, shelf)) return shelf;
     if (IsFolderGame(file)) {
-        const std::string local = Eden::AssetsPath("roms/" + file.substr(0, file.size() - 4) + "/exefs/main");
-        if (Eden::FileExists(local)) return local;
+        const std::string local = Eden::ExtractedGameMain(Eden::AssetsPath("roms/" + file.substr(0, file.size() - 4)));
+        if (!local.empty()) return local;
         char shared[NFS_PATH_MAX];
         if (nfs_alias_target(file.c_str(), shared, sizeof(shared))) return shared;
     }
@@ -308,7 +309,8 @@ int CountInstalledGames() {
     int count = 0;
     for (const auto& entry : entries) {
         const std::string filename = entry.path().filename().string();
-        if (Eden::ValidRomFilename(filename) && IsFile(RomPath(filename))) ++count;
+        if ((Eden::ValidRomFilename(filename) && IsFile(RomPath(filename))) ||
+            !Eden::ExtractedGameMain(entry.path().string()).empty()) ++count;
     }
     return count;
 }
@@ -593,6 +595,8 @@ bool EdenServices::prepare_game(const std::string& file, const std::atomic<bool>
         if (slash == std::string::npos) return true;
         root.resize(slash);
     }
+    if (std::filesystem::path(root).filename() == "base")
+        root = std::filesystem::path(root).parent_path().string();
     // A game that brings its index (made on the PC) needs no reading at all.
     if (const int indexed = nfs_load_index(root.c_str()); indexed >= 0) {
         files = static_cast<unsigned>(indexed);
@@ -952,13 +956,12 @@ static std::vector<std::string> NfsGames(const std::set<std::string>& local) {
                 const std::string& name = entry.name;
                 const std::string path = folders[f] + "/" + name;
                 if (entry.is_dir) {
-                    struct stat info {};
                     const std::string folder_game = name + ".dir";
-                    if (stat((path + "/exefs/main").c_str(), &info) == 0 && S_ISREG(info.st_mode)) {
+                    if (const auto main = Eden::ExtractedGameMain(path); !main.empty()) {
                         if (!local.contains(folder_game) &&
                             std::find(names.begin(), names.end(), folder_game) == names.end()) {
                             names.push_back(folder_game);
-                            nfs_alias_add(folder_game.c_str(), (path + "/exefs/main").c_str());
+                            nfs_alias_add(folder_game.c_str(), main.c_str());
                         }
                     } else if (f == 0 && folders.size() < 64) {
                         folders.push_back(path);
@@ -1010,9 +1013,8 @@ static std::vector<std::string> UsbGames(const std::set<std::string>& taken, std
                 struct stat info {};
                 if (stat(path.c_str(), &info) != 0) continue;
                 if (S_ISDIR(info.st_mode)) {
-                    struct stat main_info {};
-                    if (stat((path + "/exefs/main").c_str(), &main_info) == 0 && S_ISREG(main_info.st_mode))
-                        add(name + ".dir", path + "/exefs/main", label);
+                    if (const auto main = Eden::ExtractedGameMain(path); !main.empty())
+                        add(name + ".dir", main, label);
                     else if (f == 0 && folders.size() < 64)
                         folders.push_back(path);
                 } else if (S_ISREG(info.st_mode) && Eden::ValidRomFilename(name) && !IsFolderGame(name)) {
@@ -1053,7 +1055,7 @@ std::vector<pe::ui::Game> EdenServices::games() {
     for (const auto& entry : entries) {
         const std::string name = entry.path().filename().string();
         std::error_code folder_error;
-        if (entry.is_directory(folder_error) && Eden::FileExists(Eden::AssetsPath("roms/" + name + "/exefs/main")))
+        if (entry.is_directory(folder_error) && !Eden::ExtractedGameMain(entry.path().string()).empty())
             files.push_back(name + ".dir");
         else
             files.push_back(name);

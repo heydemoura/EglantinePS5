@@ -111,6 +111,8 @@ Only these subfolders matter; the folder itself can have any name and location.
 └── .remote-downloads/                  # downloads that are not finished yet (see Download sources)
 ```
 
+Extracted games can also be copied as `roms/<game>/exefs/main` with `romfs/` beside `exefs/`, or as `roms/<game>/base/exefs/main` with updates in `roms/<game>/updates/<decimal version>/`. Each game appears once in the Library. For the versioned layout, newer update files override older ones in both `exefs/` and `romfs/`; files missing from updates are read from the base. Keep the extracted folders together when copying the game. Use binary mode for FTP transfers to preserve executable and asset bytes.
+
 The folder browser shows how many keys, firmware files, and games each folder holds, so you can check a folder before selecting it. Moving your files later only needs a new selection in Settings; saved settings, covers, and recently played games carry over.
 
 ### App data
