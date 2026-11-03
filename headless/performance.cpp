@@ -1,5 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "performance.h"
+#include "dev_vulkan.h"
+#include "direct_pool_probe.h"
+#include "device_allocation_probe.h"
+#ifdef EDEN_MKW_DIAGNOSTICS
+#include "video_core/nx2_loading_probe.h"
+namespace Tegra::GpfifoCapture {
+bool Enabled() noexcept;
+void Flush(const char* reason) noexcept;
+}
+#endif
 #include "crash_report.h"
 #include "stall_watchdog.h"
 #include "../src/fastmem.h"
@@ -39,6 +49,10 @@ void GuestMemoryUsage(std::size_t* span, std::size_t* held) noexcept;
 // Address space Eden's sparse tables span and the memory they hold (src/memory_pages.cpp).
 void SparseUsage(std::size_t* reserved, std::size_t* committed) noexcept;
 } // namespace Common
+
+#ifdef PS5_NATIVE
+#include "mkw_native_sample.inc"
+#endif
 
 namespace Eden::Performance {
 namespace {
@@ -245,9 +259,9 @@ struct CpuSample {
     unsigned svc = ~0u, fpcr = 0;
     unsigned long long compilations = 0, compile_ns = 0;
 };
-std::array<CpuSample, 4> cpu_samples;
+std::array<CpuSample, 6> cpu_samples;
 // Read/written only by the worker owning this core; samples use workers_mutex.
-std::array<unsigned, 4> sampled_epoch{~0u, ~0u, ~0u, ~0u};
+std::array<unsigned, 6> sampled_epoch{~0u, ~0u, ~0u, ~0u, ~0u, ~0u};
 clockid_t process_clock{};
 int CurrentCpuClock(clockid_t* clock, bool process = false) {
 #ifdef PS5_NATIVE
@@ -351,7 +365,8 @@ extern "C" std::int64_t sceKernelGetDirectMemorySize();
 extern "C" std::int32_t sceKernelAvailableDirectMemorySize(std::int64_t, std::int64_t, std::size_t, std::int64_t*,
                                                            std::size_t*);
 // The allocated region at or after an offset (flag 1: find the next one).
-struct DirectMemoryRegion { std::int64_t start; std::int64_t end; std::int32_t type; };
+using DirectMemoryRegion = Eden::DirectPoolProbe::Region;
+static_assert(sizeof(DirectMemoryRegion) == 24);
 extern "C" std::int32_t sceKernelDirectMemoryQuery(std::int64_t, int, DirectMemoryRegion*, std::size_t);
 #endif
 
@@ -447,6 +462,101 @@ std::size_t TrimHeap(const char* why) {
         ReportHeap(text);
     }
     return returned;
+}
+
+extern "C" void eden_vma_probe(unsigned) __attribute__((weak));
+void ReportMemoryPressure(unsigned seconds) {
+    std::size_t tables = 0, table_span = 0, guest = 0, guest_span = 0;
+    ::Common::SparseUsage(&table_span, &tables);
+    ::Common::GuestMemoryUsage(&guest_span, &guest);
+    unsigned blocks = 0;
+    const auto large = eden_heap_large_held ? eden_heap_large_held(&blocks) : 0;
+    std::printf("MKW_MEMORY seconds=%u tables=%zu table_span=%zu guest=%zu guest_span=%zu heap=%zu large=%zu large_blocks=%u",
+        seconds, tables, table_span, guest, guest_span,
+        eden_heap_committed ? eden_heap_committed() : std::size_t{0}, large, blocks);
+#ifdef PS5_NATIVE
+    const auto total = sceKernelGetDirectMemorySize();
+    std::int64_t start = 0;
+    std::size_t largest = 0;
+    const auto status = total > 0 ? sceKernelAvailableDirectMemorySize(0, total, 0x4000, &start, &largest) : -1;
+    std::printf(" direct_total=%lld largest_free=%zu query_status=%d", static_cast<long long>(total), largest, int(status));
+#endif
+    std::printf("\n");
+    std::fflush(stdout);
+}
+
+void ReportVma(unsigned tag) {
+#if defined(PS5_NATIVE) && defined(EDEN_MKW_DIAGNOSTICS)
+    if (eden_vma_probe) {
+        eden_vma_probe(tag);
+        std::printf("MKW_VMA_PROBE_DONE tag=%u\n", tag);
+        std::fflush(stdout);
+    }
+#else
+    (void)tag;
+#endif
+}
+
+static Eden::DeviceAllocationProbe::Recorder device_allocations;
+void ReportDirectPool(unsigned long long nonce) {
+#if defined(PS5_NATIVE) && defined(EDEN_MKW_DIAGNOSTICS)
+    const auto began = NowNs();
+    const auto total = sceKernelGetDirectMemorySize();
+    std::int64_t before_start = 0, after_start = 0;
+    std::size_t before_largest = 0, after_largest = 0;
+    const auto before_status = sceKernelAvailableDirectMemorySize(0, total, 0x4000, &before_start, &before_largest);
+    const auto scan = [&] {
+        const auto start = NowNs();
+        return Eden::DirectPoolProbe::Scan(total, 8192,
+            [](std::int64_t cursor, DirectMemoryRegion& region) {
+                return int(sceKernelDirectMemoryQuery(cursor, 1, &region, sizeof(region)));
+            },
+            [](std::int64_t cursor, std::int64_t end, int& status) {
+                std::int64_t start = 0;
+                std::size_t size = 0;
+                status = sceKernelAvailableDirectMemorySize(cursor, end, 0x4000, &start, &size);
+                return status == 0 && start == cursor && size == static_cast<std::size_t>(end - cursor);
+            },
+            [&] { return NowNs() - start < 50'000'000; });
+    };
+    const auto a = scan(), b = scan();
+    const auto after_status = sceKernelAvailableDirectMemorySize(0, total, 0x4000, &after_start, &after_largest);
+    const bool stable = Eden::DirectPoolProbe::Stable(a, b) && before_status == 0 && after_status == 0 &&
+        before_start == after_start && before_largest == after_largest;
+    const auto free = b.Free(total > 0 ? static_cast<std::uint64_t>(total) : 0);
+    const bool consistent = stable && free && *free >= after_largest;
+    std::size_t reserve_held = 0, reserve_target = 0;
+    if (eden_guest_memory_reserve) eden_guest_memory_reserve(&reserve_held, &reserve_target);
+    std::printf("MKW_DIRECT_POOL nonce=%llu total=%lld free_estimate=%lld largest_before=%zu largest_after=%zu occupied=%llu regions1=%zu regions2=%zu complete1=%d complete2=%d stable=%d consistent=%d limited1=%d limited2=%d invalid1=%d invalid2=%d gap1=%d gap2=%d verified_free1=%llu verified_free2=%llu query1=%d query2=%d tail1=%d tail2=%d available_before=%d available_after=%d reserve_held=%zu reserve_target=%zu sampled_cache_free=%llu short=%d elapsed_ns=%lld\n",
+        nonce, static_cast<long long>(total), consistent ? static_cast<long long>(*free) : -1LL,
+        before_largest, after_largest, static_cast<unsigned long long>(b.occupied), a.regions, b.regions,
+        int(a.complete), int(b.complete), int(stable), int(consistent), int(a.limited), int(b.limited),
+        int(a.invalid), int(b.invalid), int(a.unverified_gap), int(b.unverified_gap),
+        static_cast<unsigned long long>(a.verified_free), static_cast<unsigned long long>(b.verified_free),
+        a.query_status, b.query_status, a.tail_status, b.tail_status,
+        int(before_status), int(after_status), reserve_held, reserve_target,
+        largest_free_block.load(std::memory_order_relaxed), int(graphics_memory_short.load()),
+        static_cast<long long>(NowNs() - began));
+    for (unsigned type = 0; type < 32; ++type) {
+        const auto v = device_allocations.Read(type);
+        if (!v.allocations && !v.frees && !v.anomalies) continue;
+        std::printf("MKW_VMA_BLOCKS nonce=%llu type=%u allocations=%llu frees=%llu allocated=%llu freed=%llu live=%llu peak=%llu max=%llu max_since_probe=%llu anomalies=%llu buckets16_64_128_256_512_1024_over=%llu,%llu,%llu,%llu,%llu,%llu,%llu\n",
+            nonce, type, static_cast<unsigned long long>(v.allocations), static_cast<unsigned long long>(v.frees),
+            static_cast<unsigned long long>(v.allocated_bytes), static_cast<unsigned long long>(v.freed_bytes),
+            static_cast<unsigned long long>(v.live_bytes), static_cast<unsigned long long>(v.peak_bytes),
+            static_cast<unsigned long long>(v.max_allocation), static_cast<unsigned long long>(v.max_since_probe),
+            static_cast<unsigned long long>(v.anomalies),
+            static_cast<unsigned long long>(v.buckets[0]), static_cast<unsigned long long>(v.buckets[1]),
+            static_cast<unsigned long long>(v.buckets[2]), static_cast<unsigned long long>(v.buckets[3]),
+            static_cast<unsigned long long>(v.buckets[4]), static_cast<unsigned long long>(v.buckets[5]),
+            static_cast<unsigned long long>(v.buckets[6]));
+    }
+    std::printf("MKW_DIRECT_POOL_DONE nonce=%llu invalid_vma_type=%llu\n", nonce,
+        static_cast<unsigned long long>(device_allocations.InvalidType()));
+    std::fflush(stdout);
+#else
+    (void)nonce;
+#endif
 }
 
 void ReportGpuThread(unsigned frame) {
@@ -693,6 +803,9 @@ void ReportGpuThread(unsigned frame) {
 }
 
 void RegisterWorker(const char* name) {
+#ifdef PS5_NATIVE
+    MkwNativeSample::Register(name);
+#endif
     Eden::Crash::NameThread(name);  // a crash report names the thread
 #if defined(EDEN_DEV_PROFILE) && defined(PS5_NATIVE)
     Eden::Stall::NoteThread(name);
@@ -1164,3 +1277,44 @@ extern "C" void eden_jit_compile(unsigned core, unsigned long long ns) {
     Eden::Performance::compilation[core].calls.fetch_add(1, std::memory_order_relaxed);
     Eden::Performance::compilation[core].nanoseconds.fetch_add(ns, std::memory_order_relaxed);
 }
+
+// Set once before renderer creation; normal builds keep the original cache policy.
+extern "C" unsigned eden_pipeline_preload_mode() {
+#ifdef EDEN_MKW_DIAGNOSTICS
+    return Eden::DevVulkan::pipeline_preload_mode;
+#else
+    return 0;
+#endif
+}
+
+extern "C" void eden_vma_device_memory_event(unsigned type, unsigned long long bytes, int allocated) {
+    Eden::Performance::device_allocations.Event(type, bytes, allocated != 0);
+}
+
+extern "C" void eden_vma_buffer_failure(unsigned long long bytes, unsigned usage, int result) {
+#if defined(PS5_NATIVE) && defined(EDEN_MKW_DIAGNOSTICS)
+    const auto total = Eden::Performance::sceKernelGetDirectMemorySize();
+    std::int64_t start{};
+    std::size_t largest{};
+    const auto status = total > 0 ? Eden::Performance::sceKernelAvailableDirectMemorySize(
+        0, total, 0x4000, &start, &largest) : -1;
+    // Query the direct pool without traversing allocator/cache state or waiting
+    // on the GPU. The status distinguishes unknown from a real zero.
+    std::fprintf(stderr, "MKW_BUFFER_FAILURE bytes=%llu usage=%u result=%d direct_total=%lld largest_free=%zu query_status=%d\n",
+                 bytes, usage, result, static_cast<long long>(total), largest, int(status));
+#else
+    (void)bytes; (void)usage; (void)result;
+#endif
+}
+
+extern "C" void eden_staging_failure(unsigned long long bytes, unsigned usage, unsigned deferred,
+                                       int result, const void* caller, unsigned texture_upload) {
+#if defined(PS5_NATIVE) && defined(EDEN_MKW_DIAGNOSTICS)
+    std::fprintf(stderr, "MKW_STAGING_SOURCE bytes=%llu usage=%u deferred=%u result=%d caller=%p texture_upload=%u\n",
+                 bytes, usage, deferred, result, caller, texture_upload);
+#else
+    (void)bytes; (void)usage; (void)deferred; (void)result; (void)caller; (void)texture_upload;
+#endif
+}
+
+#include "ordered_read_trace.inc"

@@ -1,0 +1,1569 @@
+Mario Kart World PS5 performance review — 2026-11-03
+
+Scope
+This draft preserves the accumulated investigation, including experimental
+instrumentation, as requested. The core remains Zortos 3140648a668aaebf87bae2dea17512fdca125ba0.
+Maintained patch 0004 is incremental over the existing three patches; patch
+0005 bounds shader-module retention after pipeline compilation, 0006 adds the
+opt-in command-fetch frontier experiment, and 0007 records oversized-index
+provenance on failure. Patch 0008 extends the experimental frontier to compute
+store-only writes; patch 0009 adds a separate opt-in idle-spin experiment.
+Patch 0010 protects CPU writes from pending fence copies. Patch 0011 adds an
+opt-in submission-completion texture retirement experiment; eleven maintained
+patches reproduce 147 core files. The
+review branch is based on main 3c32faa and preserves its extracted-content
+and Pokopia fixes. No core fork switch or driver binary is included.
+
+Latest build status: the eleven-patch retirement experiment passes full normal
+and diagnostic native checks/build/link/package, with 179 core cases / 2,239,932
+assertions each. Its diagnostic console pair is queued; no new FPS result is
+available. The preceding ten-patch diagnostic rendered the title/main menu,
+then failed on a 31,195,136-byte device-local buffer allocation before Free Roam.
+The earlier eight-patch attempt failed during first presentation. These failures
+remain unresolved; the latest normal artifact is untested on console.
+
+Earlier build sequence: the six-patch normal and MKW diagnostic configurations
+passed all required native checks/build/link/package without
+EDEN_SKIP_SOURCE_CHECKS; the seven-patch normal-input provenance configuration
+also passed that full chain. Each passed 179 core cases / 2,239,932 assertions.
+The seven-patch diagnostic configuration was not rebuilt separately; both
+subsequent eight-patch configurations passed the full chain as recorded below.
+The earlier release CPU instrumentation failure recorded below is resolved. Recent
+diagnostic attempts found staging failures both during Crown City travel and before opening the
+world map. A module-budget test reached the map but hit a private navigation
+runner bug; its corrected retry failed on a malformed index-buffer request.
+A seven-patch normal-input candidate reached reviewed Free Roam and completed
+a short 13.22 FPS stationary run; the release configuration without development
+input controls remains untested. An early-command-snapshot diagnostic reached Free Roam with short movement verified, at about 14.6 FPS.
+Sustained Free Roam memory stability and the 40 FPS goal remain unproven. The
+final follow-up below records these failures, scope and exact artifacts.
+
+The accumulated changes cover task/mesh shader handling, GPU mapping and
+readback tracking, bounded texture uploads and ASTC decoding, staging
+reclamation, targeted command completion, guest-memory/fiber/JIT budgets,
+per-frame ordered-read telemetry, and faster native directory enumeration.
+The latter scans metadata to construct the virtual RomFS; game contents are
+still read on demand. Known files need one stat; known directories need none.
+NFS/NTFS entries use followed stat outside the listing callback because the
+shared interface may report zero file sizes and hold its own mutex.
+
+Measured loading results
+One bounded console run per candidate, using identical profiling schedules:
+                         loader(s)  guest startup(s) first-frame total(s)
+42 baseline                44.794       72.804             117.598
+43 range-local mapping     44.801       34.745              79.546
+45 mapping + metadata      32.732       33.583              66.315
+Times are monotonic EDEN_STAGE durations from session start. First frame is
+not title-ready time. Different randomized attract scenes prevent a matched
+gameplay FPS comparison. Profiling itself adds overhead. Viewed captures
+showed rendered title terrain/kart/background; title performance remained
+around 13 FPS. Neither sustained 40 FPS nor 60 FPS has been achieved.
+
+Early loading profiles were dominated by stat/lstat. Later profiles showed
+full GPU mapping-table rebuild/sort work; range-local updates reduced that
+work. The first FPS collapse preceded severe heap pressure. Texture/render
+allocations and temporary ASTC decode images add pressure later, but the
+measurements do not establish memory exhaustion as the sole loading cause.
+The diagnostic driver's roughly 6 GiB sparse reservation aliases a single
+2 MiB zero block; that reservation is not 6 GiB of eager physical allocation.
+
+Direct mapped readback experiment (candidate 41)
+Non-sparse allocations <=512 KiB, bounded 16 MiB live pool, persistent host
+mapping and producer-range certificates. Only already-completed producers
+qualify. GPU submission includes a HOST_READ visibility barrier; unfinished
+or unknown writers fall back. Guest RAM is not imported. Asynchronous
+snapshots retain staging. Mapping removes copies, not ordering requirements.
+
+Console validation compared 21,242,192 bytes against staging with zero
+mismatches. Five stationary Free Roam phases at Whistlestop Summit included
+validation, baseline, direct, baseline, direct; 15 frames per phase. NPC
+motion remained variable. Pooled baseline/direct windows, 30 frames each:
+  FPS:                         13.1602 / 13.2011
+  Ordered reads/frame:        230.633 / 231.8
+  Completion CPU ms/frame:    43.8233 / 42.8957
+  Queue delay ms/frame:       41.6296 / 40.6801
+  Service ms/frame:            1.16084 / 1.16741
+  GPU wait API ms/frame:       0.31765 / 0.32171
+Direct mode removed exactly 20,224 GPU staging bytes/frame in both windows.
+Buffer copies within ordered CPU-read callbacks were zero in both modes;
+these downloads occur elsewhere. Ordered-read counts did not decrease and
+no meaningful FPS gain was established. Overlapping CPU totals must not be
+interpreted as a wall-clock frame breakdown. Cache visibility is validated
+only for these tested ranges and driver, not every mapping or workload.
+
+Provenance and limitations
+Candidate 42/41 eboot SHA256:
+b2bbef620dd5cf552965ba555558d171ab1cebe916e91ade5d92796fd9294483
+Candidate 43:
+176880b2518121773bc65c78f667a473d7834ebd1899bd30e86b731f8b807263
+Candidate 45:
+131d7b674c044231afc0644005d4a05ec7dd1351f504fd9dc9a0c2849ad93dbb
+Candidate 44 was superseded before deployment after finding the NTFS size
+issue. Candidate 45 includes the corrected metadata helper.
+
+The console runs used the locally modified Mesa 26.2.0 RADV build revision
+7b59ef27, isolated archive SHA256:
+fdd18c8d492e9b7abf4324bfeacd4fb5b4134059f8c72ef7eb801b66c9c54e98
+That diagnostic archive is not included in this PR. Driver portability and
+production-driver behavior need separate validation. No new ps5-vulkan
+patch was established by the loading investigation.
+
+Raw profiles, shader/GPFIFO captures, game data and console control files
+are excluded. Local evidence identifiers are upload41-run-1793650997402206680,
+upload42-run-1793651528995439211, upload43-run-1793652079947463883 and
+upload45-run-1793652545495037157. The normal console executable/settings
+were restored and hash verified after the last experiment.
+
+Review controls
+EDEN_MKW_DIAGNOSTICS defaults OFF. Enable it explicitly at build time for
+one-shot Mario Kart launch controls and intrusive snapshots/environment
+probes. Some bounded core and CPU instrumentation remains compiled/enabled;
+this is a broad research draft, not a claim of zero production overhead.
+Published-semaphore and partial-readback experiments need further review.
+Later diagnostic builds on the current-main base were exercised on console;
+the latest timestamp build reached the title/menu, then exhausted memory
+before Free Roam. The seven-patch normal-input configuration was subsequently console-tested
+as recorded at the end of this report. The release configuration without
+development controls remains untested. Earlier experiment binaries remain
+the readback evidence.
+
+Initial host validation (historical; later results supersede this section)
+Patch reproduction at that point: four patches, 128 touched files, matching
+the working core. ASan/UBSan checks passed for mapped allocation policy,
+range tracker (240,000 oracle queries), writer tracker (10,000 allocation lifetimes), and
+native directory metadata including symlinks, malformed records and NFS.
+Heap stress (including ThreadSanitizer), targeted GPU completion and staging
+reclamation checks passed. The release hot-path check initially failed because
+that revision retained experimental timers; later changes removed those
+normal-build CPU probes and the required checks now pass, as recorded above and in the follow-ups. The host
+startup fixture now expects six progress slots and excludes the PS5 sampler
+on non-PS5 hosts. Related CPU/JIT sampling arrays were also expanded to six
+slots to fix an out-of-bounds read exposed by this fixture. See the PR description for the native build/check result.
+
+AI assistance
+Implementation, analysis, review preparation and this report were assisted
+by OpenAI Codex. Human review is required before merging this research draft.
+
+Follow-up: separate frontend and backend queue delay
+Reanalyzed all five complete candidate-41 captures (75 frames, 17,238 reads)
+without modifying the original evidence. Total queue delay partitions into
+3,064.440 ms before frontend pop and 30.657 ms between pop and backend start.
+Total read-call time across threads was 3,396.993 ms. The analyzer now exports
+both partitions per read, per frame and per read type, and checks their sum
+against the existing queue duration whenever all timestamps are present.
+These are overlapping thread durations, not a frame-wall-time decomposition.
+
+The main semaphore site (guest PC 0x856894d0 at observational guest address
+0x2106235000) accounts for 74–85% of each window's call time; another PC at
+the same address adds time in two windows. Most observations changed value.
+The longest read took 40.186 ms, including 40.160 ms before pop, about 1.8 us
+between pop and service, and 8.9 us in service. A clean cache at service does
+not prove that these reads could safely bypass earlier commands.
+
+An older candidate-38 Free Roam profile contains Vulkan command handoff,
+macro processing and fence-drain waits ahead of reads. It is not synchronous
+with candidate-41 events, so it does not attribute each long read to a specific
+command. Next runtime evidence should correlate preceding-command execution
+with each long read, including forced fence drains and command handoffs.
+No frame-rate gain is claimed from this analyzer change. Read-only console
+status was idle during this follow-up; no deployment or restart was performed.
+
+Follow-up: memory accounting and allocation lifetime
+Five-second diagnostic reports distinguish committed guest pages, sparse
+tables, heap arenas, large allocations and the largest free physical block.
+In run 1793655818645405571, sparse tables remained around 228-230 MiB while
+guest backing grew from 3977 to 4473 MiB and heap arenas from 1472 to 1632 MiB
+(plus 396 MiB of large allocations). Tables were not the dominant growth.
+This does not justify reclaiming live sparse slots without lifetime proof.
+
+Bounded VMA detailed maps and tools/analyze-vma-map.py separate dedicated
+allocations, wholly empty blocks and unused space within live blocks. In run
+1793656450297553771 at 150 s, pooled backing was 2056 MiB plus 1722.91 MiB
+dedicated, with no wholly empty pooled blocks and 573.47 MiB unused inside
+live blocks. Tiny allocations pinned many 64 MiB blocks. The run exhausted
+device memory at 224 s; clearing only empty blocks cannot solve this case.
+
+An opt-in ASTC temporary-image allocator uses 16 MiB custom-pool blocks,
+bounded to 32 blocks per memory type, with ordinary allocation fallback.
+It preserves existing GPU completion/lifetime rules and does not relocate
+live images. EDEN_PS5_TRANSIENT_POOLS enables it; diagnostic builds enable
+it explicitly. Allocation/binding failures clean partial resources.
+Run 1793657655811844512 reached viewed Free Roam and completed its bounded
+observation. At 90 s its pooled backing was 1816 MiB versus 2064 MiB in the
+earlier run, but scenes differed: this is not a controlled 248 MiB saving.
+Later unused space inside live default-pool blocks returned to 839.95 MiB.
+The final approximately 30 seconds averaged 15.453 FPS. Ten complete traced
+frames had 225 ordered reads/frame and 319.411 ms summed frontend queue delay
+across threads. No matched FPS gain or sustained stability is established.
+
+Adding allocator fields exposed a build-cache hazard: direct-mode ccache
+could reuse consumers compiled with the original header while other objects
+used the generated override. Native builds now disable direct-mode lookup,
+declare explicit generated-header dependencies, and verify factory, renderer,
+allocator and texture-cache object dependencies before packaging.
+
+Follow-up: worker notification A/B and semaphore clock
+The scheduler now has distinct work and drain condition variables. Selective
+notification is experimental and defaults off. The alternative uses notify_one
+for work and avoids unnecessary drain broadcasts; completion order is retained.
+Both comparison modes use the split condition variables, so the baseline is
+not the original upstream shared-CV implementation.
+
+Run 1793658554054919162 used the same process, stationary forest kart/camera,
+and acknowledged mode sequence 0,1,0,1. All four 10-frame streams were complete.
+Pooled baseline/selective results (20 frames each):
+  FPS:                         12.3113 / 12.0735
+  Ordered reads/frame:        213.7 / 207.85
+  Read-call CPU ms/frame:      52.5568 / 51.8739
+  Frontend queue ms/frame:     48.4376 / 47.8636
+  Backend queue ms/frame:       0.38163 / 0.37118
+  GPU wait API ms/frame:        0.32541 / 0.31606
+  GPU and CPU copy B/frame:    999140 / 973491.2
+CPU durations overlap across threads. Animated scene traffic and short windows
+can account for count/copy variation. No meaningful wait/FPS benefit was shown;
+selective notification stays disabled. Profiles confirm the notification policy
+changed, so the negative result is retained rather than presented as a gain.
+
+Satisfied Ampere semaphore acquires now avoid reading the diagnostic clock;
+unsatisfied acquires still initialize their warning timer. Comparisons,
+draining, waiter registration, fence release and the second read are unchanged.
+The real-branch ASan/UBSan fixture covers satisfied, blocked, released, latched,
+unmapped and invalid operations. No isolated console FPS benefit is claimed.
+
+Follow-up: bounded GPU timestamps
+Diagnostic builds enable a 512-slot timestamp probe with valid-bit wrap handling,
+nonblocking collection, cumulative counters and device-lifetime cleanup after
+the scheduler worker joins. Disabled builds add no device-idle wait. Fixtures
+cover readiness, wrap, ring exhaustion, invalid capabilities and relaunch.
+
+Latest native diagnostic build/package passed. Eboot SHA256:
+aeedd6b5c254b8555f7043ea6aa3d6d3b1d9d4a2684c23ed3261e8fd632580f6
+Run 1793659386298621062 reached viewed title/menu with working query results.
+Seven late windows totalled 35.059 s, 50,770 submissions and 4.0811 s of
+graphics timestamp spans (1448 submissions/s). The preceding upload command
+buffer, gaps and other GPU work are outside these brackets. These numbers
+are not whole-device utilization or proof that the entire game is CPU-bound;
+timestamp instrumentation itself adds overhead. Free Roam was not reached.
+At 234 s the Vulkan worker failed with VK_ERROR_OUT_OF_DEVICE_MEMORY and a
+largest free physical block of zero. Memory exhaustion remains unresolved.
+
+The diagnostic source fixtures and allocator-header checks passed; the full
+release hot-path rule still fails on retained experimental timers. Detailed
+copy-source overflow is now explicitly reported: strict analysis rejects it;
+an optional mode retains complete ordered-read/frame aggregates but omits
+incomplete source attribution. Missing copy events are never counted as zero.
+Original executable, package metadata, settings and input controls were restored
+and verified after these runs. Raw console/game captures remain excluded.
+
+Next measurements should cover upload plus graphics work and classify actual
+submission initiators alongside each frame's waits. Allocation fragmentation
+and sustained Free Roam stability remain open before any 40 FPS claim.
+
+Follow-up: upload-plus-graphics spans and submission callers
+Run 1793660399464408198 (fresh PID 640) moved the start timestamp to the upload
+command buffer, retaining the end timestamp in graphics. Both submission APIs
+place uploads first. Bounded caller counters capture recording-thread origins
+by value and count successful worker submissions; overflow is explicit. The
+matched ELF and runtime anchor resolve ASLR. Optimized tail calls can omit
+intermediate callers, so attribution is not a complete stack.
+
+Viewed title, menu, Free Roam and late Free Roam showed Shy Guy Bazaar scenery,
+road, kart, minimap and moving NPC traffic. Ten complete traced frames measured
+12.1411 FPS and 280.6 ordered reads/frame, without dropped read/copy events.
+Summed read-call time was 513.596 ms, frontend queue 461.393 ms, backend queue
+5.014 ms and GPU wait API 3.378 ms across those frames. Individual calls had
+median 0.025098 ms, p95 0.044823 ms and maximum 44.146885 ms. CPU durations
+overlap across threads. One semaphore site contributed 84.19% of call time,
+one read/frame, and changed value on all ten observations. Most other reads
+were short and unchanged. Clean-at-service alone cannot justify bypassing
+the dominant dependency. Both GPU and CPU copy totals were 12,735,088 bytes.
+
+The last three complete GPU windows after entering Free Roam covered 15.0036 s:
+30,751 submissions, no caller overflow and 1.4575 s upload-plus-graphics spans.
+24,083 submissions came through FenceManager::QueueFence, 4,800 through buffer
+Finish, 1,111 through DmaPusher::DispatchCalls, 552 through texture Finish,
+184 through presentation and 21 through transcode pressure completion. This
+is about 2,050 submissions/s. Inter-submission gaps and other work remain
+outside the timestamps; query overhead prevents an uninstrumented FPS claim.
+
+The diagnostic native build/package, sanitizer fixtures and allocator-header
+checks passed. The run ended at its planned observation with no fresh crash;
+largest free physical block was still only 197 MiB near the end. This is no
+sustained stability or movement-input test. Original console files/settings
+and input controls were restored and verified. The 40 FPS goal remains open.
+Next distinguish buffer/texture/query fence requirements and the callers of
+runtime Finish before changing batching or guest completion ordering.
+
+Follow-up: fence requirements and smaller VMA blocks
+Run 1793661192786318025 adds diagnostic masks sampled before cache commits:
+texture=1, buffer=2, query=4. The real SignalFence/CommitCacheFlushes fixture
+passed all masks with immediate and delayed callbacks, empty skips, side-work
+stub fences and disabled counters. Runtime Finish attribution now preserves
+the cache wrapper's caller through Scheduler; TLS nesting/isolation passed.
+Representative 10-second windows had 5,579-8,361 buffer-only required fences,
+114-134 texture-only fences and no query-required fences. Many empty/stub
+fences remain under High GPU accuracy. Buffer downloads drive the real flushes.
+Buffer Finish calls resolve mainly to DownloadBufferMemory; texture Finish
+calls resolve mainly to TextureCache::DownloadMemory. This candidate exhausted
+device memory at 188 s, before Free Roam, with a 64 MiB largest free block.
+
+The next diagnostic candidate changes VMA's preferred large-heap block size
+from 64 to 16 MiB, retaining the separate 16 MiB decode pool. The normal port
+configuration still uses 64 MiB. Run 1793661938636368139 confirmed the active
+16 MiB setting, reached viewed snow Free Roam, and completed its observation
+without a crash. Ten complete frames measured 14.0979 FPS, 230.8 reads/frame,
+36.1441 ms frontend queue/frame and 0.3310 ms GPU wait API/frame. Copy-source
+streams were complete; GPU and CPU copies were 908,400 bytes/frame each.
+The kart/camera moved during this run, so it is not a stationary comparison.
+
+At 90 s the VMA map contained 1,492 MiB pooled backing, about 2,020 MiB
+dedicated backing and 29.32 MiB unused inside live blocks. At 150 s pooled
+backing was 1,412 MiB and unused-in-live rose to 565.09 MiB. Smaller blocks
+also change dedicated allocation selection: comparing only pooled backing
+would overstate savings. Largest free physical block was about 607 MiB at
+guest 170 s, but scenes differ from earlier runs. No controlled memory/FPS
+improvement or sustained stability is established.
+
+Follow-up: asynchronous buffer copy command batching
+The buffer cache can group consecutive regions from one source into commands
+of up to 32 regions, preserving the full region order and existing staging
+destinations, barriers and completion fence. The callback copies its span
+before return; Vulkan command recording owns its region vector. The opt-in
+experiment defaults off and has a same-process diagnostic control. A real-helper
+ASan/UBSan staging oracle covered 100,000 regions, A/B/A source changes and
+capacity/empty boundaries. Patch reproduction remains four patches/130 files.
+
+Run 1793662180141845273 used mode sequence 0,1,0,1 in one process at Mario
+Circuit. All four phase screenshots showed the same stationary kart/camera;
+NPC traffic varied. Each phase had ten complete ordered-read/copy frames.
+Twenty pooled baseline/batched frames per mode measured:
+  FPS:                         11.8429 / 11.8939
+  Ordered reads/frame:        230.9 / 226.15
+  Read-call CPU ms/frame:      53.1501 / 52.8968
+  Frontend queue ms/frame:     48.7112 / 48.5194
+  Backend queue ms/frame:       0.41129 / 0.40170
+  GPU wait API ms/frame:        0.32210 / 0.32278
+  GPU and CPU copy B/frame:    754300.8 / 751912.0
+Individual read-call median/p95/max were 0.025178/0.050196/49.216929 ms
+baseline and 0.025258/0.049475/48.514425 ms batched. CPU durations overlap.
+Mode-acknowledged interval counters confirmed 93,985 regions used 15,585
+commands (83.42% fewer); baseline regions used one command each. These counter
+intervals are longer than the trace windows. Command reduction did not establish
+a meaningful FPS or ordering-wait benefit; the experiment stays disabled.
+
+Latest diagnostic native build/package and focused checks passed. This run
+remained alive through the bounded comparison, with a 246 MiB largest free
+physical block at guest 300 s. It does not prove sustained stability. All three
+runs restored and verified the actual original console files/settings/input.
+The 40 FPS goal and release instrumentation check remain unresolved.
+
+Follow-up: larger mapped buffers and producer-specific waits
+Complete traces identified three repeatedly read synchronous source buffers,
+including one of 11,468,800 bytes. The experimental allocation policy now admits
+frequently read non-sparse buffers up to 16 MiB, with a 64 MiB live mapped budget;
+writer tracking remains bounded to 256 allocations and 64 segments/allocation.
+Default driver type 0 has flags 1 and cannot legally be mapped; eligible buffers
+are promoted to coherent host-visible type 5. No guest RAM is imported.
+
+An opt-in readback path captures range tickets, waits for their maximum producer
+tick and rechecks allocation/epoch/version before copying mapped bytes. Unknown,
+sparse, external, remapped or stale writers retain staging. Future ticks and
+more than 32 copy ranges reject. It keeps the existing HOST_READ visibility
+barrier. The real-method ASan/UBSan fixture passed current/earlier/completed
+producer cases, unrelated-range writes, failed waits, remaps and stale tickets.
+Updated allocation/writer lifetime fixtures and patch reproduction also passed.
+
+Run 1793664191502658358 confirmed the 11 MiB mapped type-5 allocation. The
+explicit ten-frame validation compared 830,720 bytes with staging, with zero
+mismatches; cumulative validation during the run checked 67,193,296 bytes with
+zero failures. This is evidence for the exercised ranges and driver. Title,
+menu, validation, Free Roam and all four comparison captures were viewed.
+
+The same-process stationary Mario Circuit comparison used direct mapped reads
+throughout, with producer-wait mode 0,1,0,1 and copy batching off. All four
+ten-frame read/copy streams were complete. Twenty pooled frames per mode:
+  FPS:                         12.6001 / 12.6584
+  Ordered reads/frame:        228.15 / 220.65
+  Read-call CPU ms/frame:      48.8163 / 48.6524
+  Frontend queue ms/frame:     44.4780 / 44.4431
+  GPU wait API ms/frame:        0.33231 / 0.32080
+  GPU staging B/frame:         631237.6 / 605102.4
+  CPU copy B/frame:            692421.6 / 688174.4
+  Direct mapped B/frame:      61184 / 83072
+Individual read-call median/p95/max were 0.025017/0.046187/43.502836 ms off
+and 0.024858/0.047630/43.092447 ms on. Each mode still had twenty reads over
+5 ms: one per frame. CPU totals overlap; short windows and NPC variation limit
+the count/FPS comparison. No meaningful FPS or ordering-wait benefit was shown.
+
+All 4,060 observed producer-wait calls targeted the current submission tick;
+none targeted an earlier submitted tick. The implementation therefore still
+flushes the current command buffer. Range tracking at submission granularity
+cannot exclude later work within that same command buffer. Copy reduction is
+not an ordering reduction; producer waiting stays disabled by default.
+
+The final diagnostic native build/package passed. An earlier build stopped on
+the expected wait-site count changing from six to seven and was not packaged.
+This bounded run completed without a fresh crash, with about 484 MiB as the
+largest free physical block at guest 250 s. Sustained stability and 40 FPS
+remain unproven. Original console files/settings/input were restored and verified.
+
+PR publication verification
+The accumulated snapshot reproduces four maintained patches across 130 core
+files at upstream 3140648a668aaebf87bae2dea17512fdca125ba0. Source whitespace
+checks passed. The producer-wait, download-batching and fence-requirement
+ASan/UBSan fixtures were rerun successfully in the prospero-win toolchain.
+Direct host runs failed because clang 18 selected incompatible GCC 16 C++
+headers; those failures were not counted as fixture passes.
+
+A subsequent completed-semaphore A/B was interrupted at its initial visual
+gate to publish this snapshot. It produced no comparison result. Its original
+executable, package metadata, settings and owned input controls were restored
+and verified before its console lease ended. No source changes or performance
+claim derive from that incomplete run. The release hot-path check remains
+unresolved in this snapshot; separate worktrees' results are not included.
+
+Follow-up: completed-semaphore reads move the stall
+The ordered-read stream now includes the scalar load's semaphore eligibility
+stage, alias count and resolved device address. Registration, pointer identity,
+cache, mapping-generation and value checks remain in place. This fills a
+coverage gap: renderer counters cannot explain rejection before the renderer.
+Replaying an earlier complete stream preserved all wait/frame/copy aggregates.
+Patch reproduction, source whitespace checks and diagnostic native packaging
+passed; the full release instrumentation check remains unresolved.
+
+Run 1793666131839992176 (PID 676, firmware 12.20) deployed eboot SHA256
+e377a37159cf32e6e55cf34da7eccac2123d04222684f8c457f6139e8a00ecc6.
+Title, menu, Free Roam and all four phase images were viewed. The kart/camera
+stayed at the same city road position while NPC traffic changed. Direct mapped
+mode stayed 2; producer waits, copy batching and selective notifications were
+off. Completed-semaphore mode followed 0,1,0,1 in one process. Four ten-frame
+read/copy streams were complete. Twenty pooled frames per mode measured:
+  FPS:                         10.5981 / 10.4853
+  Ordered reads/frame:        337.8 / 394.0
+  Reads over 5 ms:             20 / 23
+  Read-call CPU ms/frame:      58.0727 / 66.7346
+  Frontend queue ms/frame:     51.6433 / 59.4790
+  Backend queue ms/frame:       0.60036 / 0.69985
+  GPU wait API ms/frame:        0.32608 / 0.31874
+  GPU staging B/frame:       625078.4 / 622347.2
+  CPU copy B/frame:          686262.4 / 683531.2
+  Direct mapped B/frame:     61184 / 61184
+Individual read median/p95/max were 0.025739/0.049073/63.344478 ms off and
+0.025338/0.046508/60.694671 ms on. CPU durations overlap across threads.
+
+The baseline had twenty long reads at the main semaphore site. With the path
+on, eleven remained there, two moved to another registered semaphore, nine
+were at unregistered words and one was an eight-byte read. At frame 2280 the
+main device word 0x36000 had 537 successful reads, 52 buffer-lock and 86
+texture-lock rejections, with no dirty/unpublished/value-change rejections.
+These counters cover longer intervals than the traces. Aliases/registration
+were not the main word's rejection cause. The path was actually exercised,
+but waits moved and their total grew; no meaningful FPS benefit is established.
+Completed-semaphore reads remain off by default.
+
+Matched three-second profiles outside each trace show 12.90%/13.53% of GPU
+thread sample weight in clock_gettime. The dominant captured chain reaches
+ReadbackDiagnostics::Scope from GuestMemory<CommandHeader>::Read, DmaPusher::Step
+and MemoryManager::FlushRegion. This is sampled thread attribution, not whole
+GPU utilization. Ten-second aggregate windows contained about 0.94 million
+texture/buffer/query readback checks apiece, mostly command-fetch cache work.
+The command-fetch path is the next optimization target; bypassing the remaining
+semaphore checks would not address the demonstrated moved waits.
+
+A newer Zortos change cce6d44af2 snapshots submitted command words; subsequent
+6612817cb4 and fae3bc64 protect GPU-written entries, first writes, resumed
+entries and continued-parameter flushes. Those source changes were inspected
+in another local upstream checkout, not applied or validated here. Any trial
+needs bounded snapshot memory and the complete producer/resume checks.
+
+This bounded run ended without a fresh crash, with a largest free physical
+block of 486 MiB near guest 230 s. It is not a sustained stability or movement
+test. Original executable, package metadata, settings and input controls were
+restored and verified before the lease ended. The 40 FPS goal remains open.
+
+Follow-up candidate: bounded submitted command words
+Profiles from the completed-semaphore trial identify DmaPusher::Step's safe
+command reads as the dominant caller of diagnostic cache-flush timing. The new
+opt-in experiment adapts Zortos submitted-word snapshots (cce6d44af2), including
+GPU-written rejection and first-producer/continued-parameter ordering from
+6612817cb4 and fae3bc64. It retains the current Zortos gitlink and other patches.
+
+Each submission owns immutable words and checked entry offsets. A shared payload
+lease caps one snapshot at 16 MiB and all live payloads/offsets at 64 MiB; at most
+65,536 entries are captured. Overflow, exhausted budget or allocation failure
+retain live reads. CommandList copies share one payload and one reservation.
+At execution, synchronization precedes the GPU-written history check; GPU writes
+remain disqualifying after their flush clears dirty state. Resumed entries,
+continued parameters downloaded from the GPU, unknown mappings and dirty safe
+reads also retain live reads. No guest RAM import or driver change is involved.
+
+MKW_COMMAND_SNAPSHOT_MODE acknowledges same-process off/on controls. Bounded
+selection counters show whether copied entries are actually executed. Complete
+frame streams now count submission-copy bytes separately from buffer readback
+bytes, so moving copies to submission cannot be mistaken for eliminating them.
+The default remains off.
+
+The actual snapshot implementation and DMA synchronization method passed
+ASan/UBSan checks for immutable contents, bounds/overflow, full budget and
+reclamation, shared/cross-thread lifetime, failed-allocation rollback, all
+selection predicates, first queued GPU writes, stale snapshots after a flush,
+and unsupported mappings. The existing core suite passed 179 cases and
+2,239,932 assertions. Old/new analyzer replay preserved existing metrics and
+verified command-copy boundary accounting. Four patches reproduce 133 files.
+Diagnostic native compilation/linking/packaging passed; full source checks were
+explicitly opted out and the retained release instrumentation check is unresolved.
+
+Candidate eboot SHA256:
+97ad5d03330644a6ae8ecc6b862eb75161af06d835c63f0ba4e03f0660522f6f
+The console comparison is queued behind other live sessions. No runtime
+correctness, cache-work reduction, memory saving or FPS benefit is established
+for this candidate yet. Its renderer/capture/profile subprocesses are bounded
+to 30 seconds, and the complete test restores owned files under one console lease.
+
+Bounded command snapshots: console result
+Run 1793668255561415996 used the candidate above (fresh PID 690). GPT-6.1 Terra
+inspected title/menu/Free Roam and all four phase images per the user's screenshot
+policy: the same stationary kart/camera and canyon landmarks remained visible,
+with plausible geometry, textures, lighting and minimap; NPC traffic moved.
+Direct mapped reads stayed 2; semaphore reads, producer waiting, copy batching
+and selective notifications were off. Snapshot modes were 0,1,0,1. All four
+ten-frame read/copy streams were complete. Twenty pooled frames per mode:
+  FPS:                         14.0791 / 14.2059
+  Ordered reads/frame:        182.4 / 186.45
+  Reads over 5 ms:             20 / 20
+  Read-call CPU ms/frame:      42.7676 / 41.7859
+  Frontend queue ms/frame:     39.2237 / 38.1840
+  Backend queue ms/frame:       0.32559 / 0.33126
+  GPU wait API ms/frame:        0.33101 / 0.32992
+  GPU staging B/frame:       972080 / 972723.2
+  CPU buffer copy B/frame:  1016880 / 1017523.2
+  Direct mapped B/frame:     44800 / 44800
+  Command snapshot B/frame:      0 / 1095312.6
+Individual read-call median/p95/max were 0.025017/0.048752/38.093687 ms off
+and 0.024697/0.049234/37.582666 ms on. CPU durations overlap across threads.
+
+The final enabled counters show 1,529,542 selected copied entries, 3,600 resumed
+entries and 74,500 producer-history/mapping rejections (the runtime field is
+named gpu_written; it conservatively includes unknown mappings). No missing
+snapshots or additional safe-dirty rejections were counted while enabled. About
+95% of these fetches used snapshots: this is an exercised negative result. The
+counter intervals extend beyond the trace windows. The CPU copied about 1.1 MB
+extra command words per frame. There is no meaningful FPS or ordered-wait gain;
+one long read per frame remains. The snapshot experiment stays off by default.
+
+The shared ps5-perf payload rejected the recording with "another sampling
+session is active" after a different task's earlier run. This candidate has no
+new CPU profile. The bounded runner recorded that failure and completed the
+independent frame/read/copy comparison; it did not reset the shared payload.
+Original executable, metadata, settings and owned input files were restored and
+verified before lease release. No fresh crash occurred in this bounded run;
+largest free physical block remained 486 MiB near guest 240 s. This does not
+establish sustained stability, movement correctness or the 40 FPS objective.
+
+Separate memory-policy audit: RefreshFreeMemory uses the largest contiguous
+physical block, adjusted for the guest reserve, as the cache-free estimate.
+GraphicsMemoryShort uses a 1 GiB threshold justified by an earlier 486 MiB
+allocation. The exercised run already selected ASTC-to-BC3 recompression on its
+6 GiB reported graphics budget. Total free memory and the distribution of
+actual late allocation sizes still need measurement before relaxing collection;
+fragmentation cannot be equated to total exhaustion or ignored outright. No
+memory-pressure policy was changed in this experiment.
+
+Read-only direct-pool and VMA allocation probes
+The diagnostic build now accepts an explicit one-shot pool probe outside armed
+ordered-read traces. It enumerates allocated physical extents, independently
+verifies every interior gap and tail with the free-block API, compares two
+bounded scans, and checks that the largest free block agrees before/after.
+Incomplete, unstable, malformed or capped observations report unknown rather
+than zero free bytes. Each scan is capped at 8,192 regions and 50 ms. These are
+non-atomic enumeration estimates, not an atomic kernel snapshot or a policy input.
+
+Opt-in VMA callbacks count successful device-memory block allocations/frees,
+live/peak bytes, size buckets and largest allocations by memory type. They do
+no allocation or I/O themselves. Failed requests, non-VMA driver allocations
+and CPU heaps are outside this view. Individual atomic counters are not a
+transaction with concurrent allocation activity. Allocation policy, collection
+thresholds and driver code are unchanged; normal builds leave callbacks off.
+
+The ASan/UBSan fixture covers independent gap/tail verification, hidden extents,
+incomplete/unstable/capped/malformed observations, true empty/full pools,
+histogram bounds, maxima, anomalous frees and 80,000 concurrent allocation/free
+lifetimes. An initial histogram-label mismatch failed this fixture; that build
+was stopped before packaging. The corrected fixture and final diagnostic native
+compile/link/package passed. Full release source checks were explicitly opted
+out; the previously recorded instrumentation check remains a merge blocker.
+
+Candidate eboot SHA256:
+df7dbe5cb11890dbd2f7dbaf28220433714d332edb7b3dc7a0cd153193b70018
+Matched ELF SHA256:
+789d15a344629082740319e44c1ffbc4916fcd8341de4026f27e8dd041da2fa1
+Core, four maintained patches and isolated RADV archive were unchanged.
+
+Run 1793671159620012526, fresh PID 726, produced five complete, stable,
+consistent observations. All gaps were independently verified; no cap, malformed
+extent, invalid VMA type or accounting anomaly was recorded. Each observation
+took 1.40-1.83 ms and enumerated 374-463 regions. MiB values:
+  Stage          Total free   Largest block   VMA live
+  Title            1499.80          686.00    3177.50
+  Free Roam        1202.86          656.38    3239.53
+  Phase 0          1165.83          656.38    3239.53
+  Phase 1          1142.52          654.38    3236.03
+  Phase 2          1149.17          654.38    3236.28
+The guest reserve held its 512 MiB target. Cache memory-short stayed true.
+Thus fragmentation contributes to the largest-block pressure signal even with
+more than 1 GiB total free. Late successful VMA allocations were small: in the
+final interval types 0/2/3 had no new block and type 5 peaked at 256 KiB.
+This does not establish that future large allocations are unnecessary or justify
+lowering the guard justified by the earlier 486 MiB allocation.
+
+Direct mapped mode remained 2; snapshots, semaphore bypass, producer waits,
+copy batching and selective notifications remained off. Three complete ten-frame
+stationary Free Roam windows pooled to 12.6443 FPS and 282.633 ordered reads/frame.
+There were 32 reads over 5 ms among 8,479 reads. Read-call median/p95/max were
+0.024858/0.044423/38.596050 ms. Per-frame accumulated CPU times were 47.6440 ms
+inside read calls, 42.3976 ms in the frontend queue, 0.5020 ms in the backend
+queue and 0.3307 ms in GPU wait APIs. These overlapping CPU durations are not a
+partition of wall time. Per frame: GPU staging copied 1,022,951.5 bytes; CPU
+buffer copies totaled 1,067,751.5 bytes, including 44,800 direct mapped bytes.
+No command-snapshot bytes or mapped validation failures were reported. This is
+an observational run, not an A/B comparison or an FPS improvement claim.
+
+GPT-6.1 Terra inspected title/menu/Free Roam and all three observation captures:
+the stationary kart and landmarks were consistent, with plausible geometry,
+textures, lighting and HUD, and no obvious corruption. Three separate bounded
+99 Hz ps5-perf recordings succeeded (916/946/947 samples); they ran outside the
+ordered-read windows and are retained privately with matched symbols. Original
+console executable, metadata, settings and owned input were restored and verified.
+This bounded test does not establish sustained stability or movement correctness.
+
+Startup logs also identify eager saved-pipeline construction: this run built
+3,115 cached pipelines before gameplay, taking 4,150 ms. Source inspection
+confirms LoadDiskResources queues all saved pipeline entries and waits for them.
+Its retained-memory contribution and a read-only on-demand comparison remain
+unmeasured; no pipeline-preload behavior change is included here.
+
+Follow-up: read-only saved-pipeline preload comparison
+An opt-in per-boot diagnostic now isolates saved-pipeline construction from the
+driver's binary cache. MKW diagnostic builds read mkw-pipeline-preload-mode.txt
+before renderer creation: 0 retains normal behavior (the default), 1 prewarms
+saved pipelines with both cache files read-only, and 2 loads the driver binary
+cache but builds pipelines through the existing on-demand path. Other builds
+return mode 0. Unsupported input retains the default. No draw skipping, shader
+translation semantics, memory collection policy or driver code is changed.
+
+Read-only modes clear the serialization filenames after loading, preventing
+duplicate on-demand key appends and driver-cache writeback while retaining the
+in-memory driver cache handle. The core loaders and PS5 recovery reader also
+honor read-only input on invalid/truncated files; they neither delete nor repair
+comparison files. Normal recovery still preserves valid prefixes on PS5.
+
+The ASan/UBSan fixture extracts the actual LoadDiskResources flow, driver cache
+loader, destructor, core environment loader and PS5 recovery reader. It checks
+prewarm/demand selection, loaded driver bytes, task-pipeline rejection, callback
+and worker completion, empty serialization paths, invalid/truncated/missing
+files, read-only damaged tails and unchanged normal repair/removal. An initial
+native link exposed the port reader's old signature; no package was produced.
+The reader was updated and added to the fixture. Final native compile/link,
+focused checks and packaging passed; the expanded normal-repair fixture passed
+afterward. The release hot-path check remains unresolved and was explicitly
+opted out for this diagnostic build. Four patches now reproduce 135 core files.
+
+Candidate eboot SHA256:
+c81791b334461b5277bba516efbc57fcb9ece0bb48d52aa1832e2f6ec7494890
+Matched ELF SHA256:
+d3837140e96059cac3290700b5b80a1dd13274f290f8beec981b9d720889755a
+The Zortos gitlink and isolated RADV archive remained unchanged.
+
+Three fresh boots ran in order 1,2,1 under one console lease:
+  Run                    PID  Mode  Cache entries/ms  First frame s
+  1793672940776945132     740     1       3140 / 2834       65.8418
+  1793673278775299901     741     2          0 /  400       65.7529
+  1793673766536183306     742     1       3140 / 2551       67.3009
+First frame is the first rendering callback, not title-ready time. These single
+boot observations show no established first-frame improvement. Both persisted
+files had identical hashes across all boots and before/after each boot:
+  vulkan.bin: 82,035,596 bytes
+  fd490676802dec17ff61eafec43954be5049e32725e810fd1812ed2a7123983e
+  vulkan_pipelines.bin: 24,951,740 bytes
+  c0c2676d2007e6b75aec98d05e8b98c550e4d2844ca61e45bb3a7f8d2ee715a7
+Logs confirm the driver binary loaded in every mode. Demand mode's reported
+runtime pipeline intervals totaled 936 builds and 2,235.9 ms on the GPU thread,
+versus 24/26.7 ms and 27/30.4 ms in the two prewarm runs. These are accumulated
+reported intervals of different run lengths, excluding any final unreported
+interval, not normalized per-frame costs. Construction moved into gameplay.
+
+The cross-boot Free Roam scenes were NOT matched. GPT-6.1 Terra found the first
+baseline at a road edge beside a red barrier and blue DK Boosters pipe, demand
+mode in desert dunes with flags/pillars, and the return baseline on a curving
+road near blue buildings and trees. Title/menu timing does not establish a
+repeatable Free Roam location. Accordingly the following are observations only,
+not an A/B FPS, wait-count, copy or memory benefit/regression claim. Each boot
+has two complete ten-frame read/copy streams; snapshots, semaphore bypass,
+producer waiting, copy batching and selective notifications stayed off:
+  PID                         740         741         742
+  Observed FPS              12.9771     13.3935     13.2184
+  Ordered reads/frame      221.55      253.65      211.45
+  Reads over 5 ms           20          20          20
+  Front queue CPU ms/f      44.9604     40.3261     41.5024
+  Backend queue CPU ms/f     0.3903      0.4475      0.3762
+  GPU wait API CPU ms/f      0.3297      0.3188      0.3330
+  GPU staging B/f       686528.0    1014341.6    722026.4
+  CPU buffer copy B/f   747712.0    1059141.6    775018.4
+  Direct mapped B/f      61184.0      44800.0     52992.0
+  Command snapshot B/f       0            0           0
+Individual read-call median/p95/max ms:
+  PID 740: 0.024858 / 0.043541 / 43.946342
+  PID 741: 0.024537 / 0.041697 / 42.323950
+  PID 742: 0.024937 / 0.042899 / 41.322113
+One long read per frame remains. CPU intervals overlap across threads.
+
+All twelve pool probes were complete/stable/consistent. Free Roam observations
+in chronological boot order were total-free/largest/VMA-live MiB:
+  1147.69 / 356.38 / 3226.78
+   464.39 / 244.06 / 3609.31
+   412.89 / 164.00 / 3465.72
+Different locations and elapsed streaming invalidate a controlled memory-saving
+claim. The reserve held 512 MiB and memory-short remained true. No collection
+threshold is relaxed. Terra found plausible rendering in each boot and matching
+stationary kart/landmarks within each boot's measurement captures; traffic and,
+in the final run, sunset lighting changed. This does not prove movement or
+sustained stability. All owned executable/metadata/settings/input files were
+restored and verified before lease release. Mode 2 remains a diagnostic option;
+normal prewarming remains the default. The 40 FPS objective is not achieved.
+
+Next comparison must explicitly select one fixed Free Roam location/camera
+before measurement, rather than rely on the title shortcut. A private controller
+runner with bounded commands and fresh captures at a navigation gate has been
+prepared for that purpose; it has only passed Python syntax checks, not console
+navigation validation yet.
+
+Follow-up: remove CPU timing probes from normal builds
+The generated ARM32/ARM64 wrappers previously added MKW run timing whenever the
+full profiler was off, including normal builds. Guest thread wait/state changes
+and idle waits also collected diagnostic times in normal builds. This made the
+release performance check fail and left measurement work on production paths.
+
+Three configuration guards adapted from local driver worktree commit 9e73c52
+now keep the MKW run probes behind EDEN_MKW_DIAGNOSTICS and the scheduler/idle
+probes behind that option or EDEN_DEV_PROFILE. Normal execution, interrupt
+handling, wait predicates and notification order are unchanged. No driver
+selection, archive, allocation policy or core patch was imported with them.
+
+The generated-source checker now distinguishes explicitly enabled diagnostic
+wrappers from normal wrappers. It requires the run/scheduler/idle probes to be
+absent from normal generated sources and present in diagnostic sources, while
+retaining the prohibition on low-level JIT compiler timing. Saved generated
+files were compared across both actual configurations, not just a CMake text
+search. The full profiler configuration was not rebuilt in this follow-up.
+
+Both native builds used EDEN_SKIP_SOURCE_CHECKS=0 and completed all required
+checks, linking and packaging. Each passed 179 core cases / 2,239,932 assertions,
+alongside the loader, launcher, file budget, worker, JIT, exclusive-monitor,
+shutdown, staging, producer/completion and focused readback/pipeline fixtures.
+The known release instrumentation check failure is therefore resolved. This
+does not qualify normal gameplay or demonstrate an FPS improvement.
+
+Normal build (MKW diagnostics, DEV Vulkan, DEV profile and DEV ROM ID all off):
+  eboot e5892968a7e3a639f8c8a0416722883dd33c4e548b03f6f7cff1faa0a64ffc56
+  ELF   ab015977564d5311fc047037a21e381d04ed2ebc776062f632dbcf948d474a3c
+MKW diagnostics on, other DEV options off:
+  eboot 8526c257a3db531ee00954fedb5f271099ec7483a6aafa5c3232b7c99074d1a4
+  ELF   6c3890c5aa4655edbfccc4dbea0a343cee8153eea155a798c24c57eff05bc08f
+Both retain the previously recorded isolated RADV archive and Zortos gitlink.
+At the time of this build, these artifacts had not been deployed. Before the
+queued navigation comparison started, its candidate was updated to the checked
+8526c257 diagnostic artifact and matching symbols. It cannot validate the normal
+configuration. The follow-up below records its failed console attempt.
+
+Follow-up: explicit heavy diagnostics and allocation failure evidence
+GPU command recording and full VMA maps now require explicit requests in MKW
+diagnostic builds. Previously the loading sampler armed the bounded command
+ring at 20 seconds and finalized it at 65 seconds; it was not still recording
+at the later allocation failures. Removing automatic recording avoids that
+loading overhead, but does not establish it as the cause of memory exhaustion.
+Automatic VMA maps at 90/150/210/270 seconds are also removed. Lightweight
+progress and memory summaries remain.
+
+Controls live under /data/homebrew/PPSA98515 and are consumed outside pending
+or active ordered-read windows:
+  mkw-gpfifo-mode.txt: 0 disables, 1 requests bounded command recording.
+  mkw-gpfifo-flush.txt: 1 finalizes the capture once for this process lifetime.
+  mkw-vma-probe.txt: a tag from 1 through 1,000,000 requests a full VMA map.
+Malformed/trailing-token requests are discarded. Recording acknowledgements
+report actual active state; a finalized capture cannot falsely acknowledge
+rearming. Ordered-read metadata records gpu_command_capture_at_arm so analysis
+can reject windows collected with command recording active. The recording-on,
+manual-flush and manual-map paths have not been exercised on console in this
+follow-up; the mode-0 inactive acknowledgement was verified.
+
+A failure-only weak hook in the common Vulkan CreateBuffer path reports the
+logical buffer size, memory usage, Vulkan result, physical pool capacity,
+largest free block and kernel query status before the existing failure handler.
+It does not traverse VMA/cache state, change allocation policy or wait on the
+GPU. The aligned-buffer overload is unchanged. Normal builds use a no-op hook.
+The pool capacity is not total free memory; a failed/unsupported kernel query
+must not be treated as proof of zero free space.
+
+Both final native configurations completed all required checks, linking and
+packaging with EDEN_SKIP_SOURCE_CHECKS=0; each passed 179 core cases /
+2,239,932 assertions. The generated production-probe check, patch reproduction
+(four patches, 135 core files) and source whitespace checks passed. Earlier
+attempts failed a host-fixture include and a port adaptation anchor; both were
+fixed before the successful builds, and neither failed attempt was packaged.
+No full-profiler build or driver change is claimed.
+
+Latest diagnostic eboot SHA256:
+298e4eb60eccb6b4a3fbe51511f023478a2e9010684edcf30d3133d1e0350075
+Matched ELF:
+90d8c0bc5dc4199b338f21c2da8894cd197484463b093adf74666fe924a7c0d8
+Latest normal eboot SHA256:
+63d3b6033b895dbb00a98821e11fa66f447e515ec98fb9d08a7adf070e85094f
+Matched ELF:
+1c9b83454d41841d9eea65b2f107bd5e9aae0d96aa3eb661ff7fc4c8f9808eef
+Core patch 0004 SHA256:
+e185fcfe9aa46437f17a17b0a3909161956adee2f75cb140fcab2274216e66a0
+Both retain the recorded Zortos gitlink and isolated RADV archive.
+
+Two navigation attempts failed before approved Free Roam or measurement:
+  Run 1793676321023369210, PID 751 (8526c257 diagnostic artifact):
+  Common buffer allocation returned VK_ERROR_OUT_OF_DEVICE_MEMORY. Staging
+  asked for 5,592,432 bytes, rounded to 8 MiB, and completed reclamation released
+  nothing. The last pool probe reported 696,057,856 free bytes and a largest
+  block of 482,344,960 bytes; it was earlier than the failure and cannot explain
+  the pool state at failure. The last VMA map held 3,766,419,496 block bytes and
+  3,397,015,576 allocation bytes. The process restarted as PID 752.
+
+  Run 1793678471977902094, PID 758 (298e4eb6 diagnostic artifact):
+  The explicit mode-0 acknowledgement reported command recording inactive.
+  GPT-6.1 Terra identified the initial scripted captures as loading, title and
+  main menu rather than the intended stages, so no trace was armed. Controller
+  correction opened the world map, selected Crown City and confirmed its
+  "Begin free roam?" dialog. The next reviewed image was a travel/loading
+  screen. Before arrival the failure hook reported:
+    bytes=50331648 usage=1 result=-2
+    direct_total=12817793024 largest_free=17432576 query_status=0
+  Staging requested 45,973,504 bytes, rounded to 48 MiB; reclamation released
+  nothing. The successful kernel query found a largest block of 16.625 MiB,
+  smaller than the logical buffer request. Total free memory at failure is
+  unknown; this is evidence of insufficient contiguous space for that request,
+  not proof that all memory was exhausted. The process restarted as PID 759.
+  The responsible texture/caller and a safe upload-batching remedy remain
+  unverified. No batching change is included in this follow-up.
+
+Each attempt held one console lease through deployment, testing and verified
+restoration of executable, metadata, settings and owned input/controls. Both
+persisted pipeline cache files retained their before/after hashes. Pre-restart
+live logs are the failure evidence; logs fetched after restart belong to the
+launcher and are excluded from game measurements. The second attempt also
+collected system logs. Neither attempt supplies a valid Free Roam wait window,
+an FPS improvement, movement validation or sustained stability qualification.
+The final normal configuration remains untested on console. The PR remains a
+research draft with experimental alternatives disabled by default.
+
+Follow-up: failure caller attribution and bounded shader-module retention
+Failure-only PS5 staging hooks now retain the immediate caller, logical request,
+usage, deferred flag and Vulkan result. Texture upload failures also identify
+their caller. The frontend emits the log only in MKW diagnostic builds; normal
+builds use a no-op bridge. Exception propagation and allocation/synchronization
+policy are unchanged. Only return address zero is read; no stack walk is added.
+An initial candidate omitted these hooks because the core target did not define
+EDEN_MKW_DIAGNOSTICS. Artifact inspection caught their absence, and its queued
+test was cancelled before deployment. The corrected bridge uses PS5_NATIVE in
+the core and the diagnostic guard in the frontend. The emitted marker was
+verified before the final candidate's deployment.
+
+Run 1793680437774766681, PID 765, reached title/main menu and then failed before
+the world map opened. The archived crash-specific stderr, heap and Eden logs
+survived restart and are authoritative; generic post-restart logs are excluded.
+The report's code size matches the archived ELF, and the captured executable
+mapping starts at 0x400000 while ELF LOAD vaddr starts at zero. The hook reports:
+  MKW_BUFFER_FAILURE bytes=2097152 usage=0 result=-2
+    direct_total=12817793024 largest_free=2080768 query_status=0
+  EDEN_STAGING_OOM asked=1398128 made=2097152 released=0 buffers (0 MiB)
+  MKW_STAGING_SOURCE bytes=1398128 usage=0 deferred=0 result=-2
+    caller=1a4415c texture_upload=0
+Subtracting the verified load bias resolves the caller to 0x164415c in
+TextureCacheRuntime::TranscodeAstcToBcn. This is its device-local BCn output
+buffer, not the earlier 48 MiB input-staging request. The persistent transcode
+log identifies a 1024x1024, 11-level, single-layer texture requesting 1,398,128
+output bytes. The largest block was 16 KiB smaller than the rounded 2 MiB
+buffer. Pool capacity is not free memory; total free bytes remain unknown.
+This evidence rejects whole-image staging size as the sole allocation problem.
+No upload-chunking or driver modification is added on that hypothesis.
+
+Five maintained patches now reproduce 137 touched core files. New patch 0005
+adapts the bounded module-lifetime work from the local driver worktree without
+importing its driver archive or driver selection. Compute/graphics pipelines
+release their input modules when compilation completes. Graphics configuration
+selection happens before queuing the build, avoiding a race with immediate
+completion. The PS5 shader reuse cache has a 64 MiB LRU budget counting SPIR-V
+bytes copied by the driver plus fixed entry storage. Dynamic metadata and
+allocator overhead are not included. Compilation workers retain independent
+shared ownership while eviction removes only the reuse cache's reference;
+module destruction occurs outside the cache lock. Compiled pipelines remain.
+
+The fixture compiles the actual cache methods and graphics constructor's build
+scheduling tail. ASan/UBSan and ThreadSanitizer pass budget/LRU, variant limits,
+overflow, concurrent access, eviction with live compilation ownership, destructor
+reentry, immediate/deferred build completion and failure cleanup. Both normal
+and diagnostic native configurations completed all required checks/link/package
+with EDEN_SKIP_SOURCE_CHECKS=0; each passed 179 cases / 2,239,932 assertions.
+
+Caller-attribution candidate:
+  eboot 70e88f24c83fc43380a0bb0af098f179cec6094d03f4ff6a382838ce3835ae7d
+  ELF   9b02c1d9ed7d5992ccea7fc742c829141284db09232fc0b537f381bc8ff5052a
+Module-budget diagnostic candidate:
+  eboot cb73b7bf2bdfbc12e64e9526095e849d6d04129756c3b8aafeb6888c4bad6c25
+  ELF   1bb748a69302220768bbc671b30aaad083b14545f462341e68f459c8055352f6
+Module-budget normal candidate (not console-tested):
+  eboot 8386366de9e317c788f1a555c9d297457994e55e65ddfa27852eca514fa18c3b
+  ELF   4c8f36b356ea3abf9274b048cb5cda8cd0c7ba4cdd06e99d2b63435d88f076e0
+Core patch 0004 SHA256:
+  1fb54188361658c2796df5350827603b1aba65bb22c50fae936fd091d8c06876
+Core patch 0005 SHA256:
+  e37ebff508f29d12b30c9da21058cc7100442cc3dfc9c32ab740684ae46b55ae
+The Zortos gitlink and isolated RADV archive remain unchanged.
+
+Run 1793681373209640529, PID 775, exercised the module budget on console.
+Startup logs explicitly report 63 MiB / 64 MiB counted storage and at least
+2,072 evictions. GPT-6.1 Terra reviewed a plausible highway title/main menu and
+world map. Player 1 began in a different region from the earlier Crown City
+attempt, so the same stick movement selected unnamed terrain and no travel
+dialog appeared. A navigation-runner variable shadowing bug then prevented
+further commands. The experiment was stopped deliberately on the map, with no
+emulator crash, Free Roam approval or ordered-read measurement. Its final map
+frame counter is not gameplay FPS and cannot satisfy the Free Roam objective.
+Different scenes and elapsed streaming prohibit a controlled memory/FPS claim.
+
+Executable, metadata, settings and owned input/controls were restored and
+verified after both runs, and both persisted pipeline cache files retained their
+before/after hashes within each run. After the first module test was terminal
+and restored, the private runner's capture-label variable was corrected. A
+fixture executing the actual navigation gate passes repeated input sequences
+and rejects the old shadowing implementation. A retry with the same checked
+artifact is queued; it has no result yet. The normal build, sustained movement,
+Free Roam stability and the above-40-FPS objective remain unqualified.
+
+Follow-up: malformed index allocation and early command snapshots
+The corrected module-budget retry (run 1793682542060032672, PID 778) failed
+83 seconds after launch, before the navigation gate. Its matching crash report
+and archived logs identify UpdateIndexBuffer/CreateBuffer. The preceding index
+span had first_index=0x3fa33aca, count=0xbf61abef, element_size=2 and end=0.
+The selected address span was 3,977,883,648 bytes; merging 97 overlaps enlarged
+the buffer request to 3,982,360,576 bytes (0xed5e0000). At failure the kernel
+successfully reported a largest free block of 2,449,473,536 bytes. This is a
+different failure class from the small BCn output allocation above. The
+float-like index fields suggest command lifetime/parsing or producer corruption;
+the root cause is not proven. No index clamping or draw skipping is introduced.
+
+An unchanged checked cb73b7bf diagnostic was then tested with the existing
+bounded command-snapshot mode enabled from early startup, retaining read-only
+pipeline prewarming and all other candidate settings. Snapshot eligibility still
+rejects GPU-written/dirty/resumed/unknown cases. This is a diagnostic experiment,
+not a new default or proof that every command stream may be frozen.
+
+Run 1793682828196992457, PID 780, reached actual Free Roam using reviewed
+L+R and Plus inputs. GPT-6.1 Terra confirmed the settled kart/minimap and
+plausible terrain, textures, occlusion, shadows and lighting. A 1,500 ms throttle
+pulse produced visible displacement toward the tree/muddy patch. Two subsequent
+stationary measurement images matched kart/camera/landmarks; they were darker
+than the earlier movement image, with no obvious geometry loss or error. Stills
+do not establish the cause of the lighting change or broad rendering correctness.
+
+Two complete ten-frame ordered-read/copy streams, both with snapshots on:
+  FPS                         14.5506 / 14.7024
+  Ordered reads/frame          531.9 / 544.1
+  Pooled FPS                   14.6261
+  Pooled ordered reads/frame   538.0
+  Reads over 5 ms              36 of 10,760 reads across 20 frames
+  Individual read median/p95/max ms: 0.024216 / 0.036725 / 39.001548
+  Frontend queue CPU ms/frame  62.9719
+  Backend queue CPU ms/frame    0.9491
+  GPU wait API CPU ms/frame     0.3363
+  GPU staging bytes/frame     1,004,915.2
+  Command snapshot bytes/frame  939,284.4
+These overlapping CPU intervals are not a partition of wall-frame time. Eighteen
+long reads targeted CPU VA 0x2105c35000; other addresses also stalled. All long
+reads were clean by backend service, which does not prove they were safe to
+bypass when requested. GPU command recording was inactive. No staging-copy
+visibility mismatch was reported. Final pool observation: total free
+228,032,512 bytes, largest block 73,400,320 bytes, reserve held 512 MiB.
+
+The scene differs from earlier boots, so this establishes neither an FPS/memory
+benefit for snapshots nor a fix for the malformed-index failure. The previous
+request could also be scene-dependent. Both attempts restored the executable,
+metadata, settings and owned controls/input, with verification and unchanged
+pipeline cache hashes within each run. This bounded Free Roam test supplies a
+new measurement baseline, not sustained movement/stability or the 40 FPS goal.
+
+Follow-up: shared Vulkan fence-submission experiment (not retained)
+The PID 765 archived submission report attributed 3,812 of 5,032 submissions
+in one interval to QueueFence. A separate opt-in prototype grouped up to 64
+fences behind the same submission tick, retaining command-list, forced CPU-wait
+and capacity flush boundaries. It never treated a wait timeout as completion;
+unsubmitted waits could cancel on shutdown, and derived shutdown stopped/joined
+the fencing thread before its virtual implementation disappeared. Actual method
+fixtures passed ASan/UBSan and ThreadSanitizer, and both normal/diagnostic native
+builds completed all required checks/link/package (179 cases / 2,239,932
+assertions each). An earlier prototype was withheld before deployment while
+the derived-shutdown lifetime was corrected. No driver/archive change was made.
+
+Run 1793683730640470783, PID 782, used the corrected diagnostic with early
+command snapshots held on. Free Roam was reached through reviewed title/menu
+inputs. Initial movement was excluded; a brake/neutral capture pair aligned
+kart/camera, snowbank, road lamps, distant structures and minimap. GPT-6.1 Terra
+then reviewed all four OFF/ON/OFF/ON phase captures: the stationary scene and
+rendering stayed consistent, aside from Mario's head pose in one image. No
+obvious geometry/texture/shadow loss or error screen was seen. This is bounded
+visual evidence, not continuous stability or movement qualification.
+
+Each phase has ten complete measured frames and complete read/copy streams:
+  Phase/mode       FPS       Ordered reads/frame   Front queue CPU ms/frame
+   0 / OFF        13.9556          219.6                   39.8886
+   1 / ON         13.3498          224.8                   42.4077
+   2 / OFF        13.8897          222.7                   43.2462
+   3 / ON         13.3891          228.7                   42.6637
+Pooled OFF/ON: FPS 13.9225 / 13.3694; ordered reads/frame 221.15 / 226.75;
+frontend queue CPU ms/frame 41.5674 / 42.5357; backend queue 0.3903 / 0.3997;
+GPU wait API CPU ms/frame 0.3279 / 0.3333. CPU intervals overlap across threads.
+Reads over 5 ms: 21 of 4,423 OFF versus 20 of 4,535 ON. Individual read-call
+median/p95/max ms: OFF 0.024697 / 0.041215 / 39.491480;
+ON 0.024537 / 0.042017 / 42.097105. Fewer long reads in this short sample did
+not offset increased read count, queue time or lower FPS.
+
+The ON windows covered 1,292 deferred fence requests with 302 dedicated batch
+submissions and 20 groups submitted by other boundaries. These counters count
+batched groups, not every GPU submission in the OFF windows. Grouping was
+exercised, but this workload showed no useful performance/wait-count gain.
+The prototype and its runtime polling/counters were removed from the retained
+source; the private patch, matched symbols, fixtures and raw evidence remain
+archived. The host analyzer retains optional support for these historical
+per-frame counter columns, with explicit availability=false for older captures.
+Actual traces from both formats were reanalyzed successfully.
+
+Experiment diagnostic eboot/ELF (not the retained build):
+  5a9d796b501bac1c2ac56dc52571e5fcf931e6a37e67393db229132b006ff53c
+  534cdb33780e20c664eb7be0baecb13ecb0e8aaeda4729681e195e96d0728952
+Experiment normal eboot/ELF (built, not console-tested, not retained):
+  bd1faaa3c6d3ddda8f14edda2f393da2203b35626c0b472338ebd5c716a831d4
+  47d09a9d7d8ca13a10638734383da132118f55a93aa0c936ab29f89e024bfa30
+The experiment restored executable, metadata, settings and owned controls/input
+with verification; pipeline cache bytes were unchanged. The retained source
+again reproduces five patches / 137 core files and matches the earlier cb73b7bf
+diagnostic / 8386366d normal implementation. The above-40-FPS objective remains
+unachieved; command processing/read ordering is the next measured bottleneck.
+
+Follow-up: split execution still stalls at command fetch
+The retained cb73b7bf diagnostic artifact was run with only the existing MKW
+performance.fast_gpu preference forced true. The first attempt used a lowercase
+JSON title key; Settings::TitleKey uses uppercase, so that attempt did not apply
+the preference and produced no comparison. Its exact configuration was restored.
+The corrected run (PID 797, local evidence 1793687343850844795) confirms "fast GPU
+on" and split=1 in all 3,856 captured reads. Reactive flushing remained on; early
+command snapshots remained 1 and read-only pipeline prewarming remained 1.
+This is lower GPU accuracy, not a console clock change.
+
+Terra reviewed title/menu/Free Roam captures and a short throttle/brake sequence.
+Road markings, lamps and the minimap show forward displacement. Brake/neutral
+and the two measurement captures retain the same intersection, kart/camera and
+static landmarks. Road, grass, trees, lighting, occlusion and HUD are plausible
+in these images. Moving distant traffic/effects differ. This does not establish
+complete rendering correctness or sustained movement/stability.
+
+Both ten-frame windows use identical settings (not OFF/ON):
+  FPS                         13.9903 / 14.0046 (pooled 13.9974)
+  Ordered reads/frame         192.6 / 193.0 (pooled 192.8)
+  Reads over 5 ms              21 across 20 frames / 3,856 reads
+  Read median/p95/max          0.025899 / 0.052682 / 40.031609 ms
+  Front queue CPU ms/frame     38.5441
+  Back queue CPU ms/frame      1.9652
+  GPU wait API CPU ms/frame    0.3323
+  Buffer GPU-copy B/frame      686,616
+  Buffer CPU-copy B/frame      738,008
+  Direct mapped bytes/frame    51,392
+  Command snapshot B/frame     1,283,671.8
+All read/copy captures completed without dropped/in-flight records. Queue CPU
+totals overlap across threads; they are not a wall-frame partition. Scenes
+differ from the earlier high-accuracy runs, so neither the lower read count nor
+the roughly unchanged FPS is a controlled accuracy-setting A/B result.
+
+After the measurement windows, ps5-perf recorded a separate three-second precise
+profile (1,056 samples, matched cb73 ELF). GPU and GPUBack are both present.
+83.3% of sampled frontend CPU weight is in GpuSplit::Drain; 80.7% of frontend
+weight is specifically Drain under DmaPusher::FlushGpuWrittenCommands. The
+backend's largest self entry is BackLoop (31.4% of its own sampled CPU weight).
+The counts describe this short sample, not universal function costs. This
+changes the next optimization target: command-fetch synchronization repeatedly
+drains backend work; removing a staging copy does not remove that ordering.
+Any narrower drain must still cover the first queued writer before consulting
+historical written pages, plus deferred draws, unknown methods and callbacks.
+
+The known unimplemented GPU-modified overlapping-image log at texture-cache
+line 3032 also occurs in the earlier high-accuracy PID 780 log. It remains an
+unresolved correctness limitation, not a new split-only failure claim.
+The final pool snapshot verifies 598,540,288 free bytes and a 450,887,680-byte
+largest block, with the separate 512 MiB reserve held. Application, settings,
+metadata and owned input/controls were restored; pipeline cache bytes match.
+No new runtime patch or driver change was promoted from this observation.
+
+A separate current-source normal build with development input controls
+(EDEN_DEV_ROM_ID=0400C3F00006E000, MKW_DIAGNOSTICS/DEV_VULKAN/DEV_PROFILE=OFF)
+completed the full sync/check/build/link/package chain, including 179 core
+cases / 2,239,932 assertions. This is a development-input variant, not a release
+binary, and is not yet console-tested. It will measure gameplay without the
+heavy diagnostics; its memory/cache policies also differ from the diagnostic
+variant, so differences cannot be assigned solely to instrumentation overhead.
+  Eboot: b8ccef29dd39244854c4aeb28c29d8e62cf4fd30e40e599407017d299764b56d
+  ELF:   24db2ea72b14e461e7a95a64f92d408ee5df43a062c0e3a8d6f62d26c3c1d211
+
+Candidate: producer frontier for split command fetches (not console-qualified)
+Patch 0006 adapts the producer frontier and completion hint from Zortos commit
+d7ce3d8c0881fc605974d4747573e8a1fcadb37f. It is opt-in, diagnostic-only at the
+frontend: mkw-split-fetch-mode.txt=0 retains full command-fetch drains; 1 waits
+through the last potentially memory-producing ring entry. Other Drain callers,
+GPU completion waits, cache flushes and first-writer history checks remain.
+This frontier describes backend CPU execution; it is not itself proof that GPU
+work or GPU cache writeback completed.
+
+Ordinary method-sink appends and engine switches cannot execute GPU work.
+Direct/multi 3D state writes are excluded only when the front's existing mirror
+also proves no deferred draw can be pending. Compute, executable methods,
+uploads, arbitrary callbacks and unknown callers remain conservative hazards.
+Consumed positions are published with release/acquire ordering; a request is
+only a hint to acknowledge a completed prefix, never evidence of completion.
+A late request can still wait for a subsequent publication point; the proposed
+optimization is not assumed to remove every tail wait.
+
+The bounded trace now records every accepted command-fetch wait separately in
+fetch-waits.csv (begin/end time, guest-frame IDs, producer target, queued end,
+observed completion and mode). Separate attempted/drop/completeness fields
+prevent missing events from appearing to be fewer waits. Both streams share
+the export lifetime, so an in-flight fetch prevents premature export. Ordered
+CPU-read counts and individual durations remain independent. The analyzer
+emits fetch durations and per-frame overlap/counts, rejects incomplete or
+invalid fetch captures, and marks legacy fetch metrics unavailable explicitly.
+No per-event file I/O occurs in the recording window.
+
+Actual ring/dispatch/drain methods pass ASan/UBSan and TSan tests for the first
+queued writer, unrelated state tail, full/narrow ordering, mid-batch completion,
+conservative callbacks/multi writes and restart reset. The actual FrontWrite
+classification is exercised at the ring call site. Actual trace storage passes
+ASan/UBSan and TSan checks for shared read/fetch lifetime, cross-frame completion,
+overflow and concurrency. Analyzer checks cover real-frame overlap clipping,
+invalid/incomplete/legacy inputs; a measured 1,926-read legacy trace reanalyzes
+with unchanged read counts. Source synchronization now hashes untracked headers
+from the core directory, verified with real content changes and spaced names.
+
+Both candidate configurations completed full native checks/build/link/package
+with source checks enabled: each passed 179 core cases / 2,239,932 assertions.
+Normal mode has no fetch timing calls and cannot enable this experiment. Six
+maintained patches now reproduce 142 core files. Neither candidate variant has
+been console-tested; no FPS or wait reduction is claimed for this patch yet.
+The planned same-run OFF/ON/OFF/ON windows use five frames apiece because the
+observed roughly 7,000 command fetches/frame need to fit the 65,536-event bound.
+
+Candidate diagnostic eboot / matched ELF:
+  f68f0596ab0ce030a9befdbf7437ef7bc34f0eb388fa5253da6eb23d4ae555a3
+  11a9edb45d358c17dcabe4c44d030d47a577b09105094a3bbcde57fb7ca745a6
+Candidate normal eboot / matched ELF:
+  dedc01bab020132edaf2b055998eea3ef6e4ece6337813d928a5f2a104f32699
+  cd32956d17768c6236d7a990dd6b0a304fcbd12e620eed99c92bb141d5ec1789
+
+Normal-input build: malformed index failure before measurement
+The earlier five-patch b8ccef29 input-control variant was tested next (PID 806,
+local evidence 1793689546186042841). Its first attempt stopped before launch
+because the private FTP helper rejected the server's successful 226 deletion
+response. Restoration verified. The corrected helper accepts that response
+while still rejecting temporary FTP failures; the retry launched successfully.
+
+Terra confirmed the library's MarioKartWorld row before selection, then the
+title and main menu. The Free Roam shortcut reached a rear-kart desert-road
+scene, but the HUD had not settled in the sampled image. Before visual approval
+or a stationary measurement, the application restarted from PID 806 to 807.
+Settings remained 1x/Bilinear/1080p/60Hz, Fast GPU off and reactive flushing on;
+the library displayed the saved Handheld mode. This executable has neither the
+heavy MKW diagnostics nor the new command-fetch frontier experiment. Normal
+pipeline/cache/memory defaults and command snapshots off were retained.
+
+The preserved pre-restart stderr tail reports first_index=0x3d280000 and
+count=0x3e8d0000, element size 2, end address zero. UpdateIndexBuffer selected
+3,959,750,656 bytes; the merge produced a 3,959,816,192-byte buffer request across
+93 overlaps. CreateBuffer then reported VkResult=-2 and termination with
+VK_ERROR_OUT_OF_DEVICE_MEMORY. Failure-time total free/largest block are not
+established by the earlier periodic memory sample. The post-restart generic
+logs belong to the launcher and are not attributed to the failed game.
+
+No completed Free Roam FPS interval, movement check or CPU profile resulted.
+Command lifetime/parsing or producer corruption remains unproven; the large
+index request is not treated as legitimate game loading or suppressed by
+clamping/skipping a draw. Exact package/control restoration and pipeline-cache
+byte preservation verified. The new six-patch frontier candidate is a separate
+queued experiment; it is not claimed to fix this failure.
+
+Producer-frontier console comparison: no demonstrated performance gain
+The six-patch f68f0596 diagnostic artifact completed one OFF/ON/OFF/ON run,
+PID 811 (local evidence 1793691106480785666). Fast GPU stayed on, early command
+snapshots 1, read-only prewarming 1, other experimental modes off. Terra reviewed
+title/menu/Free Roam, short throttle/reverse displacement and all four matching
+stationary town/street captures. Static landmarks, camera and minimap align;
+no obvious rendering/HUD error is visible in these samples. A wall-facing pose
+was repositioned before measurement. This is not sustained movement validation.
+
+Four five-frame windows completed with no read/copy/fetch drops or in-flight
+records. Pooled OFF / ON (ten frames each):
+  FPS                           14.2902 / 13.9989
+  Ordered CPU reads/frame        268.1 / 271.8
+  Reads over 5 ms                10 / 10
+  Read median/p95/max (ms)        .026702/.059257/33.500025 | .027103/.068478/34.093798
+  Front queue CPU ms/frame       34.2682 / 34.4554
+  Back queue CPU ms/frame        2.0530 / 2.2445
+  GPU wait API CPU ms/frame      .3180 / .3116
+  Buffer GPU-copy B/frame        971,558.4 / 968,294.4
+  Buffer CPU-copy B/frame        1,011,072 / 1,009,036.8
+  Direct mapped B/frame          39,513.6 / 40,742.4
+  Command-fetch calls/frame      4,443.7 / 4,466.7
+  Producer pending at entry/f    4,123.6 / 2,882.2
+  Queued state-tail requests/f   0 / 1,363.6
+  Fetch duration CPU ms/frame    17.8002 / 17.6365
+  Fetch median/p95/max (ms)       .001363/.012669/2.992921 | .001443/.012429/3.093313
+The producer observation falls about 30%, but it is not a count of actual parks:
+the backend can finish between the observation and the wait. Timed fetch cost,
+ordered-read count/duration and FPS show no useful improvement. Waiting for
+fewer observed pending entries alone is not a performance success.
+
+Five-second guest-frame batches wholly inside fixed-mode intervals (at least
+two frames after acknowledgement) and outside the armed trace ranges average
+16.0019 FPS OFF / 15.9203 ON over 20.12 / 20.23 seconds. Other diagnostics remain
+enabled. These are not a release-build comparison; their difference from the
+trace windows also shows why trace overhead must not be ignored.
+
+The attempted post-window ps5-perf profile was refused because another sampling
+session was active. Its target and overlap with these windows are unknown.
+Thus no new CPU profile or profiling-free timing claim is made. The existing
+profile remains the motivation for investigating fetch drains. This limited
+classifier leaves compute and unknown operations conservative; it stays opt-in.
+The experiment restored executable, metadata, settings, owned controls/input;
+pipeline cache bytes match. Final verified direct-pool free/largest were
+431,652,864 / 228,589,568 bytes, with the separate 512 MiB reserve held.
+
+Oversized-index provenance candidate (normal-input console run below)
+Patch 0007 adds a failure-only dump for a selected index span of at least
+256 MiB, at most once per process. It prints live index registers, copied draw
+state, shadow RAM/control and the last 48 already-recorded method writes.
+It adds no per-write recording, guest-memory reads, clamps or draw suppression.
+It should distinguish bad method/register state from a bad draw-state copy.
+
+As an ABI sanity check, NVIDIA's public Ampere B class header lists FIRST at
+0x17dc and COUNT at 0x17e0, matching the corresponding Eden register offsets:
+https://github.com/NVIDIA/open-gpu-doc/blob/master/classes/3d/clc797.h
+This family-level reference does not establish the exact Switch 2 class or the
+failure's producer. No register-translation change follows from it.
+
+The current normal-input candidate (DEV_ROM_ID set; MKW_DIAGNOSTICS, DEV_VULKAN
+and DEV_PROFILE off) passed full native checks/build/link/package, including
+179 core cases / 2,239,932 assertions. Seven patches reproduce 142 files.
+It was deployed for the normal-input investigation recorded below, with
+private crash-archive collection. The earlier a004c699 pre-shadow variant
+was never deployed.
+  Eboot: d901552711f458233165e49b71d9a4ee219b8240d378d881267deb3c7520ad0f
+  ELF:   9b55adf44a82432d9c3e62d86788a0523716b2fa66e1027ba401d5a6ced9452c
+
+Normal-input provenance run: short observation completed
+Run 1793692970464268178 used the seven-patch d9015527 artifact above, PID 814.
+DEV_ROM_ID enabled input controls; MKW_DIAGNOSTICS, DEV_VULKAN and DEV_PROFILE
+were off. Native Library navigation selected Mario Kart World in the preserved
+Handheld configuration. No diagnostic mode/settings switches were applied.
+GPT-6.1 Terra reviewed the title and successive Free Roam captures, then
+confirmed matching kart/camera position and fixed landmarks in neutral frames.
+The entry transition was excluded before approval.
+
+Fifteen complete five-second guest-frame batches after approval contained
+1,000 frames over 75.651333 seconds: 13.21854 FPS, worst frame 99.974 ms.
+This is a short static-scene observation, not an accuracy A/B or release result.
+No ordered-read trace was armed, so this run supplies no per-read wait or copy
+comparison. The process did not restart during the observation or subsequent
+short throttle/brake commands. Terra confirmed matching stationary before/after
+landmarks and clear throttle displacement from rock to grass, with plausible
+terrain, structures, HUD and lighting in sampled images. This is limited visual
+evidence rather than continuous gameplay qualification. The oversized-index
+condition did not reproduce;
+no MKW_INDEX_ORIGIN/SHADOW/RECENT dump was emitted. Its root cause remains open.
+
+The follow-up ps5-perf recording was refused because another sampling session
+was active. Its target and overlap are unknown; there is no fresh profile and
+these timings are not established as free from external sampling overhead.
+Executable, package metadata, development settings/input and both pipeline
+cache files were restored with byte verification; the runner completed with
+no restoration errors. Game settings were only read. Broad rendering, movement
+correctness, sustained memory stability and the 40/60 FPS targets remain
+unqualified. Private archives/captures and profiles are excluded from the PR.
+
+Compute store-only frontier extension (host verified; console attempts below)
+Patch 0008 extends the opt-in command-fetch producer frontier to the compute
+engine's existing native_plain_methods table. CallMethod already returns after
+storing those native and legacy register values; the constructor's immutable
+table excludes launches, uploads, semaphore operations and native side effects.
+Single, repeated and macro writes reuse that exact classification. The default
+full drain, other drain sites, GPU visibility barriers and unknown producers
+retain their ordering. Compute method sinks only store registers; unlike the
+3D engine, they have no deferred draw to flush. The native-mode switch occurs
+before channel publication. This adds no guest-memory imports or driver patch.
+
+The fixture compiles actual compute frontend call sites, the constructor table
+and backend store-only prefix, plus the actual split ring/wait/dispatch methods.
+It covers all 3,584 table entries through three paths in native/non-native and
+trace/non-trace configurations, and conservative out-of-range methods. The
+heavyweight non-plain backend path and frontend macro engine are fixture
+stubs; real compilation/integration is checked by both native build variants.
+ASan/UBSan and ThreadSanitizer pass. Eight patches reproduce 143 core files.
+
+Both normal and MKW diagnostic variants passed complete native checks, build,
+link and package with source checks enabled, each with 179 core cases /
+2,239,932 assertions. No performance or correctness gain is claimed yet.
+  Diagnostic eboot: 130c01e8f6607c0247801868cf918ab163470ed0a780638b520ff970dad6edea
+  Diagnostic ELF:   d25f5443bda26caeb43a7a2ba1b6a3e53ceb61860436e904add04e1b30e8601f
+  Normal eboot:     0d8c2a1aebeecefb629a513268afd20571ade7f36ccb719df23ec81b6c0df3de
+  Normal ELF:       90ae3ca78a084dd673468c553886d1530cd3b178a9d78baa693ba8175dcf8b56
+The driver archive remains fdd18c8d492e9b7abf4324bfeacd4fb5b4134059f8c72ef7eb801b66c9c54e98.
+The subsequent frozen eight-patch diagnostic attempt failed before measurement,
+as recorded below. Its normal variant has not been console-tested. No completed
+per-frame read/copy/fetch comparison or profile exists for this extension.
+
+Backend idle-spin investigation (historical profile, new candidate untested)
+The separate three-second PID 797 profile has 204 GPUBack leaf samples, of
+which 64 are inside BackLoop. Re-symbolizing their exact leaf PCs against the
+matched ELF (SHA 1bb748a69302220768bbc671b30aaad083b14545f462341e68f459c8055352f6)
+and inspecting that function with LLVM objdump identifies 49 samples at runtime
+0x18d38d2 and five at 0x18d38d9. After subtracting the verified 0x400000 load
+bias, both instructions are in the empty-queue loop following PAUSE and before
+the 8,192-iteration limit. Thus 54/64 BackLoop leaf samples (84.375%) and
+54/204 backend samples (26.47%) fall in that spin loop. Nine other BackLoop
+leaf samples are at the Execute call and one at its loop comparison.
+
+This is sampled CPU weight from one historical short run, not a universal CPU
+percentage, instruction cycle cost or a new console measurement. Instruction
+boundary sampling can skid. REA opened the exact ELF successfully, but its
+Rizin provider was unavailable (ENOENT); the focused disassembly is ordinary
+LLVM tool output, not successful REA disassembly Evidence. No game binary was
+analyzed and no live process was touched for this static analysis.
+
+Patch 0009 makes only the empty-queue spin budget diagnostic-selectable:
+original 8,192 iterations (mode 0) versus 128 (mode 1). Publication, ring-space
+reclamation, completion acknowledgement, stop handling and the lost-wakeup
+checks before atomic waiting are unchanged. The optional weak hook is bounded
+at 8,192; normal builds return the original budget. A short-spin choice may
+reduce CPU contention or increase wake latency; it does not remove producers,
+GPU barriers or ordered CPU reads. No FPS/CPU benefit is established yet.
+
+The actual split ring/dispatch/wait fixture passes ASan/UBSan and TSan for
+zero, 128, 8,192 and clamped 16,384 requested budgets, with both fetch-frontier
+settings. Both nine-patch normal and diagnostic native chains passed all
+required source checks, build/link/package and 179 core cases / 2,239,932
+assertions each. Nine patches reproduce 143 core files. The driver is unchanged.
+  Diagnostic eboot: b80b0874ea962d9989747ec6aa5d24cb1e14839ccaa85833551ba87372f41420
+  Diagnostic ELF:   b62bf6e77c6750f514ad358979e1a876e1bc35632d36c4c51bdf6c46574d8246
+  Normal eboot:     b9381138d8ef4348e17d01f7b37930b279f150f0c7c512ed220f1f7c11f75209
+  Normal ELF:       c45906027d2dc251636a2b938ca27ff5dd247164b6b347784d36a8dde96c4d63
+
+Neither nine-patch artifact was deployed. The later combined diagnostic artifact
+contains this hook but kept the original 8,192-iteration budget. No idle-spin A/B
+comparison was completed. A same-scene read/copy/fetch and CPU-counter comparison
+is required before a default change is justified; the normal default is retained.
+
+Pending-fence CPU-write integrity correction (host verified)
+A source audit of Zortos 5bef7354b464a38527864756814cc6e0f0fc6567 exposed
+three concrete defects still present in this port's base. An extracted-method
+reproducer using the actual OnCPUWrite, ClearDownload, PopAsyncBuffers, common
+range sets and memory-write callback failed three scenarios (11 byte/contract
+assertions): a completed old fence overwrote newer CPU bytes; an older copy
+consumed a newer fence's overlap count and prevented its writeback; and the
+second write to the same page skipped OnCPUWrite. These are host reproductions,
+not proof that the prior console's malformed index words had this cause.
+
+Patch 0010 adapts the focused upstream correction: invalidate pending copies
+immediately before a deferred CPU store, cut those bytes out of every queued
+fence copy while decrementing each copy's own overlap count, and call the
+rasterizer-write protection hook for every write instead of caching permission
+by page. Existing alias traversal, cache locks and deferred upload remain. No
+guest RAM import, wait bypass, index clamp, draw suppression or driver change
+is introduced. This correction is generic, with no title-ID gate.
+
+All three scenarios now pass. An independent 20,000-event byte/validity-mask
+oracle also checks partial writes, overlapping pending fences, staging offsets,
+per-byte pending counts, ordered retirement and zero-address/size callbacks.
+ASan/UBSan and TSan-instrumented fixtures pass. The fixture owns host staging
+memory and mocks device/tracker plumbing; it does not validate real Vulkan
+cache visibility, GPU scheduling or console performance. The broader upstream
+pending-fence read-reuse planner/selection-epoch optimization is not included.
+Ten maintained patches reproduce 145 core files. Combined native artifact
+validation, including the separate port loading correction, follows below.
+
+Eight-patch console attempt: first-presentation crash, no comparison
+Run 1793696749674028938 deployed frozen eight-patch 130c01e8 (matched ELF
+d25f5443, PID 821). It restarted while waiting for the initial 800-frame gate,
+before any visual approval, ordered-read trace, OFF/ON phase, FPS qualification
+or sampled profile. The runner stopped on that first restart (terminal 1).
+The retained crash-20261103-060729 report records SIGSEGV at address zero on
+GPUBack, 64 seconds after launch, with a 7,087 MiB largest free block of
+12,224 MiB. Matched code size, symbolization and chronology tie it to this run;
+the two older crash archives collected alongside it are not attributed here.
+
+Fault ELF 0x14d5f71 / runtime 0x18d5f71 is Layer::ConfigureDraw, dereferencing
+the descriptor-set array's null storage at image index zero. The stack scan
+also includes BlitScreen::DrawToFrame and RendererVulkan::Composite; scanned
+return addresses remain candidates rather than a fully unwound call stack.
+Earlier log messages include unmapped device reads. There is no observed
+allocation failure in this crash, and no evidence that the opt-in frontier
+(which was still off) caused it. The exact runtime corruption cause is open.
+Application/metadata/settings/input restoration verified; both persisted cache
+files match their original bytes, and game configuration restoration verified.
+
+PS5 loading presentation ownership correction
+The source has a concrete competing-owner path consistent with the crash: the
+GPU frontend calls LoadingTick, which records PresentLoading using the same
+renderer/scheduler/blit_swapchain that GPUBack uses for the first Composite.
+The loading call supplies zero framebuffers; DrawToFrame clears/recreates its
+shared layer vector when the count changes, while a guest frame can use a layer.
+The loading-active flag was also an ordinary bool read/written across threads.
+Static inspection establishes that race opportunity, not its exact runtime
+interleaving in PID 821. The fault-site inspection used matched-ELF LLVM tools.
+
+The port now routes loading ticks through GpuSplit::Defer/Drain once splitting
+is active. The GPU owner checks the atomic loading latch again after earlier
+work: if the first guest frame ended loading, the stale loading callback draws
+nothing. Inactive splits keep the inline loading path. Guest frame rendering
+and ordering are unchanged; this does not suppress a guest draw or clamp data.
+The helper uses a trivially copyable, const-callable closure accepted by the
+real split thunk. Its threaded mock-FIFO fixture checks inactive/backend calls,
+no concurrent renderer access, first-frame cancellation and deferred lifetime
+under ASan/UBSan and TSan. It does not emulate Vulkan resources or prove the
+console's first-presentation failure is resolved.
+
+Both combined normal/diagnostic native chains completed with source checks on,
+including both new fixtures and all 179 core cases / 2,239,932 assertions each.
+  Diagnostic eboot: 04b1fe0c976e40a79c422167d73e99023a6e7994eed2631faa2ef528b69c75d2
+  Diagnostic ELF:   364af8a6d4756092894be997d20f71de5b08cda07a2a05692ba27c40bd5c78a3
+  Normal eboot:     e1099c69c6f1b550db686e3f38355f90d03a4357254e5e1cbfd2c0baef5a3d1b
+  Normal ELF:       0561f9845e2b54570f133ddd264b5bf012587811d499e6225a78746986603c4e
+The driver archive remains fdd18c8d492e9b7abf4324bfeacd4fb5b4134059f8c72ef7eb801b66c9c54e98.
+The corrected diagnostic run completed with the failure recorded below. It kept
+the original 8,192 idle-spin budget and did not reach its Free Roam comparison
+gate. The combined normal artifact has not been console-tested. No FPS or
+sustained-stability gain is claimed.
+
+Combined ten-patch console attempt: title/menu, then device-local allocation failure
+Run 1793698904016262630 deployed the exact diagnostic 04b1fe0c artifact above
+(matched ELF 364af8a6, PID 830). First presentation succeeded. GPT-6.1 Terra
+reviewed the title and subsequent main-menu captures, finding plausible city
+geometry, lighting and HUD. After L+R reached the main menu, the process
+restarted before the queued Plus input or Free Roam approval. This is limited
+one-boot startup/rendering evidence, not proof the earlier race is fully resolved.
+
+Live stderr records MKW_BUFFER_FAILURE bytes=31195136 usage=0 result=-2,
+largest_free=18546688, followed by VK_ERROR_OUT_OF_DEVICE_MEMORY. Usage zero
+is DeviceLocal: this was an ordinary buffer request, not input staging. The
+request was about 29.75 MiB while the largest free block was about 17.69 MiB.
+The reported direct_total=12817793024 is total pool capacity, not total free
+memory; aggregate free at failure is unknown. Exhaustion versus fragmentation
+is not resolved by the largest-block measurement alone.
+
+The attributed crash-20261103-064649 report records intentional OOM termination
+on GPUBack 270 seconds after launch, with matching executable code size.
+Matched-symbol stack candidates include BufferCache::CreateBuffer,
+UpdateVertexBuffer, UpdateVertexBuffers and RasterizerVulkan::Draw, supporting
+an ordinary vertex-buffer allocation path. These are scanned return addresses,
+not a complete unwound stack. No new oversized-index provenance was emitted.
+
+The run stopped on its first restart. It collected no approved Free Roam,
+ordered-read/fetch trace phases, qualified FPS comparison or sampled profile.
+Executable, package metadata, development controls and game configuration were
+restored and verified; both pipeline-cache files match their original bytes.
+Private captures, crash archives and control files remain excluded from the PR.
+This latest failure remains unresolved; sustained memory stability and the
+40/60 FPS targets remain unmet.
+
+Submission-completion texture retirement (host verified; console pair queued)
+The texture cache normally retains deleted images, image views and framebuffers
+in eight-frame rings. Patch 0011 adds an opt-in alternative selected per boot by
+EDEN_PS5_COMPLETION_RETIREMENT=1. Deletion records the Vulkan scheduler's current
+submission tick, including commands still queued on its recording worker.
+Only IsFree(tick), the completed GPU timeline, permits reclamation. The scheduler
+advances the logical tick before queueing submission, so future recording does
+not reuse an earlier submission's completion. No extra submit or wait is added.
+Completed framebuffers, views and images are collected in that order before
+pressure accounting and another eviction pass. Pending image-download ownership
+and immediate-delete callers keep their existing behavior. Other backends and
+the default path retain frame-based destruction.
+
+Bounded retired-object telemetry reports image allocation bytes and object
+counts for either policy every 60 frames (at most 256 rows); these are diagnostic
+observations, not a physical-pool total. It does not count all driver/CPU memory.
+This experiment tests whether already-deleted images retain useful headroom;
+the prior logs do not prove that retained images caused the allocation failure.
+
+The actual queue/policy helper and extracted Vulkan runtime hooks pass ASan/UBSan
+and ThreadSanitizer for both modes, including unsubmitted worker ownership,
+delayed completion, move-only lifetimes, default/fallback frame policy and an
+independent 20,000-object lifetime model. Mock scheduler/GPU completion is not
+on-console Vulkan lifetime validation. Both normal and diagnostic full native
+sync/check/build/link/package chains pass with source checks enabled, each with
+179 core cases / 2,239,932 assertions. Eleven patches reproduce 147 core files.
+The unchanged diagnostic driver archive remains fdd18c8d492e9b7abf4324bfeacd4fb5b4134059f8c72ef7eb801b66c9c54e98.
+  Diagnostic eboot: e60341adc418c022575ab35b3806b7425680394943fa30f566b86ce0cfe253c8
+  Diagnostic ELF:   ecaa7dfa5ddb52aab0d047882c16432e8eb826ba94079c31c80f0f99ed9b00ee
+  Normal eboot:     cd389f7bba26131ae6323111f0733868b65d1dec105112e10de24d6e6c535fce
+  Normal ELF:       a84620df6e7c8f6f330145b36f0e4ad6de8545477c8adf48eff30fec067b19a7
+A single owned on/off pair using the frozen diagnostic artifact is queued behind
+live console tasks. The pair stops on its first failure and preserves/restores
+settings and persisted cache bytes. No console, memory or FPS gain is claimed.
+The normal artifact has not been console-tested.
+
+SDK completion-counter analysis (read-only; no guest-code patch)
+The existing six-patch run 1793691106480785666 contains 20 long scalar reads in
+20 captured frames. Nineteen read the same counter; 18 share one caller block.
+Local SDK build ID 7A68B13D88183767FB9C7BABFFE89F3D368752E2 matches that run's
+module log. All three decompressed NSO segment SHA256 hashes match their header.
+A focused ordinary LLVM disassembly (REA provider unavailable) identifies the
+32-bit completion-counter comparison and wait helper. X23 matches each of the
+19 counter addresses, and X24 holds its target. All 19 pre-queue value snapshots
+already satisfy the helper's signed-difference test, although 19 long reads also
+observe newer values after waiting. Thus a changing value alone does not prove
+that the reader needed to wait for that newer release.
+
+The recorded PC is caller/block context, not an exact load-instruction address.
+Pre-queue values are unsynchronized observations, not validated producer/range
+certificates. This supports auditing completed-range service and cache-lock
+rejections; it does not justify returning arbitrary stale data, removing waits
+or relaxing alias/remapping protection. No guest-code patch or CPU-read bypass
+was implemented. This run used lower GPU accuracy, where SignalFence can publish
+a payload before host GPU completion; the current fast path requires High
+accuracy. Satisfying the SDK target alone therefore cannot prove the host GPU
+producer finished. Retain that guard or require a real Vulkan completion
+certificate. Extracted game code and raw registers remain private.
+
+Retirement control validation correction
+Run 1793701562870756342 (PID 866, diagnostic e60341ad) stopped at its policy
+acknowledgement before any capture gate or Free Roam measurement. Runtime logs
+show completion=false: this MKW-only build does not parse dev-settings.txt env
+switches. The harness also expected numeric 1/0 while fmt prints true/false.
+The tested default-policy loading interval retained at most 1,966,080 measured
+image-allocation bytes; this is not a title/gameplay footprint or policy A/B.
+No application crash or performance conclusion is attributed to this harness
+failure. App/control/config restoration and cache-byte preservation verified.
+
+The corrected port reads mkw-texture-retirement-mode.txt once, under
+EDEN_MKW_DIAGNOSTICS, before renderer creation. Only exact value 1 enables the
+experiment; missing, malformed, out-of-range or trailing input forces zero,
+overriding an inherited environment value. The fixture compiles and runs the
+actual boot-selection block for these cases as well as both lifetime policies,
+under ASan/UBSan and TSan. The harness requires the boot acknowledgement and
+runtime policy log, with the correct boolean spelling, before measurement.
+Both corrected normal/diagnostic full native chains pass all required source
+checks/build/link/package and 179 core cases / 2,239,932 assertions each.
+  Diagnostic eboot: 42ae960f73310d336901872d5640a3aba25b623ade6e9c108621d697227d817d
+  Diagnostic ELF:   af5abb0af7091560e0b28d981f0263e8abf0cc9d08f4f85dffca621675043470
+  Normal eboot:     4f20e9fe50ecf9d0ebf3cc3705011e111b3d9d17d5028833116b4d2045e7139d
+  Normal ELF:       4cdd7a42b2e1a1c9345be3e029c76bf92b18541bb829996f753b3aa489740b02
+Core patches and the isolated driver archive are unchanged. The corrected
+on/off pair is queued as one lease; no duplicate old run or sampler reset is
+attempted. No completed retirement comparison or FPS/memory gain exists yet.

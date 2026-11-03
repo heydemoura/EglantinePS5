@@ -183,6 +183,7 @@ size_t __real_malloc_usable_size(const void *address) { return malloc_usable_siz
 // The range the heap grows in: unreadable until committed, so a piece used early faults.
 static int refuse_range;
 static atomic_size_t committed_bytes;
+static size_t commit_limit = (size_t)-1;
 void *eden_heap_reserve(size_t size) {
     if (refuse_range) return NULL;
     // The console's ranges are 2 MiB aligned; so is this one, wherever the host places a mapping
@@ -192,6 +193,7 @@ void *eden_heap_reserve(size_t size) {
     return address == MAP_FAILED ? NULL : (void *)(((uintptr_t)address + align - 1) & ~(uintptr_t)(align - 1));
 }
 int eden_heap_commit(void *address, size_t size) {
+    if (size > commit_limit) return -1;
     assert(((uintptr_t)address & 0x1fffff) == 0 && (size & 0x1fffff) == 0);
     if (mprotect(address, size, PROT_READ | PROT_WRITE) != 0) return -1;
     atomic_fetch_add(&committed_bytes, size);
@@ -371,7 +373,7 @@ static void *worker(void *argument) {
 
 int main(int argc, char **argv) {
     refuse_range = argc > 1 && strcmp(argv[1], "whole") == 0;
-    const size_t piece = (size_t)128 << 20, heap = (size_t)6144 << 20, whole = (size_t)3072 << 20;
+    const size_t piece = EDEN_HEAP_PIECE_SIZE, heap = (size_t)6144 << 20, whole = (size_t)3072 << 20;
     void *first = __wrap_malloc(100);
     assert(first != NULL);
     if (!refuse_range) {
@@ -380,6 +382,22 @@ int main(int argc, char **argv) {
         assert(__wrap_posix_memalign(&first, 24, 100) == EINVAL && eden_heap_committed() == piece);
     } else {
         assert(eden_heap_committed() == whole && atomic_load(&committed_bytes) == 0);
+    }
+    if (!refuse_range) {
+        // Shared-pool pressure can leave less than the former 128 MiB growth step.
+        commit_limit = (size_t)64 << 20;
+        assert(eden_heap_grow((size_t)16 << 20, atomic_load(&eden_heap_space_generation)));
+        assert(!eden_heap_grow((size_t)80 << 20, atomic_load(&eden_heap_space_generation)));
+        commit_limit = (size_t)-1;
+    }
+    // A packed arena's tail remains parent-owned, including for free/realloc routing.
+    for (unsigned slot = 0; slot < EDEN_HEAP_SLOTS; ++slot) {
+        void *arena = atomic_load(&eden_heap_slots[slot]);
+        if (arena == NULL) continue;
+        const uintptr_t begin = (((uintptr_t)ps5_heap_base >> EDEN_HEAP_ARENA_SHIFT) + slot) << EDEN_HEAP_ARENA_SHIFT;
+        assert(eden_heap_arena_owner((void *)(begin + EDEN_HEAP_ARENA_PAYLOAD - 1)) == arena);
+        assert(eden_heap_arena_owner((void *)(begin + EDEN_HEAP_ARENA_PAYLOAD)) == NULL);
+        assert(eden_heap_arena_owner((void *)(begin + EDEN_HEAP_ARENA_SIZE - 1)) == NULL);
     }
     pthread_t threads[8];
     for (uintptr_t i = 0; i < 8; ++i) assert(pthread_create(&threads[i], NULL, worker, (void *)(i + 1)) == 0);
@@ -390,9 +408,10 @@ int main(int argc, char **argv) {
     static unsigned char *kept[4][KEPT];
     const unsigned long long spills_before = spills_now();
     const unsigned arenas_before = eden_heap_arenas_created();
+    const unsigned arenas_per_keeper = (KEPT * (KEPT_SIZE + 64) + EDEN_HEAP_ARENA_PAYLOAD - 1) / EDEN_HEAP_ARENA_PAYLOAD + 1;
     keep_and_free(4, kept);
     const unsigned arenas_kept = eden_heap_arenas_created();
-    if (!(arenas_kept > arenas_before && arenas_kept <= arenas_before + 4 * 3 && spills_now() == spills_before)) {
+    if (!(arenas_kept > arenas_before && arenas_kept <= arenas_before + 4 * arenas_per_keeper && spills_now() == spills_before)) {
         fprintf(stderr, "keepers: arenas %u -> %u, small requests in the shared spaces %llu -> %llu\n",
                 arenas_before, arenas_kept, spills_before, spills_now());
         abort();
@@ -407,16 +426,28 @@ int main(int argc, char **argv) {
     // that fills it makes arenas of its own, and still none of its requests goes to the shared spaces.
     static unsigned char *crowd[40][KEPT];
     keep_and_free(40, crowd);
-    if (!(spills_now() == spills_before && eden_heap_arenas_created() <= arenas_kept + 40 * 3)) {
+    if (!(spills_now() == spills_before && eden_heap_arenas_created() <= arenas_kept + 40 * arenas_per_keeper)) {
         fprintf(stderr, "forty keepers: arenas %u -> %u, small requests in the shared spaces %llu -> %llu\n",
                 arenas_kept, eden_heap_arenas_created(), spills_before, spills_now());
         abort();
     }
     {
+        // Give trimming a dedicated multi-piece space. Random churn can fit entirely
+        // into holes in spaces pinned by persistent arenas, especially with small pieces.
+        // Over-alignment keeps this request in the heap rather than the large-block path.
+        void *reclaim_probe = NULL;
+        if (!refuse_range) {
+            assert(__wrap_posix_memalign(&reclaim_probe, (size_t)1 << 22, 2 * piece) == 0);
+            fill(reclaim_probe, 2 * piece, 19);
+        }
         pthread_t trim_thread, churners[6];
         atomic_store(&trimming, 1);
         assert(pthread_create(&trim_thread, NULL, trimmer, NULL) == 0);
         for (uintptr_t i = 0; i < 6; ++i) assert(pthread_create(&churners[i], NULL, churn, (void *)(i + 11)) == 0);
+        if (reclaim_probe != NULL) {
+            verify(reclaim_probe, 2 * piece, 19);
+            __wrap_free(reclaim_probe);
+        }
         for (int i = 0; i < 6; ++i) pthread_join(churners[i], NULL);
         atomic_store(&trimming, 0);
         pthread_join(trim_thread, NULL);
@@ -556,7 +587,9 @@ with tempfile.TemporaryDirectory(prefix='eden-heap-') as work:
                          (['-O2', '-fsanitize=thread'], 'thread sanitizer')):
         binary = work / ('heap-' + label.split()[0])
         subprocess.run(['clang-18', '-std=gnu11', '-pthread', '-Wall', '-Wextra', '-Wno-unused-function',
-                        '-Wno-unused-parameter', *flags, str(source), '-o', str(binary)], check=True)
+                        '-Wno-unused-parameter', *flags, str(source),
+                        '-Wl,--defsym,__eden_text_start=__executable_start',
+                        '-Wl,--defsym,__eden_text_end=etext', '-o', str(binary)], check=True)
         for mode in ((), ('whole',)):
             if label != 'checked' and mode:
                 continue

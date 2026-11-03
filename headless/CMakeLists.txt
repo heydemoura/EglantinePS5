@@ -1,3 +1,4 @@
+option(EDEN_MKW_DIAGNOSTICS "Enable Mario Kart development controls and capture instrumentation" OFF)
 option(EDEN_PS5_VULKAN "Build the native Vulkan renderer alongside OpenGL" OFF)
 set(EDEN_VULKAN_DRIVER "CUSTOM" CACHE STRING "Native Vulkan driver: CUSTOM or RADV")
 set_property(CACHE EDEN_VULKAN_DRIVER PROPERTY STRINGS CUSTOM RADV)
@@ -133,6 +134,16 @@ string(REPLACE "    to.impl->previous_fiber = weak_from.lock();"
     "    to.impl->previous_fiber = weak_from.lock();\n    ASSERT(to.impl->previous_fiber);\n    weak_from.reset();" fiber_source "${fiber_source}")
 string(REPLACE "    // \"from\" might no longer be valid if the thread was killed\n    if (auto from = weak_from.lock()) {"
     "    if (auto* from = static_cast<Fiber*>(transfer.data)) {" fiber_source "${fiber_source}")
+if(PS5_NATIVE)
+# Native fibers keep their 2MiB usable stack, but reserve it in the CPU flexible pool.
+# ThreadToFiber needs only context bookkeeping and allocates no unused private stack.
+string(REPLACE "    std::array<u8, DEFAULT_STACK_SIZE> stack{};"
+    "    ::Eden::FiberStack stack;" fiber_source "${fiber_source}")
+string(REPLACE "    impl->stack_limit = impl->stack.data();"
+    "    impl->stack.Allocate(DEFAULT_STACK_SIZE);\n    impl->stack_limit = impl->stack.data();"
+    fiber_source "${fiber_source}")
+string(PREPEND fiber_source "#include \"${EDEN_PORT_DIR}/fiber_stack.h\"\n")
+endif()
 write_derived("${PORT_BUILD_DIR}/fiber.cpp" "${fiber_source}")
 get_target_property(common_sources common SOURCES)
 list(REMOVE_ITEM common_sources fiber.cpp)
@@ -680,13 +691,29 @@ foreach(bits 32 64)
       # Only the active architecture allocates these caches; core3/host stay 16 MiB.
       if(PS5_NATIVE)
           if(bits EQUAL 64)
-              set(jit_cache_sizes "m_core_index == 0 ? 256_MiB : m_core_index < 3 ? 192_MiB : 16_MiB")
+              # Six active guest cores share the same 688 MiB total. A 16 MiB worker
+              # repeatedly clears every member's code through EdenClearGroup.
+              set(jit_cache_sizes "m_cb->m_process->IsSwitch2() ? (m_core_index == 0 ? 160_MiB : m_core_index == 1 ? 144_MiB : m_core_index < 6 ? 96_MiB : 16_MiB) : (m_core_index == 0 ? 256_MiB : m_core_index < 3 ? 192_MiB : 16_MiB)")
           else()
               set(jit_cache_sizes "m_core_index == 0 ? 512_MiB : m_core_index < 3 ? 64_MiB : 16_MiB")
           endif()
           string(REPLACE "std::uint32_t(16_MiB)" "std::uint32_t(${jit_cache_sizes})" wrapper "${wrapper}")
       endif()
     set(derived "${PORT_BUILD_DIR}/arm_dynarmic_${bits}.cpp")
+    # Temporary MKW dispatch-latency probe, without enabling the full DEV profile.
+    if(bits EQUAL 64)
+        set(mkw_exit_pc "m_jit->GetPC()")
+        set(mkw_slow_run "    ::Eden::Performance::MkwSlowRun(mkw_tid, ::Eden::Performance::NowNs(), ::Eden::Performance::NowNs() - mkw_start, static_cast<unsigned>(mkw_halt), *m_jit, m_cb->m_memory);\n")
+    else()
+        set(mkw_exit_pc "m_jit->Regs()[15]")
+        set(mkw_slow_run "")
+    endif()
+    if(EDEN_MKW_DIAGNOSTICS AND NOT EDEN_DEV_PROFILE)
+        string(PREPEND wrapper "#include \"${EDEN_PORT_DIR}/performance.h\"\n#include \"core/hle/kernel/k_thread.h\"\n")
+        string(REPLACE "    return TranslateHaltReason(m_jit->Run());"
+            "    const auto mkw_tid = thread ? thread->GetThreadId() : 0;\n    ::Eden::Performance::NoteRunning(mkw_tid, ::Eden::Performance::NowNs());\n    ::Eden::Performance::Timer mkw_run_timer(::Eden::Performance::mkw_guest_run[mkw_tid < 512 ? mkw_tid : 511]);\n    const auto mkw_start = ::Eden::Performance::NowNs();\n    const auto mkw_halt = m_jit->Run();\n    ::Eden::Performance::MkwRecordRunExit(mkw_tid, ${mkw_exit_pc}, ::Eden::Performance::NowNs() - mkw_start);\n${mkw_slow_run}    return TranslateHaltReason(mkw_halt);"
+            wrapper "${wrapper}")
+    endif()
     if(EDEN_DEV_PROFILE)
         string(PREPEND wrapper "#include \"${EDEN_PORT_DIR}/performance.h\"\n")
         if(bits EQUAL 64)
@@ -811,6 +838,15 @@ string(REPLACE "${idle_old}" [=[void PhysicalCore::Idle() {
 }
 
 ]=] physical_core_source "${physical_core_source}")
+if(NOT EDEN_DEV_PROFILE AND NOT EDEN_MKW_DIAGNOSTICS)
+    foreach(probe IN ITEMS
+            "    const long long start = ::Eden::Performance::NowNs();\n"
+            "    bool slept;\n"
+            "        slept = !m_is_interrupted;\n"
+            "    ::Eden::Performance::CountIdle(m_core_index, ::Eden::Performance::NowNs() - start, slept);\n")
+        string(REPLACE "${probe}" "" physical_core_source "${physical_core_source}")
+    endforeach()
+endif()
 string(REPLACE "${prefetch_old}"
     "            } else {\n                interface->LogBacktrace(process);\n                if (prefetch_abort)\n                    ::Eden::RecordGuestFault(\"guest thread \" + Core::GetThreadName(thread).value_or(\"?\") +\n                                             \" jumped to an unmapped address\");\n            }\n            thread->RequestSuspend(kernel, SuspendType::Debug);"
     physical_core_source "${physical_core_source}")
@@ -1390,6 +1426,7 @@ if(finish_offset LESS 0)
 endif()
 string(REPLACE "${old_finish}" "        {\n            KScopedSchedulerLock sl{kernel};\n            m_signaled = true;\n            KSynchronizationObject::NotifyAvailable(kernel);\n        }\n\n        // Finalization may block; scheduling must be enabled here.\n        this->Close(kernel);" thread_source "${thread_source}")
 
+if(EDEN_DEV_PROFILE OR EDEN_MKW_DIAGNOSTICS)
 # Which guest thread was blocked, on what, and for how long. A core with nothing to run reads the
 # same whether its thread is asleep until a timeout or waiting on something only the GPU thread can
 # signal, and only one of those is ours to fix. BeginWait stamps the thread; SetState is the single
@@ -1448,6 +1485,7 @@ string(REPLACE "${wait_end}" [=[    void KThread::SetState(KernelCore& kernel, T
             ::Eden::Performance::NoteRunnable(GetThreadId(), ::Eden::Performance::NowNs());
         }]=] thread_source "${thread_source}")
 
+endif()
 write_derived("${PORT_BUILD_DIR}/k_thread.cpp" "#include \"${EDEN_PORT_DIR}/performance.h\"\n${thread_source}")
 get_target_property(core_sources core SOURCES)
 list(REMOVE_ITEM core_sources hle/kernel/k_thread.cpp)
@@ -2063,7 +2101,14 @@ if(EDEN_PS5_OPENGL)
         gpu_thread_header "${gpu_thread_header}")
     string(REPLACE "    ~ThreadManager();" "    ~ThreadManager();\n    void Stop() { thread.request_stop(); if (thread.joinable()) thread.join(); }" gpu_thread_header "${gpu_thread_header}")
     if(PS5_NATIVE)
-        string(PREPEND gpu_thread_header "#include <pthread.h>\n")
+        string(PREPEND gpu_thread_header "#include <pthread.h>\n#include <condition_variable>\n")
+        string(FIND "${gpu_thread_header}" "    std::atomic<u64> signaled_fence{};" fence_member_at)
+        if(fence_member_at LESS 0)
+            message(FATAL_ERROR "Pinned GPU completion state changed")
+        endif()
+        string(REPLACE "    std::atomic<u64> signaled_fence{};"
+            "    std::atomic<u64> signaled_fence{};\n    std::mutex fence_mutex;\n    std::condition_variable_any fence_cv;"
+            gpu_thread_header "${gpu_thread_header}")
         string(REPLACE "    void Stop() { thread.request_stop(); if (thread.joinable()) thread.join(); }"
             "    void Stop();" gpu_thread_header "${gpu_thread_header}")
         string(REPLACE "    std::jthread thread;"
@@ -2117,8 +2162,48 @@ if(EDEN_PS5_OPENGL)
         string(REPLACE "    state.queue.EmplaceWait(std::move(command_data), fence, block,\n                            state.published_work_sequence.load(std::memory_order_acquire));"
             "    while (!stop_source.stop_requested() &&\n           !state.queue.TryEmplace(std::move(command_data), fence, block,\n                                  state.published_work_sequence.load(std::memory_order_acquire)))\n        std::this_thread::sleep_for(std::chrono::microseconds(100));\n    if (stop_source.stop_requested())\n        return state.signaled_fence.load(std::memory_order_relaxed);"
             gpu_worker "${gpu_worker}")
-        string(REPLACE "while (signaled < fence) {" "while (signaled < fence && !stop_source.stop_requested()) {" gpu_worker "${gpu_worker}")
-        string(REPLACE "state.signaled_fence.wait(signaled, std::memory_order_acquire);" "std::this_thread::sleep_for(std::chrono::microseconds(100));" gpu_worker "${gpu_worker}")
+        # A growable core queue publishes immediately; reject new work after native stop too.
+        string(REPLACE "if (state.shutting_down) {" "if (state.shutting_down || stop_source.stop_requested()) {" gpu_worker "${gpu_worker}")
+        # The new core completion targets one caller, with a stop-aware native wait.
+        # Keep the pinned legacy adaptation for older source revisions.
+        string(FIND "${gpu_worker}" "if (completion) completion->Wait();" targeted_wait_at)
+        if(NOT targeted_wait_at LESS 0)
+            string(REPLACE "if (completion) completion->Wait();"
+                "if (completion && !completion->Wait(stop_source.get_token())) return 0;"
+                gpu_worker "${gpu_worker}")
+        else()
+        # Ordered CPU reads must wake on completion, not pay a polling sleep for every read.
+        # A dedicated mutex makes publication and the wait predicate atomic with respect to
+        # parking. The stop-aware wait also wakes when shutdown cancels outstanding work.
+        set(fence_wait_old [=[        u64 signaled = state.signaled_fence.load(std::memory_order_acquire);
+        while (signaled < fence) {
+            state.signaled_fence.wait(signaled, std::memory_order_acquire);
+            signaled = state.signaled_fence.load(std::memory_order_acquire);
+        }]=])
+        string(FIND "${gpu_worker}" "${fence_wait_old}" fence_wait_at)
+        if(fence_wait_at LESS 0)
+            message(FATAL_ERROR "Pinned GPU completion wait changed")
+        endif()
+        string(REPLACE "${fence_wait_old}" [=[        std::unique_lock fence_lock{state.fence_mutex};
+        state.fence_cv.wait(fence_lock, stop_source.get_token(), [&] {
+            return state.signaled_fence.load(std::memory_order_acquire) >= fence;
+        });]=] gpu_worker "${gpu_worker}")
+        set(fence_signal_old [=[    state.signaled_fence.store(fence, std::memory_order_release);
+    if (block) {
+        state.signaled_fence.notify_all();
+    }]=])
+        string(FIND "${gpu_worker}" "${fence_signal_old}" fence_signal_at)
+        if(fence_signal_at LESS 0)
+            message(FATAL_ERROR "Pinned GPU completion signal changed")
+        endif()
+        string(REPLACE "${fence_signal_old}" [=[    {
+        std::lock_guard fence_lock{state.fence_mutex};
+        state.signaled_fence.store(fence, std::memory_order_release);
+    }
+    if (block) {
+        state.fence_cv.notify_all();
+    }]=] gpu_worker "${gpu_worker}")
+        endif()
         string(REPLACE "    state.queue.EmplaceWait(std::move(command_data), fence, block);"
             "    while (!stop_source.stop_requested() &&\n           !state.queue.TryEmplace(std::move(command_data), fence, block))\n        std::this_thread::sleep_for(std::chrono::microseconds(100));\n    if (stop_source.stop_requested())\n        return state.signaled_fence.load(std::memory_order_relaxed);"
             gpu_worker "${gpu_worker}")
@@ -2350,6 +2435,16 @@ list(APPEND common_sources "${PORT_BUILD_DIR}/multi_level_page_table.cpp")
     # Loose games can open thousands of files. Native PS5 file and mutex resources
     # run out before the reported RLIMIT_NOFILE; reserve room for the rest of the app.
     file(READ "${PROJECT_SOURCE_DIR}/src/core/file_sys/vfs/vfs_real.cpp" vfs_real_source)
+    # Extracted RomFS enumerates every directory twice. Avoid constructing a
+    # filesystem::directory_entry (lstat) then querying status and size again.
+    # Use getdents type information and one followed stat for each file size.
+    eden_patch(vfs_real_source
+        "std::vector<VirtualFile> RealVfsDirectory::GetFiles() const {\n    return IterateEntries<RealVfsFile, VfsFile>();\n}"
+        "std::vector<VirtualFile> RealVfsDirectory::GetFiles() const {\n    if (perms == OpenMode::AllowAppend) return {};\n    std::error_code error;\n    const auto entries = Eden::ReadNativeDirectoryMetadata(path, false, error);\n    if (error) { LOG_ERROR(Common_Filesystem, \"Directory enumeration failed: {}: {}\", path, error.message()); return {}; }\n    std::vector<VirtualFile> out;\n    out.reserve(entries.size());\n    for (const auto& entry : entries)\n        out.push_back(base.OpenFileFromEntry(FS::PathToUTF8String(entry.path), entry.size, path, perms));\n    return out;\n}")
+    eden_patch(vfs_real_source
+        "std::vector<VirtualDir> RealVfsDirectory::GetSubdirectories() const {\n    return IterateEntries<RealVfsDirectory, VfsDirectory>();\n}"
+        "std::vector<VirtualDir> RealVfsDirectory::GetSubdirectories() const {\n    if (perms == OpenMode::AllowAppend) return {};\n    std::error_code error;\n    const auto entries = Eden::ReadNativeDirectoryMetadata(path, true, error);\n    if (error) { LOG_ERROR(Common_Filesystem, \"Directory enumeration failed: {}: {}\", path, error.message()); return {}; }\n    std::vector<VirtualDir> out;\n    out.reserve(entries.size());\n    for (const auto& entry : entries)\n        out.push_back(base.OpenDirectory(FS::PathToUTF8String(entry.path), perms));\n    return out;\n}")
+    string(PREPEND vfs_real_source "#include \"${EDEN_PORT_DIR}/native_directory_metadata.h\"\n")
     eden_patch(vfs_real_source
         "    return (std::min)(size_t{8192}, limit);"
         "    return (std::min)(size_t{128}, limit);")
@@ -2527,7 +2622,8 @@ void Initialize() {
         "${EDEN_PORT_DIR}/elevation/elevation.cpp"
         "${eden_app_crt}" "${PORT_ROOT}/src/lifecycle.c" "${PORT_ROOT}/src/direct_memory.c"
         "${PORT_BUILD_DIR}/app_heap.c")
-    target_compile_definitions(eden-headless PRIVATE PS5_NATIVE=1)
+    target_compile_definitions(eden-headless PRIVATE PS5_NATIVE=1
+        $<$<BOOL:${EDEN_MKW_DIAGNOSTICS}>:EDEN_MKW_DIAGNOSTICS=1>)
     set_property(TARGET eden-headless APPEND PROPERTY LINK_DEPENDS
         "${PORT_ROOT}/tools/link-headless-native.sh" "${PORT_ROOT}/tools/unwind.ld"
         "${PORT_ROOT}/tools/app-symbols.map")
@@ -2894,4 +2990,12 @@ if(EDEN_DEV_VULKAN)
         message(FATAL_ERROR "EDEN_DEV_VULKAN requires Vulkan and an explicit development ROM ID")
     endif()
     target_compile_definitions(eden-headless PRIVATE EDEN_DEV_VULKAN=1)
+endif()
+
+# Temporary MKW sampler: retain the conversion caller chain without rebuilding every core file.
+if(PS5_NATIVE)
+    set_property(SOURCE "${PROJECT_SOURCE_DIR}/src/video_core/textures/decoders.cpp"
+        "${PROJECT_SOURCE_DIR}/src/video_core/texture_cache/util.cpp"
+        TARGET_DIRECTORY video_core APPEND PROPERTY COMPILE_OPTIONS
+            -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer)
 endif()

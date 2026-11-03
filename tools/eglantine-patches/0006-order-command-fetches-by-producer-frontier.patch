@@ -1,0 +1,288 @@
+diff --git a/src/video_core/dma_pusher.cpp b/src/video_core/dma_pusher.cpp
+index 97eb813d3c..eb96370cd8 100644
+--- a/src/video_core/dma_pusher.cpp
++++ b/src/video_core/dma_pusher.cpp
+@@ -912,7 +912,7 @@ bool DmaPusher::FlushGpuWrittenCommands(GPUVAddr address, size_t size) {
+     bool unknown = false;
+     Nx2SynchronizeGpuWrittenCommands(address, size,
+         [] {
+-            if (auto& split = VideoCommon::GpuSplit::Get(); split.Active()) split.Drain();
++            if (auto& split = VideoCommon::GpuSplit::Get(); split.Active()) split.DrainCommandReads();
+         },
+         [&](GPUVAddr page) {
+             const auto device = memory_manager.GpuToCpuAddress(page);
+diff --git a/src/video_core/engines/maxwell_3d.cpp b/src/video_core/engines/maxwell_3d.cpp
+index abbedf536d..2e72041269 100644
+--- a/src/video_core/engines/maxwell_3d.cpp
++++ b/src/video_core/engines/maxwell_3d.cpp
+@@ -966,7 +966,11 @@ void Maxwell3D::FrontWrite(VideoCommon::GpuSplit& split, FrontState& fs, u32 met
+         }
+     }
+     if (from_macro) {
+-        split.MacroWrite(this, method, argument);
++        // ConsumeSink can issue a deferred instanced draw. Keep that draw a hazard;
++        // only the front's existing mirror can prove this state write inert.
++        const bool may_write = VideoCommon::CommandWriteFrontier::StateWriteMayExecute(
++            !execution_mask[method], fs.draw_pending);
++        split.MacroWrite(this, method, argument, may_write);
+     } else {
+         split.Method(this, method, argument, is_last_call, nullptr);
+     }
+@@ -1074,7 +1078,9 @@ void Maxwell3D::FrontCallMultiMethod(Core::System& system, VideoCommon::GpuSplit
+             }
+         }
+     }
+-    split.MultiMethod(this, method, base_start, amount, methods_pending, nullptr);
++    const bool may_write = VideoCommon::CommandWriteFrontier::StateWriteMayExecute(
++        !execution_mask[method], fs.draw_pending);
++    split.MultiMethod(this, method, base_start, amount, methods_pending, nullptr, may_write);
+ }
+ 
+ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split,
+diff --git a/src/video_core/gpu_split.cpp b/src/video_core/gpu_split.cpp
+index fd7e308ecd..f2e76e763f 100644
+--- a/src/video_core/gpu_split.cpp
++++ b/src/video_core/gpu_split.cpp
+@@ -25,6 +25,10 @@
+ #include "video_core/nx2.h"
+ #include "video_core/nx2_profile.h"
+ 
++extern "C" bool eden_split_fetch_frontier_enabled() __attribute__((weak));
++extern "C" u64 eden_split_fetch_begin(u64, u64, u64, unsigned) __attribute__((weak));
++extern "C" void eden_split_fetch_end(u64) __attribute__((weak));
++
+ namespace VideoCommon {
+ 
+ namespace {
+@@ -137,6 +141,8 @@ void GpuSplit::Stop() {
+     // wrap at a time and never reached the old write position (the next game's first GPU work
+     // never ran, it waited on its syncpoint forever), and the engines it held were freed.
+     ring.reset();
++    command_writes.Reset();
++    completion.Reset();
+     write_position = 0;
+     published_local = 0;
+     consumed_cache = 0;
+@@ -196,15 +202,32 @@ void GpuSplit::Publish() {
+ }
+ 
+ void GpuSplit::Drain() {
++    DrainTo(write_position);
++}
++
++void GpuSplit::DrainCommandReads() {
++    if (!active) return;
++    const bool narrow = eden_split_fetch_frontier_enabled && eden_split_fetch_frontier_enabled();
++    const u64 target = narrow ? command_writes.Target() : write_position;
++    const u64 before = consumed.load(std::memory_order_acquire);
++    const u64 trace = eden_split_fetch_begin ? eden_split_fetch_begin(target, write_position, before, narrow) : ~u64{0};
++    DrainTo(target);
++    // A run of inert entries must still reach the back even if no producer wait was needed.
++    Publish();
++    if (trace != ~u64{0} && eden_split_fetch_end) eden_split_fetch_end(trace);
++}
++
++void GpuSplit::DrainTo(u64 target) {
+     consumed_cache = consumed.load(std::memory_order_acquire);
+-    if (consumed_cache == write_position) {
++    if (consumed_cache >= target) {
+         return;
+     }
++    completion.Request(target);
+     Publish();
+     Nx2Profile::Scope scope{Nx2Profile::Zone::SplitDrain};
+     for (u32 spins = 0;; ++spins) {
+         consumed_cache = consumed.load(std::memory_order_acquire);
+-        if (consumed_cache == write_position) {
++        if (consumed_cache >= target) {
+             publish_every = 8;
+             return;
+         }
+@@ -221,11 +244,11 @@ void GpuSplit::SwitchEngine(Tegra::Engines::EngineInterface* engine) {
+     u64* const entry = Reserve(2);
+     entry[0] = static_cast<u64>(Kind::Engine);
+     entry[1] = reinterpret_cast<u64>(engine);
+-    Commit(2);
++    Commit(2, false);
+ }
+ 
+ void GpuSplit::MultiMethod(Tegra::Engines::EngineInterface* engine, u32 method, const u32* words,
+-                           u32 amount, u32 methods_pending, const GPUVAddr* segment) {
++                           u32 amount, u32 methods_pending, const GPUVAddr* segment, bool may_write) {
+     SelectEngine(engine);
+     // Long runs (constant buffer and inline uploads) go in pieces, as when a method's data
+     // continues in the next GPFIFO entry.
+@@ -242,7 +265,7 @@ void GpuSplit::MultiMethod(Tegra::Engines::EngineInterface* engine, u32 method,
+         }
+         entry[size - 1] = 0;
+         std::memcpy(entry + head, words, size_t{piece} * sizeof(u32));
+-        Commit(size);
++        Commit(size, may_write);
+         words += piece;
+         amount -= piece;
+         methods_pending -= piece;
+@@ -348,7 +371,7 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
+             const size_t size = Execute(&ring[index]);
+             read_position += size != 0 ? size : RingWords - index;
+             // Hand ring space back now and then while working through a long batch.
+-            if (read_position - last_store >= 4096 && read_position != available) {
++            if (read_position != available && completion.ShouldPublish(read_position, last_store)) {
+                 consumed.store(read_position, std::memory_order_release);
+                 last_store = read_position;
+             }
+diff --git a/src/video_core/gpu_split.h b/src/video_core/gpu_split.h
+index ebd348d16d..93c2fb7712 100644
+--- a/src/video_core/gpu_split.h
++++ b/src/video_core/gpu_split.h
+@@ -11,6 +11,9 @@
+ #include <type_traits>
+ 
+ #include "common/common_types.h"
++#include "video_core/command_write_frontier.h"
++#include "video_core/split_completion.h"
++#include "video_core/engines/engine_interface.h"
+ 
+ namespace Core {
+ class System;
+@@ -68,17 +71,18 @@ public:
+         if (segment != nullptr) {
+             entry[1] = *segment;
+         }
+-        Commit(words);
++        Commit(words, method >= engine->execution_mask.size() || engine->execution_mask[method]);
+     }
+     void MultiMethod(Tegra::Engines::EngineInterface* engine, u32 method, const u32* words,
+-                     u32 amount, u32 methods_pending, const GPUVAddr* segment);
++                     u32 amount, u32 methods_pending, const GPUVAddr* segment, bool may_write = true);
+     /// A write made by a macro: CallMethod without the method sink, as the engines' macros do.
+-    void MacroWrite(Tegra::Engines::EngineInterface* engine, u32 method, u32 argument) {
++    void MacroWrite(Tegra::Engines::EngineInterface* engine, u32 method, u32 argument,
++                    bool may_write = true) {
+         SelectEngine(engine);
+         u64* const entry = Reserve(1);
+         entry[0] = static_cast<u64>(Kind::Method) | IsLast | Direct | (u64{method & 0xffff} << 8) |
+                    (u64{argument} << 32);
+-        Commit(1);
++        Commit(1, may_write);
+     }
+ 
+     /// Runs `func` on the back after everything sent before it. Must be trivially copyable.
+@@ -103,6 +107,9 @@ public:
+     void Publish();
+     /// Waits until the back executed everything sent so far.
+     void Drain();
++    /// Command-memory synchronization only: leave proven register-only tails queued.
++    /// The caller must not access engine registers or method sinks after this wait.
++    void DrainCommandReads();
+ 
+ private:
+     enum class Kind : u64 {
+@@ -136,8 +143,9 @@ private:
+         return ReserveSlow(words);
+     }
+     u64* ReserveSlow(size_t words);
+-    void Commit(size_t words) {
++    void Commit(size_t words, bool may_write = true) {
+         write_position += words;
++        command_writes.Commit(write_position, may_write);
+         if (write_position - published_local >= publish_every) {
+             Publish();
+         }
+@@ -150,6 +158,7 @@ private:
+     }
+     void SwitchEngine(Tegra::Engines::EngineInterface* engine);
+ 
++    void DrainTo(u64 target);
+     void BackLoop(std::stop_token stop_token);
+     size_t Execute(const u64* entry);
+ 
+@@ -159,6 +168,7 @@ private:
+     std::unique_ptr<u64[]> ring;
+ 
+     // Front side.
++    CommandWriteFrontier command_writes;
+     u64 write_position{};
+     u64 published_local{};
+     u64 consumed_cache{};
+@@ -174,6 +184,7 @@ private:
+ 
+     alignas(64) std::atomic<u64> published{};
+     alignas(64) std::atomic<u64> consumed{};
++    SplitCompletion completion;
+     alignas(64) std::atomic<bool> back_waiting{};
+     std::atomic<u32> wake{};
+     std::jthread back_thread;
+diff --git a/src/video_core/command_write_frontier.h b/src/video_core/command_write_frontier.h
+new file mode 100644
+index 0000000000..f6cf7f22d3
+--- /dev/null
++++ b/src/video_core/command_write_frontier.h
+@@ -0,0 +1,28 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++#pragma once
++
++#include "common/common_types.h"
++
++namespace VideoCommon {
++
++// Producer-owned ring position of the latest entry that could affect command
++// memory. Inert sink appends, engine switches and proven state-only writes may be
++// omitted. A direct 3D state write is NOT inert if it could flush a deferred draw.
++// Uploads, dispatches, draws, unknown methods and callbacks remain hazards.
++class CommandWriteFrontier {
++public:
++    static constexpr bool StateWriteMayExecute(bool state_only, bool deferred_draw_pending) {
++        return !state_only || deferred_draw_pending;
++    }
++
++    void Commit(u64 end, bool may_write) {
++        if (may_write) last_writer = end;
++    }
++    u64 Target() const { return last_writer; }
++    void Reset() { last_writer = 0; }
++
++private:
++    u64 last_writer{};
++};
++
++} // namespace VideoCommon
+diff --git a/src/video_core/split_completion.h b/src/video_core/split_completion.h
+new file mode 100644
+index 0000000000..a2231a3b99
+--- /dev/null
++++ b/src/video_core/split_completion.h
+@@ -0,0 +1,34 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++
++#pragma once
++
++#include <atomic>
++#include "common/common_types.h"
++
++namespace VideoCommon {
++
++// One front-side requester and one back-side publisher. The request is only a
++// notification hint; visibility of completed work still uses consumed's
++// release/acquire pair. Never acknowledge work merely because it was requested.
++class SplitCompletion {
++public:
++    void Request(u64 position) {
++        requested.store(position, std::memory_order_relaxed);
++    }
++
++    bool ShouldPublish(u64 completed, u64 last_published) const {
++        const u64 target = requested.load(std::memory_order_relaxed);
++        return completed - last_published >= 4096 ||
++               (last_published < target && completed >= target);
++    }
++
++    // Only after the back thread has stopped.
++    void Reset() {
++        requested.store(0, std::memory_order_relaxed);
++    }
++
++private:
++    alignas(64) std::atomic<u64> requested{};
++};
++
++} // namespace VideoCommon

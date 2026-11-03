@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "performance.h"
+#include "ordered_read_trace.h"
 #include "assets_dir.h"
 #include <glad/glad.h>
 #include <EGL/egl.h>
@@ -27,6 +28,8 @@
 #include "core/frontend/graphics_context.h"
 #include "core/perf_stats.h"
 #include "video_core/renderer_base.h"
+#include "video_core/gpu_split.h"
+#include "vulkan_loading_owner.h"
 
 // Match the SDK native application's shim: Mesa's C TLS is initialized by
 // compiler-rt; it has no additional C++ per-thread initializer.
@@ -58,7 +61,7 @@ HudClock vulkan_hud_clock;
 HudClock vulkan_hud_output_clock;
 HudSnapshot vulkan_hud;
 double vulkan_hud_stats_time{}, vulkan_hud_speed{};
-bool vulkan_loading{};
+std::atomic<bool> vulkan_loading{};
 double vulkan_loading_start{-1};
 unsigned vulkan_loading_frames{};
 LoadingPace vulkan_loading_pace;
@@ -505,24 +508,26 @@ HudSnapshot GetVulkanHud() {
 // idle: the GPU thread has no game commands waiting (hud.h, LoadingPace).
 bool LoadingTick(VideoCore::RendererBase& renderer, bool idle) {
 #ifdef EDEN_PS5_VULKAN
-    if (vulkan_loading) {
-        const double now = std::chrono::duration<double>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
-        const bool first = vulkan_loading_start < 0;
-        if (first) vulkan_loading_start = now;
-        if (vulkan_loading_pace.Due(now, idle)) {
-            vulkan_hud = MakeLoadingSnapshot(now - vulkan_loading_start + LoadingCalm());
-            PresentVulkanLoading(renderer);
-            ++vulkan_loading_frames;
-            if (first) sceSystemServiceHideSplashScreen();
-        }
-        return true;
+    if (vulkan_loading.load(std::memory_order_acquire)) {
+        auto& split = VideoCommon::GpuSplit::Get();
+        return RunVulkanLoadingOnOwner(split, vulkan_loading, [&renderer, idle] {
+            const double now = std::chrono::duration<double>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            const bool first = vulkan_loading_start < 0;
+            if (first) vulkan_loading_start = now;
+            if (vulkan_loading_pace.Due(now, idle)) {
+                vulkan_hud = MakeLoadingSnapshot(now - vulkan_loading_start + LoadingCalm());
+                PresentVulkanLoading(renderer);
+                ++vulkan_loading_frames;
+                if (first) sceSystemServiceHideSplashScreen();
+            }
+        });
     }
 #endif
     return current_window_context && current_window_context->LoadingTick(idle);
 }
 GraphicsWindow::GraphicsWindow(bool use_vulkan) : vulkan(use_vulkan) {
-    vulkan_loading = vulkan;
+    vulkan_loading.store(vulkan, std::memory_order_release);
     vulkan_loading_start = -1;
     vulkan_loading_frames = 0;
     vulkan_loading_pace = {};
@@ -636,7 +641,7 @@ void GraphicsWindow::OnFrameDisplayed() {
         if (vulkan_loading && vulkan_loading_start >= 0)
             std::printf("EDEN_LOADING_DONE frames=%u seconds=%.2f\n", vulkan_loading_frames,
                         now - vulkan_loading_start);
-        vulkan_loading = false;
+        vulkan_loading.store(false, std::memory_order_release);
 #ifdef EDEN_PS5_VULKAN
         vulkan_hud_clock.Present(now);
         if (system && now - vulkan_hud_stats_time >= 1.0) {
@@ -649,6 +654,9 @@ void GraphicsWindow::OnFrameDisplayed() {
                             RoomPingMilliseconds());
 #endif
         ++frame_total;
+        Eden::OrderedReadTrace::Frame(frame_total,
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
         // What a recorded controller session counts frames by (gameplay_test.h): the input
         // worker runs on another thread, so it reads a copy rather than the member.
         Display::gameplay_frame.store(frame_total, std::memory_order_relaxed);

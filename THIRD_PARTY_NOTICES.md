@@ -14,7 +14,17 @@ builds on the following projects, each under its own license.
   zone data. Each keeps its upstream license.
 - **[Zortos Eglantine fork](https://github.com/zortos293/Eglantine)**,
   GPL-3.0-or-later. Referenced directly by the `Eglantine` submodule, including its
-  core, native shader, readback, service, runtime and test changes.
+  core, native shader, readback, service, runtime and test changes. The maintained
+  Mario Kart performance patch also carries later core adaptations/backports;
+  upstream source retains its GPL-3.0-or-later notices.
+  The opt-in bounded command snapshots adapt kraibse's `cce6d44af2`
+  (ported upstream from Wael3rd/Eglantine-MKW `bd3119a86f`) and the
+  GPU-written/snapshot ordering corrections in `6612817cb4` and `fae3bc64`.
+  The opt-in command-fetch frontier experiment adapts the producer frontier,
+  completion hint and conservative state-write classification from Zortos commit
+  `d7ce3d8c0881fc605974d4747573e8a1fcadb37f`, GPL-3.0-or-later.
+  Fence-copy invalidation and per-write rasterizer protection adapt the source
+  at `5bef7354b464a38527864756814cc6e0f0fc6567`, GPL-3.0-or-later.
 - **[Catch2](https://github.com/catchorg/Catch2)**, BSL-1.0. Used by the focused
   host regression check at the version and source hash pinned by the core.
 - **[FFmpeg](https://ffmpeg.org)**, LGPL-2.1-or-later. Built from Eden's pinned

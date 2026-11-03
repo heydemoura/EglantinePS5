@@ -13,6 +13,9 @@ jobs=${EDEN_BUILD_JOBS:-$(nproc)}
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 command -v ninja >/dev/null
 cache=$(command -v ccache)
+# New generated headers can shadow an upstream include absent from an older
+# direct-mode manifest. Reprocess includes so cached objects retain one layout.
+export CCACHE_NODIRECT=1
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
 bash tools/build-core-fixture.sh
@@ -47,6 +50,7 @@ cmake -S "$scratch/source" -B "$scratch/native-local" -G Ninja \
     -DEDEN_DEV_VULKAN="${EDEN_DEV_VULKAN:-OFF}" \
     -DCMAKE_C_COMPILER_LAUNCHER="$cache" -DCMAKE_CXX_COMPILER_LAUNCHER="$cache" \
     -DEDEN_DEV_ROM_ID="${EDEN_DEV_ROM_ID:-}" \
+    -DEDEN_MKW_DIAGNOSTICS="${EDEN_MKW_DIAGNOSTICS:-OFF}" \
     -DEDEN_DEV_PROFILE="${EDEN_DEV_PROFILE:-OFF}" \
     -DEDEN_DEV_PROFILE_TITLE="${EDEN_DEV_PROFILE_TITLE:-$(cat "$root/.local/dev-profile-title" 2>/dev/null || true)}" \
     -DEDEN_DEV_WAIT_CALLERS="${EDEN_DEV_WAIT_CALLERS:-OFF}" \
@@ -70,6 +74,24 @@ cmake --build "$scratch/native-local" --target eden-headless core -j "$jobs"
 # In every build: an object that saw Eden's own table header would write a table the rest keeps sparse.
 python3 -B "$root/tools/check-sparse-header.py" "$scratch/native-local"
 python3 -B "$root/tools/check-multiplayer-headers.py" "$scratch/native-local"
+if [[ "${EDEN_PS5_VULKAN:-OFF}" == ON ]]; then
+    python3 -B "$root/tools/check-vulkan-handoff.py"
+    python3 -B "$root/tools/check-transient-images.py"
+    python3 -B "$root/tools/check-native-allocator-header.py"
+    python3 -B "$root/tools/check-gpu-time-probe.py"
+    python3 -B "$root/tools/check-fence-requirements.py"
+    python3 -B "$root/tools/check-fence-readback-integrity.py"
+    python3 -B "$root/tools/check-vulkan-loading-owner.py"
+    python3 -B "$root/tools/check-texture-retirement.py"
+    python3 -B "$root/tools/check-download-copy-batches.py"
+    python3 -B "$root/tools/check-mapped-producer-wait.py"
+    python3 -B "$root/tools/check-submitted-commands.py"
+    python3 -B "$root/tools/check-split-command-frontier.py"
+    python3 -B "$root/tools/check-split-fetch-trace.py"
+    python3 -B "$root/tools/check-memory-probes.py"
+    python3 -B "$root/tools/check-pipeline-preload.py"
+    python3 -B "$root/tools/check-shader-module-cache.py"
+fi
 # Source checks of the release configuration (development builds opt out: EDEN_SKIP_SOURCE_CHECKS=1).
 [[ ${EDEN_SKIP_SOURCE_CHECKS:-0} == 1 ]] && exit 0
 python3 -B "$root/headless/check_audio_shutdown.py" "$scratch/native-local/headless/core.cpp" "$scratch/source/src/core/core.cpp"
@@ -101,6 +123,9 @@ fi
 if [[ "$graphics" == ON ]]; then
     python3 -B "$root/tools/check-native-gpu-thread.py"
     python3 -B "$root/tools/check-gpu-producer-stop.py"
+    if [[ "${EDEN_PS5_VULKAN:-OFF}" == ON ]]; then
+        python3 -B "$root/tools/check-staging-pressure.py"
+    fi
     python3 -B "$root/tools/check-gpu-sync-stop.py"
     python3 -B "$root/tools/check-nvdrv-process-lifetime.py"
     python3 -B "$root/tools/check-integer-buffer-clear.py"

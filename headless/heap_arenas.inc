@@ -4,7 +4,7 @@
  * the GPU. The heap used to take its whole 3 GiB at start; the largest game measured used
  * 1.16 GiB of it, and the rest was graphics memory that game then ran out of. So the heap now
  * reserves its range (6 GiB, PS5_OPENGL_HEAP_SIZE) as address space only and commits it a piece
- * (128 MiB) at a time, from the start of the range, when an allocation finds no room. Where no
+ * (32 MiB) at a time, from the start of the range, when an allocation finds no room. Where no
  * range can be reserved, it takes 3 GiB at once, as it did before it grew. Every piece (or run of pieces, for one
  * request larger than a piece) is a Sony mspace of its own; an address tells its piece, and
  * the piece its mspace. Memory is not given back: a piece stays for the next game.
@@ -61,8 +61,11 @@
 #include <stdio.h>
 #include <string.h>
 
-#define EDEN_HEAP_ARENA_SHIFT 23u /* 8 MiB arenas and slots */
+#define EDEN_HEAP_ARENA_SHIFT 21u /* 2 MiB arenas and slots */
 #define EDEN_HEAP_ARENA_SIZE (1u << EDEN_HEAP_ARENA_SHIFT)
+/* Leave room for the parent mspace's chunk metadata before the next aligned slot.
+ * A full-slot payload forces the next aligned allocation to skip a whole slot. */
+#define EDEN_HEAP_ARENA_PAYLOAD (EDEN_HEAP_ARENA_SIZE - 16384u)
 /* Absolute 8 MiB slots covering the heap (+1: the base need not be slot aligned). */
 #define EDEN_HEAP_SLOTS ((PS5_OPENGL_HEAP_SIZE >> EDEN_HEAP_ARENA_SHIFT) + 1u)
 /* Threads that get an arena of their own at their first small request; later ones share them. */
@@ -70,9 +73,9 @@
 /* Every arena, with those made because a thread's were full: at most 2 GiB of the heap's 6 GiB. An
  * arena stays with its thread's record when its blocks are freed (the next thread on the record
  * uses it), so this is also the most the heap keeps for small blocks alone. */
-#define EDEN_HEAP_MAX_ARENAS 256u
+#define EDEN_HEAP_MAX_ARENAS 1024u
 /* One thread's arenas: at most 256 MiB of small blocks before they go to the heap's spaces. */
-#define EDEN_HEAP_THREAD_ARENAS 32u
+#define EDEN_HEAP_THREAD_ARENAS 128u
 /* A request this large or larger that finds no room in the thread's arenas makes no new one. */
 #define EDEN_HEAP_ARENA_GROW_REQUEST (64u * 1024u)
 /* After a thread found all its arenas full and could make no other, the requests it makes before
@@ -81,7 +84,7 @@
 /* Larger requests (and all over-aligned ones) always use the heap's own spaces. */
 #define EDEN_HEAP_SMALL_REQUEST (256u * 1024u)
 /* The heap grows by pieces of this size. */
-#define EDEN_HEAP_PIECE_SHIFT 27u /* 128 MiB */
+#define EDEN_HEAP_PIECE_SHIFT 25u /* 32 MiB: share remaining memory with graphics in smaller steps */
 #define EDEN_HEAP_PIECE_SIZE ((size_t)1 << EDEN_HEAP_PIECE_SHIFT)
 #define EDEN_HEAP_PIECES (PS5_OPENGL_HEAP_SIZE >> EDEN_HEAP_PIECE_SHIFT)
 
@@ -94,6 +97,8 @@ void eden_heap_split_pages_free(void *address, size_t size);
 
 static void *_Atomic eden_heap_slots[EDEN_HEAP_SLOTS]; /* arena mspace owning each slot */
 static void *eden_heap_arena_list[EDEN_HEAP_MAX_ARENAS];
+static void *_Atomic eden_heap_arena_blocks_probe[EDEN_HEAP_MAX_ARENAS];
+static atomic_size_t eden_heap_arena_backing_probe;
 static atomic_uint eden_heap_arena_count;
 static unsigned eden_heap_first_arenas; /* first arenas made (under the creation lock) */
 static atomic_uint eden_heap_next_shared;
@@ -452,10 +457,16 @@ static uintptr_t eden_heap_slot(const void *address) {
          ((uintptr_t)ps5_heap_base >> EDEN_HEAP_ARENA_SHIFT);
 }
 
+/* The slot tail belongs to the parent mspace and can hold ordinary allocations. */
+static void *eden_heap_arena_owner(const void *address) {
+  if (((uintptr_t)address & (EDEN_HEAP_ARENA_SIZE - 1u)) >= EDEN_HEAP_ARENA_PAYLOAD)
+    return NULL;
+  return atomic_load_explicit(&eden_heap_slots[eden_heap_slot(address)], memory_order_acquire);
+}
+
 /* The mspace owning an owned block: its slot's arena, else the space of its piece. */
 static void *eden_heap_owner(const void *address) {
-  const uintptr_t slot = eden_heap_slot(address);
-  void *arena = atomic_load_explicit(&eden_heap_slots[slot], memory_order_acquire);
+  void *arena = eden_heap_arena_owner(address);
   if (arena != NULL)
     return arena;
   const uintptr_t piece = ((uintptr_t)address - (uintptr_t)ps5_heap_base) >> EDEN_HEAP_PIECE_SHIFT;
@@ -476,7 +487,7 @@ static void eden_heap_space_free(void *address) {
 
 /* Frees an owned block (not a large one) to its arena or its space. */
 static void eden_heap_free_owned(void *address) {
-  void *arena = atomic_load_explicit(&eden_heap_slots[eden_heap_slot(address)], memory_order_acquire);
+  void *arena = eden_heap_arena_owner(address);
   if (arena != NULL)
     sceLibcMspaceFree(arena, address);
   else
@@ -716,12 +727,14 @@ static void *eden_heap_create_arena(int first) {
   void *arena = NULL;
   const unsigned count = atomic_load_explicit(&eden_heap_arena_count, memory_order_relaxed);
   if (count < EDEN_HEAP_MAX_ARENAS && (!first || eden_heap_first_arenas < EDEN_HEAP_FIRST_ARENAS)) {
-    void *block = eden_heap_main(EDEN_HEAP_ALIGNED, EDEN_HEAP_ARENA_SIZE, EDEN_HEAP_ARENA_SIZE);
+    void *block = eden_heap_main(EDEN_HEAP_ALIGNED, EDEN_HEAP_ARENA_SIZE, EDEN_HEAP_ARENA_PAYLOAD);
     if (block != NULL) {
-      arena = sceLibcMspaceCreate("Eden-arena", block, EDEN_HEAP_ARENA_SIZE, 0);
+      arena = sceLibcMspaceCreate("Eden-arena", block, EDEN_HEAP_ARENA_PAYLOAD, 0);
       if (arena != NULL) {
         const uintptr_t slot = eden_heap_slot(block);
         eden_heap_arena_list[count] = arena;
+        eden_heap_arena_blocks_probe[count] = block;
+        atomic_fetch_add_explicit(&eden_heap_arena_backing_probe, sceLibcMspaceMallocUsableSize(block), memory_order_relaxed);
         atomic_store_explicit(&eden_heap_slots[slot], arena, memory_order_release);
         atomic_store_explicit(&eden_heap_arena_count, count + 1, memory_order_release);
         if (first)
@@ -873,7 +886,7 @@ static void *eden_heap_spill(size_t count, size_t size, int zero) {
 /* Gives an owned block back to its arena, or to the heap's space, counting the latter (its lock is
  * the one every thread shares). */
 static void eden_heap_release(void *address) {
-  void *arena = atomic_load_explicit(&eden_heap_slots[eden_heap_slot(address)], memory_order_acquire);
+  void *arena = eden_heap_arena_owner(address);
   if (arena != NULL) {
     sceLibcMspaceFree(arena, address);
     return;

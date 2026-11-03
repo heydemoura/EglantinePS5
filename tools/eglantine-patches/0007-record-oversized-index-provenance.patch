@@ -1,0 +1,79 @@
+diff --git a/src/video_core/buffer_cache/buffer_cache.h b/src/video_core/buffer_cache/buffer_cache.h
+index ca6e2cd2f8..fe3740965f 100644
+--- a/src/video_core/buffer_cache/buffer_cache.h
++++ b/src/video_core/buffer_cache/buffer_cache.h
+@@ -1509,6 +1509,7 @@ void BufferCache<P>::UpdateIndexBuffer() {
+                 static_cast<unsigned long long>(gpu_addr_begin), static_cast<unsigned long long>(gpu_addr_end),
+                 static_cast<unsigned long long>(device_addr.value_or(0)), index_buffer_ref.first, index_buffer_ref.count,
+                 unsigned(index_buffer_ref.FormatSizeInBytes()), address_size, draw_size, size);
++            if (size >= 256_MiB) maxwell3d->DumpIndexState();
+         }
+     }
+     if (size == 0 || !device_addr) {
+diff --git a/src/video_core/engines/maxwell_3d.cpp b/src/video_core/engines/maxwell_3d.cpp
+index 2e72041269..e68e6864cf 100644
+--- a/src/video_core/engines/maxwell_3d.cpp
++++ b/src/video_core/engines/maxwell_3d.cpp
+@@ -6,6 +6,8 @@
+ 
+ #include <algorithm>
+ #include <array>
++#include <atomic>
++#include <cstdio>
+ #include <cstring>
+ #include <limits>
+ #include <optional>
+@@ -455,6 +457,39 @@ void Maxwell3D::TraceFirstMethodWrite(u32 method, u32 argument) {
+     }
+ }
+ 
++void Maxwell3D::DumpIndexState() const {
++    static std::atomic_flag reported = ATOMIC_FLAG_INIT;
++    if (reported.test_and_set(std::memory_order_relaxed)) return;
++    const auto& raw = regs.index_buffer;
++    const auto& draw = draw_manager.draw_state;
++    const auto& copy = draw.index_buffer;
++    std::fprintf(stderr,
++        "MKW_INDEX_ORIGIN regs_start=%llx regs_end=%llx regs_format=%u regs_first=%08x regs_count=%08x "
++        "draw_start=%llx draw_end=%llx draw_format=%u draw_first=%08x draw_count=%08x "
++        "mode=%u indexed=%u instances=%u base_index=%u base_instance=%u writes=%llu\n",
++        static_cast<unsigned long long>(raw.StartAddress()),
++        static_cast<unsigned long long>(raw.EndAddress()), unsigned(raw.format), raw.first, raw.count,
++        static_cast<unsigned long long>(copy.StartAddress()),
++        static_cast<unsigned long long>(copy.EndAddress()), unsigned(copy.format), copy.first, copy.count,
++        unsigned(draw.draw_mode), unsigned(draw.draw_indexed), draw.instance_count,
++        draw.base_index, draw.base_instance, static_cast<unsigned long long>(recent_write_index));
++    const auto& shadow = shadow_state.index_buffer;
++    std::fprintf(stderr,
++        "MKW_INDEX_SHADOW control=%u start=%llx end=%llx format=%u first=%08x count=%08x\n",
++        unsigned(shadow_state.shadow_ram_control),
++        static_cast<unsigned long long>(shadow.StartAddress()),
++        static_cast<unsigned long long>(shadow.EndAddress()),
++        unsigned(shadow.format),shadow.first,shadow.count);
++    const size_t begin = recent_write_index > recent_writes.size()
++                             ? recent_write_index - recent_writes.size() : 0;
++    for (size_t index = begin; index < recent_write_index; ++index) {
++        const auto& write = recent_writes[index % recent_writes.size()];
++        std::fprintf(stderr, "MKW_INDEX_RECENT sequence=%llu method=%04x raw=%08x amount=%u pending=%u\n",
++            static_cast<unsigned long long>(index),write.method,write.argument,write.amount,write.pending);
++    }
++    std::fflush(stderr);
++}
++
+ void Maxwell3D::CallMethod(Core::System& system, u32 method, u32 method_argument, bool is_last_call) {
+     // It is an error to write to a register other than the current macro's ARG register before
+     // it has finished execution.
+diff --git a/src/video_core/engines/maxwell_3d.h b/src/video_core/engines/maxwell_3d.h
+index 17d0491d98..15c5676678 100644
+--- a/src/video_core/engines/maxwell_3d.h
++++ b/src/video_core/engines/maxwell_3d.h
+@@ -3163,6 +3163,9 @@ public:
+ 
+     void TraceFirstMethodWrite(u32 method, u32 argument);
+ 
++    /// Bounded failure-only provenance; reads only this GPU owner's recorded state.
++    void DumpIndexState() const;
++
+     /// GPU memory, for Turing macros that read memory into their FIFO or data RAM.
+     MemoryManager& GetMemoryManager() {
+         return memory_manager;

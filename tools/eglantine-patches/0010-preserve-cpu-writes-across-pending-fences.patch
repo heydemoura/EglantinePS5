@@ -1,0 +1,198 @@
+diff --git a/src/core/memory.cpp b/src/core/memory.cpp
+index 74f2ea3afb..b3fc478e2b 100644
+--- a/src/core/memory.cpp
++++ b/src/core/memory.cpp
+@@ -34,6 +34,7 @@
+ #include "core/hle/kernel/k_process.h"
+ #include "core/memory.h"
+ #include "core/memory/read_traps.h"
++#include "core/memory/rasterizer_write.h"
+ #include "core/memory/readback_cache.h"
+ #include "core/memory/readback_diagnostics.h"
+ #include "core/memory/core_readback_shadow.h"
+@@ -1099,30 +1100,13 @@ struct Memory::Impl {
+             }
+         };
+         system.Host1x().MemoryManager().ApplyOpOnPointer(p, scratch_buffers[core], [&](DAddr address) {
+-            auto& current_area = rasterizer_write_areas[core];
+-            PAddr subaddress = address >> YUZU_PAGEBITS;
+-            // Performance note:
+-            // It may not be a good idea to assume accesses are within the same subaddress (i.e same page)
+-            // It is often the case the games like to access wildly different addresses. Hence why I propose
+-            // we should let the compiler just do it's thing...
+-            if (current_area.last_address != subaddress) {
+-                // Short circuit the need to check for address/size
+-                auto const do_collection = (address != 0 && size != 0)
+-                    && system.GPU().OnCPUWrite(address, size);
+-                if (do_collection) {
+-                    current_area.last_address = subaddress;
+-                } else {
+-                    return;
+-                }
+-            }
+-            gpu_dirty_managers[core].Collect(address, size);
++            RecordRasterizerWrite(
++                address, size,
++                [&](DAddr at, size_t length) { return system.GPU().OnCPUWrite(at, length); },
++                [&](DAddr at, size_t length) { gpu_dirty_managers[core].Collect(at, length); });
+         });
+     }
+ 
+-    struct GPUDirtyState {
+-        PAddr last_address;
+-    };
+-
+     void InvalidateGPUMemory(u8* p, size_t size) {
+         constexpr size_t sys_core = Core::Hardware::NUM_CPU_CORES - 1;
+         const size_t core = (std::min)(system.GetCurrentHostThreadID(),
+@@ -1154,7 +1138,6 @@ struct Memory::Impl {
+     static inline std::atomic<u64> next_readback_owner{1};
+     const u64 readback_owner{next_readback_owner.fetch_add(1, std::memory_order_relaxed)};
+     std::mutex read_trap_mutex;
+-    std::array<GPUDirtyState, Core::Hardware::NUM_CPU_CORES> rasterizer_write_areas{};
+     std::array<Common::ScratchBuffer<u32>, Core::Hardware::NUM_CPU_CORES> scratch_buffers{};
+     std::span<Core::GPUDirtyMemoryManager> gpu_dirty_managers;
+     std::mutex sys_core_guard;
+diff --git a/src/core/memory/rasterizer_write.h b/src/core/memory/rasterizer_write.h
+new file mode 100644
+index 0000000000..531cd610d6
+--- /dev/null
++++ b/src/core/memory/rasterizer_write.h
+@@ -0,0 +1,19 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++#pragma once
++
++#include <cstddef>
++#include "common/common_types.h"
++
++namespace Core::Memory {
++
++// Every write must invalidate overlapping pending fence copies before it is
++// collected. A previous write to the same page protects only its own bytes;
++// even repeating those bytes needs protection if another fence was queued.
++template <typename Protect, typename Collect>
++void RecordRasterizerWrite(DAddr address, size_t size, Protect&& protect, Collect&& collect) {
++    if (address != 0 && size != 0 && protect(address, size)) {
++        collect(address, size);
++    }
++}
++
++} // namespace Core::Memory
+diff --git a/src/video_core/buffer_cache/buffer_cache.h b/src/video_core/buffer_cache/buffer_cache.h
+index fe3740965f..0b96b2d876 100644
+--- a/src/video_core/buffer_cache/buffer_cache.h
++++ b/src/video_core/buffer_cache/buffer_cache.h
+@@ -25,6 +25,7 @@
+ #include "video_core/nx2_profile.h"
+ #include "video_core/cache_tracking_diagnostics.h"
+ #include "video_core/readback_dependency_diagnostics.h"
++#include "video_core/buffer_cache/fence_download_invalidation.h"
+ #include "video_core/readback_diagnostics.h"
+ #include "video_core/texture_cache/util.h"
+ 
+@@ -246,6 +247,8 @@ bool BufferCache<P>::OnCPUWrite(DAddr device_addr, u64 size) {
+         return false;
+     }
+     if (memory_tracker.IsRegionGpuModified(device_addr, size)) {
++        // Protect the actual CPU store now; its upload to the GPU buffer is deferred.
++        ClearDownload(device_addr, size);
+         return true;
+     }
+     WriteMemory(device_addr, size);
+@@ -281,11 +284,8 @@ void BufferCache<P>::DownloadMemory(DAddr device_addr, u64 size) {
+ 
+ template <class P>
+ void BufferCache<P>::ClearDownload(DAddr device_addr, u64 size) {
+-    async_downloads.DeleteAll(device_addr, size);
+-    uncommitted_gpu_modified_ranges.Subtract(device_addr, size);
+-    for (auto& interval_set : committed_gpu_modified_ranges) {
+-        interval_set.Subtract(device_addr, size);
+-    }
++    DropFenceDownloads(device_addr, size, pending_downloads, async_downloads,
++                       uncommitted_gpu_modified_ranges, committed_gpu_modified_ranges);
+ }
+ 
+ template <class P>
+diff --git a/src/video_core/buffer_cache/fence_download_invalidation.h b/src/video_core/buffer_cache/fence_download_invalidation.h
+new file mode 100644
+index 0000000000..528cf2894d
+--- /dev/null
++++ b/src/video_core/buffer_cache/fence_download_invalidation.h
+@@ -0,0 +1,77 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++
++#pragma once
++
++#include <algorithm>
++#include <cstddef>
++#include <deque>
++
++#include "common/common_types.h"
++#include "common/range_sets.inc"
++
++namespace VideoCommon {
++
++/// Forget every fence copy of [address, address + size) that is not yet written back to guest
++/// memory, and every queued selection that would take one. Used when guest memory there gets
++/// newer contents than the GPU buffer's (a CPU write, an inline upload, a sync download).
++///
++/// fence_copies: each pending fence's copies, oldest first ({src_offset = device address,
++/// dst_offset = staging offset, size}; disjoint within a fence). pending_writebacks counts, per
++/// byte, the pending fences whose copies cover it. The bytes are cut out of every pending
++/// fence's copies, so each count stays exact. Deleting them from the counts alone was wrong once
++/// a later fence copied the same bytes again: the older fence then found the newer fence's count,
++/// wrote its stale copy back over the newer guest contents and retired the bytes' GPU
++/// modification, after which the newer fence found nothing left to write.
++template <typename CopyList>
++void DropFenceDownloads(DAddr address, u64 size, std::deque<CopyList>& fence_copies,
++                        Common::OverlapRangeSet<DAddr>& pending_writebacks,
++                        Common::RangeSet<DAddr>& uncommitted,
++                        std::deque<Common::RangeSet<DAddr>>& committed) {
++    if (size == 0) {
++        return;
++    }
++    bool is_pending = false;
++    pending_writebacks.ForEachInRange(address, size, [&](DAddr, DAddr, s32) { is_pending = true; });
++    if (is_pending) {
++        const DAddr end = address + size;
++        for (auto& copies : fence_copies) {
++            for (size_t index = 0; index < copies.size();) {
++                const auto copy = copies[index];
++                const DAddr copy_begin = static_cast<DAddr>(copy.src_offset);
++                const DAddr copy_end = copy_begin + copy.size;
++                if (copy_end <= address || end <= copy_begin) {
++                    ++index;
++                    continue;
++                }
++                const DAddr cut_begin = (std::max)(copy_begin, address);
++                const DAddr cut_end = (std::min)(copy_end, end);
++                pending_writebacks.Subtract(cut_begin, cut_end - cut_begin);
++                auto left = copy;
++                left.size = cut_begin - copy_begin;
++                auto right = copy;
++                right.src_offset = cut_end;
++                right.dst_offset = copy.dst_offset + (cut_end - copy_begin);
++                right.size = copy_end - cut_end;
++                if (left.size != 0 && right.size != 0) {
++                    copies[index] = left;
++                    copies.insert(copies.begin() + static_cast<std::ptrdiff_t>(index + 1), right);
++                    index += 2;
++                } else if (left.size != 0) {
++                    copies[index] = left;
++                    ++index;
++                } else if (right.size != 0) {
++                    copies[index] = right;
++                    ++index;
++                } else {
++                    copies.erase(copies.begin() + static_cast<std::ptrdiff_t>(index));
++                }
++            }
++        }
++    }
++    uncommitted.Subtract(address, size);
++    for (auto& ranges : committed) {
++        ranges.Subtract(address, size);
++    }
++}
++
++} // namespace VideoCommon

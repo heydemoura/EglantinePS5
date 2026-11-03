@@ -25,7 +25,8 @@ void CheckEnvironment(std::ifstream& file, std::streamoff end) {
 void LoadPipelines(
     std::stop_token stop_loading, const std::filesystem::path& filename, u32 expected_cache_version,
     Common::UniqueFunction<void, std::ifstream&, FileEnvironment> load_compute,
-    Common::UniqueFunction<void, std::ifstream&, std::vector<FileEnvironment>> load_graphics) {
+    Common::UniqueFunction<void, std::ifstream&, std::vector<FileEnvironment>> load_graphics,
+    bool allow_file_removal) {
     // A pipeline has at most this many shaders (two vertex programs, tessellation control and
     // evaluation, geometry, fragment).
     constexpr u32 kMostShaders = 6;
@@ -45,7 +46,9 @@ void LoadPipelines(
             .read(reinterpret_cast<char*>(&cache_version), sizeof(cache_version));
         if (magic_number != MAGIC_NUMBER || cache_version != expected_cache_version) {
             file.close();
-            if (Common::FS::RemoveFile(filename)) {
+            if (!allow_file_removal) {
+                LOG_WARNING(Common_Filesystem, "Invalid read-only pipeline cache; ignoring it");
+            } else if (Common::FS::RemoveFile(filename)) {
                 if (magic_number != MAGIC_NUMBER) {
                     LOG_ERROR(Common_Filesystem, "Invalid pipeline cache file");
                 }
@@ -86,6 +89,11 @@ void LoadPipelines(
     } catch (const DamagedCache&) {
     } catch (const std::bad_alloc&) {
     } catch (const std::length_error&) {
+    }
+    if (!allow_file_removal) {
+        std::fprintf(stderr, "[EglantinePS5] shader cache: read-only damaged file left unchanged after %lld bytes\n",
+                     static_cast<long long>(good < 0 ? 0 : good));
+        return;
     }
     std::error_code error;
     if (good > 0) {

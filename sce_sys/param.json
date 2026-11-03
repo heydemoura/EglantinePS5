@@ -34,5 +34,8 @@
   "requiredSystemSoftwareVersion": "0x0000000000000000",
   "sdkVersion": "0x0000000000000000",
   "titleId": "PPSA98515",
-  "versionFileUri": ""
+  "versionFileUri": "",
+  "kernel": {
+    "cpuPageTableSize": 134217728
+  }
 }

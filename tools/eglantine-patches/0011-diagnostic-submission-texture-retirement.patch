@@ -1,0 +1,220 @@
+diff --git a/src/video_core/delayed_destruction_ring.h b/src/video_core/delayed_destruction_ring.h
+index 1f7af86d26..c60b19bd31 100644
+--- a/src/video_core/delayed_destruction_ring.h
++++ b/src/video_core/delayed_destruction_ring.h
+@@ -26,6 +26,13 @@ public:
+         elements[index].push_back(std::move(object));
+     }
+ 
++    template <class Visitor>
++    void ForEach(Visitor&& visitor) const {
++        for (const auto& bucket : elements) {
++            for (const auto& object : bucket) visitor(object);
++        }
++    }
++
+ private:
+     size_t index = 0;
+     std::array<std::vector<T>, TICKS_TO_DESTROY> elements;
+diff --git a/src/video_core/renderer_vulkan/vk_texture_cache.cpp b/src/video_core/renderer_vulkan/vk_texture_cache.cpp
+index 60fa9223c1..0229bf48fc 100644
+--- a/src/video_core/renderer_vulkan/vk_texture_cache.cpp
++++ b/src/video_core/renderer_vulkan/vk_texture_cache.cpp
+@@ -2156,6 +2156,14 @@ void TextureCacheRuntime::ReleaseMsaaScratchImage(VkImage image) {
+     }
+ }
+ 
++u64 TextureCacheRuntime::RetirementTick() const {
++    return scheduler.CurrentTick();
++}
++
++bool TextureCacheRuntime::IsRetirementComplete(u64 tick) const {
++    return scheduler.IsFree(tick);
++}
++
+ void TextureCacheRuntime::TickFrame() {
+     while (!pending_transcodes.empty() && scheduler.IsFree(pending_transcodes.front().tick)) {
+         pending_transcodes.pop_front();
+diff --git a/src/video_core/renderer_vulkan/vk_texture_cache.h b/src/video_core/renderer_vulkan/vk_texture_cache.h
+index 1af8eb2e38..70772dae92 100644
+--- a/src/video_core/renderer_vulkan/vk_texture_cache.h
++++ b/src/video_core/renderer_vulkan/vk_texture_cache.h
+@@ -60,6 +60,8 @@ public:
+     void FreeDeferredStagingBuffer(StagingBufferRef& ref);
+ 
+     void TickFrame();
++    u64 RetirementTick() const;
++    bool IsRetirementComplete(u64 tick) const;
+ 
+     void FlushDeferredClear();
+ 
+diff --git a/src/video_core/texture_cache/completion_destruction.h b/src/video_core/texture_cache/completion_destruction.h
+new file mode 100644
+index 0000000000..75b7b8be3e
+--- /dev/null
++++ b/src/video_core/texture_cache/completion_destruction.h
+@@ -0,0 +1,68 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++#pragma once
++
++#include <cstddef>
++#include <cstdint>
++#include <cstdlib>
++#include <cstring>
++#include <deque>
++#include <utility>
++#include <vector>
++
++namespace VideoCommon {
++// A submission tick also covers work still queued on the Vulkan recording worker.
++// Only the owner appends/collects. No GPU wait or submission is introduced here.
++template <class T>
++class CompletionDestructionQueue {
++public:
++    void Push(std::uint64_t tick, T&& object) {
++        if (batches.empty() || batches.back().tick != tick) {
++            batches.emplace_back(tick);
++        }
++        batches.back().objects.push_back(std::move(object));
++    }
++
++    template <class IsComplete>
++    void Collect(IsComplete&& is_complete) {
++        while (!batches.empty() && is_complete(batches.front().tick)) {
++            batches.pop_front();
++        }
++    }
++
++    template <class Visitor>
++    void ForEach(Visitor&& visitor) const {
++        for (const auto& batch : batches) {
++            for (const auto& object : batch.objects) visitor(object);
++        }
++    }
++
++private:
++    struct Batch {
++        explicit Batch(std::uint64_t tick_) : tick{tick_} {}
++        std::uint64_t tick;
++        std::vector<T> objects;
++    };
++    std::deque<Batch> batches;
++};
++
++// Per-boot diagnostic. The frame-based policy remains the default.
++inline bool CompletionDestructionEnabled() {
++    static const bool enabled = [] {
++        const char* value = std::getenv("EDEN_PS5_COMPLETION_RETIREMENT");
++        return value && std::strcmp(value, "1") == 0;
++    }();
++    return enabled;
++}
++
++template <class Runtime, class Ring, class T>
++void RetireTextureObject(Runtime& runtime, Ring& ring,
++                         CompletionDestructionQueue<T>& completed, T&& object) {
++    if constexpr (requires { runtime.RetirementTick(); }) {
++        if (CompletionDestructionEnabled()) {
++            completed.Push(runtime.RetirementTick(), std::move(object));
++            return;
++        }
++    }
++    ring.Push(std::move(object));
++}
++} // namespace VideoCommon
+diff --git a/src/video_core/texture_cache/texture_cache.h b/src/video_core/texture_cache/texture_cache.h
+index 59e4dcb030..9ecc732ec7 100644
+--- a/src/video_core/texture_cache/texture_cache.h
++++ b/src/video_core/texture_cache/texture_cache.h
+@@ -257,6 +257,29 @@ void TextureCache<P>::ApplyThresholdOverrides(bool log) {
+ 
+ template <class P>
+ void TextureCache<P>::TickFrame() {
++    // Reclaim completed ownership before pressure accounting and another eviction pass.
++    // CurrentTick covers unsubmitted worker work too; IsFree alone never submits or waits.
++    if constexpr (requires { runtime.IsRetirementComplete(u64{}); }) {
++        const auto done = [this](u64 tick) { return runtime.IsRetirementComplete(tick); };
++        completed_framebuffers.Collect(done);
++        completed_image_views.Collect(done);
++        completed_images.Collect(done);
++    }
++    if constexpr (requires (const Image& image) { image.AllocationBytesProbe(); }) {
++        if (static u32 rows{}; frame_tick % 60 == 0 && rows++ < 256) {
++            u64 bytes = 0, images = 0, views = 0, framebuffers = 0;
++            const auto image = [&](const Image& object) {
++                bytes += object.AllocationBytesProbe(); ++images;
++            };
++            const auto view = [&](const auto&) { ++views; };
++            const auto framebuffer = [&](const auto&) { ++framebuffers; };
++            sentenced_images.ForEach(image); completed_images.ForEach(image);
++            sentenced_image_view.ForEach(view); completed_image_views.ForEach(view);
++            sentenced_framebuffers.ForEach(framebuffer); completed_framebuffers.ForEach(framebuffer);
++            LOG_INFO(HW_GPU, "MKW_RETIRED_TEXTURES frame={} completion={} images={} allocated={} views={} framebuffers={}",
++                     frame_tick, CompletionDestructionEnabled(), images, bytes, views, framebuffers);
++        }
++    }
+     // Upload buffers grown for one huge image (title 1's 341 MiB terrain layer pools) are freed
+     // rather than kept for the rest of the session.
+     for (auto* const scratch : {&swizzle_data_buffer, &unswizzle_data_buffer}) {
+@@ -2243,7 +2266,8 @@ void TextureCache<P>::InvalidateScale(Image& image) {
+     RemoveImageViewReferences(image_view_ids);
+     RemoveFramebuffers(image_view_ids);
+     for (const ImageViewId image_view_id : image_view_ids) {
+-        sentenced_image_view.Push(std::move(slot_image_views[image_view_id]));
++        RetireTextureObject(runtime, sentenced_image_view, completed_image_views,
++                                std::move(slot_image_views[image_view_id]));
+         slot_image_views.erase(image_view_id);
+     }
+     image.image_view_ids.clear();
+@@ -3704,7 +3728,8 @@ void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
+     }
+     for (const ImageViewId image_view_id : image_view_ids) {
+         if (!immediate_delete) {
+-            sentenced_image_view.Push(std::move(slot_image_views[image_view_id]));
++            RetireTextureObject(runtime, sentenced_image_view, completed_image_views,
++                                std::move(slot_image_views[image_view_id]));
+         }
+         slot_image_views.erase(image_view_id);
+     }
+@@ -3713,7 +3738,8 @@ void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
+     if (retained) {
+         LOG_INFO(Render_Vulkan, "Retained image for queued download: id={}", image_id.Value());
+     } else if (!immediate_delete) {
+-        sentenced_images.Push(std::move(slot_images[image_id]));
++        RetireTextureObject(runtime, sentenced_images, completed_images,
++                            std::move(slot_images[image_id]));
+     }
+     slot_images.erase(image_id);
+ 
+@@ -3760,7 +3786,8 @@ void TextureCache<P>::RemoveFramebuffers(std::span<const ImageViewId> removed_vi
+                 last_framebuffer_id = {};
+                 last_framebuffer_serial = 0;
+             }
+-            sentenced_framebuffers.Push(std::move(slot_framebuffers[framebuffer_id]));
++            RetireTextureObject(runtime, sentenced_framebuffers, completed_framebuffers,
++                                std::move(slot_framebuffers[framebuffer_id]));
+             it = framebuffers.erase(it);
+         } else {
+             ++it;
+diff --git a/src/video_core/texture_cache/texture_cache_base.h b/src/video_core/texture_cache/texture_cache_base.h
+index 2fa05ef632..c520e6ca8b 100644
+--- a/src/video_core/texture_cache/texture_cache_base.h
++++ b/src/video_core/texture_cache/texture_cache_base.h
+@@ -37,6 +37,7 @@
+ #include "video_core/delayed_destruction_ring.h"
+ #include "video_core/engines/fermi_2d.h"
+ #include "video_core/surface.h"
++#include "video_core/texture_cache/completion_destruction.h"
+ #include "video_core/texture_cache/descriptor_table.h"
+ #include "video_core/texture_cache/image_base.h"
+ #include "video_core/texture_cache/image_info.h"
+@@ -599,6 +600,9 @@ private:
+     DelayedDestructionRing<Image, TICKS_TO_DESTROY> sentenced_images;
+     DelayedDestructionRing<ImageView, TICKS_TO_DESTROY> sentenced_image_view;
+     DelayedDestructionRing<Framebuffer, TICKS_TO_DESTROY> sentenced_framebuffers;
++    CompletionDestructionQueue<Image> completed_images;
++    CompletionDestructionQueue<ImageView> completed_image_views;
++    CompletionDestructionQueue<Framebuffer> completed_framebuffers;
+ 
+     ::Common::unordered_map<GPUVAddr, ImageAllocId> image_allocs_table;
+ 

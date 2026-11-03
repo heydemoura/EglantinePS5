@@ -17,6 +17,9 @@ inline bool disable_multi_range = false; // bind multi-range SSBOs the pre-2026 
 inline bool disable_custom_border = true;
 inline bool sync_submissions = false; // wait for the GPU after every scheduler flush
 inline bool gpu_time = false; // EDEN_GPU_TIME: GPU execution time of scheduler submissions
+inline unsigned pipeline_preload_mode = 0; // Diagnostic per-boot: 1 prewarm/read-only, 2 demand/read-only.
+inline bool allocation_probe = false; // Successful VMA device-memory block counters; diagnostic only.
+inline unsigned vma_block_mib = 64; // Diagnostic allocation-fragmentation comparison; set before device creation.
 // No VK_EXT_conditional_rendering (dev-settings conditional_rendering=off). The extension is on:
 // RADV's predication is correct on the console (2.7M predicated conditions in one game, 45k
 // skipped, correct output). LOD swaps and wrong draws blamed on it came from compute

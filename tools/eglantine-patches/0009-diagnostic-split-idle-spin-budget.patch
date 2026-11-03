@@ -1,0 +1,26 @@
+diff --git a/src/video_core/gpu_split.cpp b/src/video_core/gpu_split.cpp
+index f2e76e763f..78cfa3aa21 100644
+--- a/src/video_core/gpu_split.cpp
++++ b/src/video_core/gpu_split.cpp
+@@ -28,6 +28,7 @@
+ extern "C" bool eden_split_fetch_frontier_enabled() __attribute__((weak));
+ extern "C" u64 eden_split_fetch_begin(u64, u64, u64, unsigned) __attribute__((weak));
+ extern "C" void eden_split_fetch_end(u64) __attribute__((weak));
++extern "C" unsigned eden_split_back_idle_spins() __attribute__((weak));
+ 
+ namespace VideoCommon {
+ 
+@@ -347,7 +348,12 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
+         if (available == read_position) {
+             Nx2Profile::Scope scope{Nx2Profile::Zone::SplitWait};
+             // The front usually sends more within microseconds: spin briefly before sleeping.
+-            for (u32 spins = 0; spins < 8192 && available == read_position; ++spins) {
++            // A shorter diagnostic spin only changes when an empty queue parks;
++            // publication, completion and the lost-wakeup checks below are unchanged.
++            const u32 spin_budget = eden_split_back_idle_spins
++                                        ? std::min(8192U, eden_split_back_idle_spins())
++                                        : 8192U;
++            for (u32 spins = 0; spins < spin_budget && available == read_position; ++spins) {
+                 Pause();
+                 available = published.load(std::memory_order_acquire);
+             }
