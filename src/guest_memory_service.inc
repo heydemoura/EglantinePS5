@@ -33,7 +33,7 @@ constexpr unsigned FineBackoffMax = 10;
 // Duplicate sharing is off unless asked for (dev-settings cram_dedup=on): on the console it found a
 // dozen 2 MiB pairs that were written apart within a minute, and with it on a large game held 20 FPS
 // instead of 30 (the GPU worker waited for every fence, once a frame) where it held 30 without.
-std::atomic<bool> service_requested{true}, scan_requested{true}, dedup_requested{false}, fine_requested{false};
+std::atomic<bool> service_requested{true}, scan_requested{true}, dedup_requested{false}, fine_requested{true};
 std::atomic<SparseRange*> service_range{nullptr}; // the guest range the service runs for
 std::atomic<SparseRange*> probe_range{nullptr};   // the self-test's range
 std::atomic<int> service_state{0};                // 0 not tested, 1 works here, 2 does not
@@ -42,14 +42,14 @@ const char* service_refused = "";
 struct Counters {
     std::atomic<std::uint64_t> faults{0}, promotions{0}, copies{0}, waits{0};
     std::atomic<std::uint64_t> returns_clear{0}, returns_free{0}, returns_scan{0}, dedup{0};
-    std::atomic<std::uint64_t> reserve_used{0}, failures{0}, passes{0}, scan_ns{0};
+    std::atomic<std::uint64_t> reserve_used{0}, host_reserve_used{0}, failures{0}, passes{0}, scan_ns{0};
     std::atomic<std::uint64_t> fined{0}, unfined{0}, fine_failures{0};
 };
 Counters counters;
 void ResetCounters() noexcept {
     for (auto* counter : {&counters.faults, &counters.promotions, &counters.copies, &counters.waits,
                           &counters.returns_clear, &counters.returns_free, &counters.returns_scan, &counters.dedup,
-                          &counters.reserve_used, &counters.failures, &counters.passes, &counters.scan_ns,
+                          &counters.reserve_used, &counters.host_reserve_used, &counters.failures, &counters.passes, &counters.scan_ns,
                           &counters.fined, &counters.unfined, &counters.fine_failures})
         counter->store(0, std::memory_order_relaxed);
 }
@@ -94,7 +94,7 @@ std::uintptr_t SlotAddress(SparseRange& range, std::size_t slot) noexcept {
 // cut it up; the caches see the pool as it is, less what is not held yet, and evict as soon as a
 // burst of writes has used half of it (performance.h ViewOfPool). It is topped up every 100 ms
 // (ReserveKeeper) and given back with the guest's memory when the session ends.
-constexpr std::size_t ReserveBlocks = 512;      // 1 GiB
+constexpr std::size_t ReserveBlocks = 256;      // 512 MiB (diagnostic62 shared-pool test)
 constexpr std::size_t ReserveAtStart = 16;      // taken as the service starts; the keeper takes the rest
 std::int64_t reserve[ReserveBlocks];
 std::atomic<std::size_t> reserve_count{0};
@@ -513,6 +513,32 @@ extern "C" unsigned eden_guest_memory_wanted(void) noexcept {
     return memory_waiters.load(std::memory_order_acquire);
 }
 
+// Last resort for a host heap piece, after the direct pool refused even 2 MiB.
+// Transfer ownership under the reserve lock: never release then race the keeper
+// to reacquire the same memory. The host's committed-block table owns/frees it.
+// Leave at least half the configured reserve for guest write faults, and give
+// waiting guest writers priority. This does not change the guest's own fallback.
+bool TakeHostReserveBlock(std::int64_t* physical) noexcept {
+#ifdef PS5_NATIVE
+    const char* enabled = std::getenv("EDEN_HOST_RESERVE_TRANSFER");
+    if (!physical || !enabled || std::strcmp(enabled, "1") != 0) return false;
+    Spin(reserve_lock);
+    const auto count = reserve_count.load(std::memory_order_relaxed);
+    const bool allowed = service_range.load(std::memory_order_acquire) != nullptr &&
+        memory_waiters.load(std::memory_order_acquire) == 0 && count > ReserveBlocks / 2;
+    if (allowed) {
+        *physical = reserve[count - 1];
+        reserve_count.store(count - 1, std::memory_order_relaxed);
+    }
+    reserve_lock.clear(std::memory_order_release);
+    if (allowed) counters.host_reserve_used.fetch_add(1, std::memory_order_relaxed);
+    return allowed;
+#else
+    (void)physical;
+    return false;
+#endif
+}
+
 // The guest's headroom (the reserve): what it holds and what it is to hold, in bytes; both 0 while
 // the service does not run or keeps no reserve (the host). headless/performance.cpp counts what is
 // not held yet as taken, as all of it was before.
@@ -862,7 +888,7 @@ void ServiceReport(SparseRange& range, const char* when) noexcept {
         "EDEN_CRAM %s held=%zuMiB own=%zu shared=%zu zero=%zu faults=%llu promotions=%llu copies=%llu waits=%llu "
         "returns_clear=%llu returns_free=%llu returns_scan=%llu dedup=%llu reserve_used=%llu failures=%llu "
         "passes=%llu scan_ms=%llu fine=%zu fine_held=%zuMiB fined=%llu unfined=%llu fine_failures=%llu "
-        "reserve=%zuMiB\n",
+        "reserve=%zuMiB host_transferred=%lluMiB\n",
         when, guest_committed.load(std::memory_order_relaxed) >> 20, own, shared, slots - own - shared - fine,
         (unsigned long long)counters.faults.load(), (unsigned long long)counters.promotions.load(),
         (unsigned long long)counters.copies.load(), (unsigned long long)counters.waits.load(),
@@ -872,7 +898,8 @@ void ServiceReport(SparseRange& range, const char* when) noexcept {
         (unsigned long long)counters.passes.load(), (unsigned long long)(counters.scan_ns.load() / 1000000),
         fine, fine_kept * FinePage >> 20, (unsigned long long)counters.fined.load(),
         (unsigned long long)counters.unfined.load(), (unsigned long long)counters.fine_failures.load(),
-        reserve_count.load(std::memory_order_relaxed) * (SparseSlot >> 20));
+        reserve_count.load(std::memory_order_relaxed) * (SparseSlot >> 20),
+        (unsigned long long)counters.host_reserve_used.load() * (SparseSlot >> 20));
     if (length > 0) Report(line);
     // Who wrote the slots that were promoted: the largest places (offsets in the app's image).
     struct Top { const WriterSite* site; std::uint64_t count; } top[10]{};

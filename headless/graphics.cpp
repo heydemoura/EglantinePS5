@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "performance.h"
+#include "ordered_read_trace.h"
 #include "assets_dir.h"
 #include <glad/glad.h>
 #include <EGL/egl.h>
@@ -27,6 +28,7 @@
 #include "core/frontend/graphics_context.h"
 #include "core/perf_stats.h"
 #include "video_core/renderer_base.h"
+#include "video_core/gpu_split.h"
 
 // Match the SDK native application's shim: Mesa's C TLS is initialized by
 // compiler-rt; it has no additional C++ per-thread initializer.
@@ -58,9 +60,10 @@ HudClock vulkan_hud_clock;
 HudClock vulkan_hud_output_clock;
 HudSnapshot vulkan_hud;
 double vulkan_hud_stats_time{}, vulkan_hud_speed{};
-bool vulkan_loading{};
-double vulkan_loading_start{-1};
-unsigned vulkan_loading_frames{};
+// Loading is scheduled by the front and ends on the renderer's owner thread.
+std::atomic<bool> vulkan_loading{};
+std::atomic<double> vulkan_loading_start{-1};
+std::atomic<unsigned> vulkan_loading_frames{};
 LoadingPace vulkan_loading_pace;
 void Check(bool success, const char* operation) {
     if (!success) {
@@ -508,11 +511,26 @@ bool LoadingTick(VideoCore::RendererBase& renderer, bool idle) {
     if (vulkan_loading) {
         const double now = std::chrono::duration<double>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
-        const bool first = vulkan_loading_start < 0;
+        const bool first = vulkan_loading_start.load(std::memory_order_relaxed) < 0;
         if (first) vulkan_loading_start = now;
         if (vulkan_loading_pace.Due(now, idle)) {
-            vulkan_hud = MakeLoadingSnapshot(now - vulkan_loading_start + LoadingCalm());
-            PresentVulkanLoading(renderer);
+            const auto snapshot = MakeLoadingSnapshot(
+                now - vulkan_loading_start.load(std::memory_order_relaxed) + LoadingCalm());
+            // Both HUD mutation and presentation belong to the renderer owner.
+            // Capturing the snapshot also keeps queued frames independent of
+            // later front-thread updates and the first guest composite.
+            auto present = [&renderer, snapshot] {
+                if (!vulkan_loading.load(std::memory_order_acquire)) return;
+                vulkan_hud = snapshot;
+                PresentVulkanLoading(renderer);
+            };
+            if (auto& split = VideoCommon::GpuSplit::Get();
+                split.Active() && !VideoCommon::GpuSplit::IsBackThread()) {
+                split.DeferFunction(std::move(present));
+                split.Publish();
+            } else {
+                present();
+            }
             ++vulkan_loading_frames;
             if (first) sceSystemServiceHideSplashScreen();
         }
@@ -633,9 +651,10 @@ void GraphicsWindow::OnFrameDisplayed() {
     if (vulkan) {
         const double now = std::chrono::duration<double>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
-        if (vulkan_loading && vulkan_loading_start >= 0)
-            std::printf("EDEN_LOADING_DONE frames=%u seconds=%.2f\n", vulkan_loading_frames,
-                        now - vulkan_loading_start);
+        const double loading_start = vulkan_loading_start.load(std::memory_order_relaxed);
+        if (vulkan_loading && loading_start >= 0)
+            std::printf("EDEN_LOADING_DONE frames=%u seconds=%.2f\n",
+                        vulkan_loading_frames.load(std::memory_order_relaxed), now - loading_start);
         vulkan_loading = false;
 #ifdef EDEN_PS5_VULKAN
         vulkan_hud_clock.Present(now);
@@ -649,6 +668,9 @@ void GraphicsWindow::OnFrameDisplayed() {
                             RoomPingMilliseconds());
 #endif
         ++frame_total;
+        Eden::OrderedReadTrace::Frame(frame_total,
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
         // What a recorded controller session counts frames by (gameplay_test.h): the input
         // worker runs on another thread, so it reads a copy rather than the member.
         Display::gameplay_frame.store(frame_total, std::memory_order_relaxed);

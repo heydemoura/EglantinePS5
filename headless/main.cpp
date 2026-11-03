@@ -1,4 +1,11 @@
-#ifdef EDEN_DEV_ROM_ID
+#include "core/arm/debug.h"
+#include "core/hle/kernel/k_light_lock.h"
+#include "core/hle/kernel/k_thread.h"
+// Opt-in controls and snapshots for reproducible Mario Kart profiling.
+#ifdef EDEN_MKW_DIAGNOSTICS
+#define MKW_DIAGNOSTIC_INPUT 1
+#endif
+#if defined(EDEN_DEV_ROM_ID) || defined(MKW_DIAGNOSTIC_INPUT)
 #include "development_input.h"
 #endif
 #include <utility>
@@ -17,6 +24,7 @@
 #include <cerrno>
 #include <cstring>
 #include <sys/stat.h>
+extern "C" size_t eden_heap_last_failure(unsigned*, size_t*);
 #endif
 #ifdef EDEN_DEV_VULKAN
 #include "sdk_audit.h"
@@ -56,6 +64,12 @@
 #include "extracted_game.h"
 #include "cache_budget.h"
 #include "performance.h"
+#include "crash_site.h"
+#include "core/memory.h"
+#include "video_core/dma_pusher.h"
+#include "video_core/host1x/host1x.h"
+#include "video_core/host1x/syncpoint_manager.h"
+#include "video_core/nx2_loading_probe.h"
 #include "stall_watchdog.h"
 #include "dev_vulkan.h"
 #include "../src/fastmem.h"
@@ -311,6 +325,11 @@ int main(int argc, char** argv) {
                                   Eden::FileExists(std::string{folder} + "/ui/fonts/montserrat-medium.pefont") ? "yes" : "no");
         Eden::BootTrace::Line("app folder: %s", Eden::AppDir().c_str());
         std::set_new_handler([] {
+            unsigned reason = 0;
+            size_t count = 0;
+            const size_t bytes = eden_heap_last_failure(&reason, &count);
+            std::fprintf(stderr, "EDEN_HEAP_FAILURE requested=%zu reason=%u count=%zu\n", bytes,
+                         reason, count);
             ps5_opengl_heap_snapshot("allocation_failure", 0);
             std::fflush(stdout);
             Eden::Report("allocation failure", "operator new: heap exhausted");
@@ -428,6 +447,28 @@ int main(int argc, char** argv) {
             else launch_error = "Forwarded game not found: " + (path.empty() ? forwarded.rom : path);
             Eden::BootTrace::Line("forwarded game: %s", forwarded_game.empty() ? "not found" : "found");
         }
+#ifdef MKW_DIAGNOSTIC_INPUT
+        // One-shot launch for an explicitly prepared console experiment. Consume it before
+        // loading so a crash returns to the normal library and never loops the diagnostic.
+        {
+            const auto request_path = Eden::AppFile("mkw-test-once.txt");
+            std::ifstream request_file(request_path);
+            std::string request;
+            if (request_file >> request && request.starts_with("mkw-free-roam:") &&
+                request.size() <= 80) {
+                request_file.close();
+                if (std::remove(request_path.c_str()) == 0) {
+                    std::string path = "/data/eglantineps5/roms/MarioKartWorld/exefs/main";
+                    if (const auto main = Eden::ExtractedGameMain(path); !main.empty()) path = main;
+                    if (Eden::FileExists(path)) {
+                        forwarded_game = path;
+                        launch_error.clear();
+                        Eden::BootTrace::Line("MKW one-shot diagnostic launch: %s", request.c_str());
+                    }
+                }
+            }
+        }
+#endif
         // A game that faulted early in its boot is restarted (at most four times per launch).
         std::string relaunch_game;
         unsigned guest_fault_retries = 0;
@@ -460,13 +501,33 @@ int main(int argc, char** argv) {
             // After a crash the launcher opens with its notice, not the development title again.
             if (!last_crash.report.empty()) autoboot_pending = false;
         }
-#ifdef EDEN_DEV_ROM_ID
+#if defined(EDEN_DEV_ROM_ID) || defined(MKW_DIAGNOSTIC_INPUT)
         {
             // A scripted input left by an earlier run is not for this process.
             std::ifstream left_behind(Eden::AppFile("compat-input.txt"));
             Eden::DevelopmentInput::IgnoreExisting(left_behind);
         }
 #endif
+#endif
+        setenv("EDEN_NX2_SPARSE_UNBACKED", "1", 1);
+        setenv("EDEN_HOST_RESERVE_TRANSFER", "1", 1);
+#ifdef EDEN_MKW_DIAGNOSTICS
+        // Temporary capture for the Mario Kart World loading-screen investigation.
+        const auto diagnostic_capture_dir = Eden::LogFile("mkw-gpfifo-" + std::to_string(getpid()));
+        std::filesystem::create_directories(diagnostic_capture_dir);
+        setenv("EDEN_NX2_GPFIFO_DUMP", diagnostic_capture_dir.c_str(), 1);
+        setenv("EDEN_PS5_TRANSIENT_POOLS", "1", 1);
+        Eden::DevVulkan::gpu_time = true;
+        // Enable bounded readback probes for explicit diagnostic builds.
+        setenv("EDEN_NX2_READBACK_DIAGNOSTICS", "1", 1);
+        unsetenv("EDEN_NX2_PARTIAL_TEXTURE_READBACK");
+        setenv("EDEN_NX2_PUBLISHED_SEMAPHORE_READS", "1", 1);
+        setenv("EDEN_PS5_MAPPED_READBACK_PROBE", "0", 1);
+        setenv("EDEN_PS5_READBACK_PRODUCERS", "1", 1);
+        setenv("EDEN_PS5_MAPPED_READBACK", "1", 1);
+        unsetenv("EDEN_NX2_SHADER_DUMP");
+        unsetenv("EDEN_NX2_SHADER_DUMP_MAPPED");
+        Eden::BootTrace::Line("MKW diagnostic45: host queue fix plus persistent sparse mapping diagnostics");
 #endif
         Common::FS::CreateEdenPaths();
         Eden::Performance::PlatformChecks();
@@ -1525,11 +1586,106 @@ int main(int argc, char** argv) {
                     const bool timed_replay = development_id == EDEN_DEV_PROFILE_TITLE && !replay_off;
                     const auto replay_start = std::chrono::steady_clock::now();
 #endif
-#ifdef EDEN_DEV_ROM_ID
+#if defined(EDEN_DEV_ROM_ID) || defined(MKW_DIAGNOSTIC_INPUT)
                     Eden::DevelopmentInput development_input;
                     unsigned command_poll = 0;
 #endif
+#ifdef EDEN_MKW_DIAGNOSTICS
+                    unsigned diagnostic_sample{};
+                    unsigned memory_sample{};
+#endif
                     while (!stop.stop_requested()) {
+#ifdef EDEN_MKW_DIAGNOSTICS
+                        const auto diagnostic_elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                            std::chrono::steady_clock::now() - session_start).count();
+                        if (diagnostic_elapsed >= memory_sample * 5) {
+                            Eden::Performance::ReportMemoryPressure(static_cast<unsigned>(diagnostic_elapsed));
+                            memory_sample = static_cast<unsigned>(diagnostic_elapsed) / 5 + 1;
+                        }
+                        if (diagnostic_sample < 8 && diagnostic_elapsed >= 20 + diagnostic_sample * 15) {
+                            ++diagnostic_sample;
+                            if (diagnostic_sample == 8) {
+                                if (auto* process = system.ApplicationProcess()) {
+                                    std::array<Kernel::KThread*, 256> threads{};
+                                    size_t count{};
+                                    {
+                                        Kernel::KScopedLightLock list_lock(process->GetListLock());
+                                        for (auto& thread : process->GetThreadList()) {
+                                            if (count == threads.size()) break;
+                                            if (thread.Open(system.Kernel())) threads[count++] = &thread;
+                                        }
+                                    }
+                                    for (size_t i = 0; i < count; ++i) {
+                                        auto* thread = threads[i];
+                                        SCOPE_EXIT { thread->Close(system.Kernel()); };
+                                        const auto name = Core::GetThreadName(thread);
+                                        std::printf("MKW_THREAD tid=%llu name=%s\n",
+                                                    static_cast<unsigned long long>(thread->GetThreadId()),
+                                                    name ? name->c_str() : "unknown");
+                                    }
+                                }
+                            }
+                            if (diagnostic_sample == 1) {
+                                VideoCommon::LoadingProbe::capture_enabled = true;
+                                LOG_CRITICAL(HW_GPU, "MKW GPFIFO ring armed, maximum8MiB/4096records");
+                            }
+                            if (diagnostic_sample == 4) Tegra::GpfifoCapture::Flush("mkw-loading-snapshot");
+                            const auto report = [](const char* name, auto& channel) {
+                                LOG_CRITICAL(Render_Vulkan, "MKW progress {} phase={} arg={:#x} serial={}", name,
+                                    channel.phase.load(), channel.argument.load(), channel.serial.load());
+                            };
+                            report("gpu", VideoCommon::LoadingProbe::gpu);
+                            report("compiler", VideoCommon::LoadingProbe::compiler);
+                            report("driver", VideoCommon::LoadingProbe::driver);
+                            report("record", VideoCommon::LoadingProbe::record);
+                            report("queue", VideoCommon::LoadingProbe::queue);
+                            report("wait", VideoCommon::LoadingProbe::wait);
+                            report("command", VideoCommon::LoadingProbe::command);
+                            report("blit", VideoCommon::LoadingProbe::blit);
+                            report("writeback", VideoCommon::LoadingProbe::writeback);
+                            report("enqueue", VideoCommon::LoadingProbe::enqueue);
+                            LOG_CRITICAL(HW_GPU, "MKW enqueue registry_owned={}",
+                                VideoCommon::LoadingProbe::enqueue_registry_owned.load());
+                            LOG_CRITICAL(HW_GPU, "MKW blit source={:#x} destination={:#x} lookup_loops={} rebind_loops={}",
+                                VideoCommon::LoadingProbe::blit_src.load(), VideoCommon::LoadingProbe::blit_dst.load(),
+                                VideoCommon::LoadingProbe::blit_lookup_loops.load(), VideoCommon::LoadingProbe::blit_rebind_loops.load());
+                            LOG_CRITICAL(HW_GPU, "MKW command address={:#x} word={} raw={:#x} channel={} subchannel={} remaining={} value={:#x}",
+                                VideoCommon::LoadingProbe::command_address.load(),
+                                VideoCommon::LoadingProbe::command_word.load(),
+                                VideoCommon::LoadingProbe::command_raw.load(),
+                                VideoCommon::LoadingProbe::command_channel.load(),
+                                VideoCommon::LoadingProbe::command_subchannel.load(),
+                                VideoCommon::LoadingProbe::command_remaining.load(),
+                                VideoCommon::LoadingProbe::command_value.load());
+                            auto& syncpoints = system.Host1x().GetSyncpointManager();
+                            for (unsigned slot = 0; slot < VideoCommon::LoadingProbe::guest_waits.size(); ++slot) {
+                                auto& probe = VideoCommon::LoadingProbe::guest_waits[slot];
+                                if (!probe.requests.load()) continue;
+                                const auto point = probe.point.load();
+                                LOG_CRITICAL(Service, "MKW sync slot={} session={:#x} point={} target={:#x} current={:#x} pending={} requests={}",
+                                    slot, probe.session.load(), point, probe.target.load(),
+                                    point < 192 ? syncpoints.GetGuestSyncpointValue(point) : 0U,
+                                    probe.pending.load(), probe.requests.load());
+                            }
+                            const auto sync_ro = VideoCommon::LoadingProbe::sync_ro.load();
+                            const auto sync_rw = VideoCommon::LoadingProbe::sync_rw.load();
+                            LOG_CRITICAL(Service, "MKW sync shared ro={:#x} rw={:#x} count={} polls={} acks={}",
+                                sync_ro, sync_rw, VideoCommon::LoadingProbe::sync_count.load(),
+                                VideoCommon::LoadingProbe::sync_polls.load(), VideoCommon::LoadingProbe::sync_acks.load());
+                            auto& diagnostic_memory = system.ApplicationMemory();
+                            for (unsigned point = 0; point < 192; ++point) {
+                                const auto current = syncpoints.GetGuestSyncpointValue(point);
+                                if (!current) continue;
+                                const auto mirror = sync_ro && diagnostic_memory.IsValidVirtualAddressRange(sync_ro + 0x40 + point * 8, 8)
+                                    ? diagnostic_memory.Read64(sync_ro + 0x40 + point * 8) : 0ULL;
+                                LOG_CRITICAL(Service, "MKW sync counter={} current={:#x} mirror={:#x}", point, current, mirror);
+                            }
+                            if (diagnostic_sample == 4 || diagnostic_sample == 7) {
+                                if (auto* process = system.ApplicationProcess())
+                                    Eden::CrashSite::DumpThreads("MKW loading snapshot", *process);
+                            }
+                        }
+#endif
                         if (auto error = Eden::TakeGpuFailure()) {
                             std::lock_guard lock(completion->mutex);
                             completion->failure = std::move(error);
@@ -1545,13 +1701,13 @@ int main(int argc, char** argv) {
 #ifdef EDEN_DEV_PROFILE
                         if (!timed_replay) {
 #endif
-#ifdef EDEN_DEV_ROM_ID
+#if defined(EDEN_DEV_ROM_ID) || defined(MKW_DIAGNOSTIC_INPUT)
                         if (!development_input.active) { UpdateGrips(system, *pad); pad->Poll(); }
 #else
                         UpdateGrips(system, *pad);
                         pad->Poll();
 #endif
-#ifdef EDEN_DEV_ROM_ID
+#if defined(EDEN_DEV_ROM_ID) || defined(MKW_DIAGNOSTIC_INPUT)
                         const auto command_now = std::chrono::duration_cast<std::chrono::milliseconds>(
                             std::chrono::steady_clock::now().time_since_epoch()).count();
                         if (++command_poll >= 25) {

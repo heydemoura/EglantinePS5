@@ -60,6 +60,7 @@ int main() {
     RegisterWorker("CPUCore_0");
     SampleCpu(0, 123, 0xabcd, 0x18, 0x3000000);
     SampleCpu(0, 999, 0xffff, 0, 1); // Same epoch must not publish a second sample.
+    SampleCpu(5, 789, 0x5678, ~0u, 0); // NX2 has six guest cores.
     std::binary_semaphore ready{0}, release{0};
     std::jthread worker([&] {
         RegisterWorker("CPUCore_1");
@@ -111,9 +112,10 @@ with tempfile.TemporaryDirectory(prefix='eden-startup-') as directory:
     snapshots = output.split('EDEN_PERF_SAMPLE ')[1:]
     assert len(snapshots) == 5
     for sample in snapshots:
-        assert sample.count('EDEN_PERF_WORKER ') == 7 and sample.count('EDEN_PERF_PROGRESS ') == 4
+        assert sample.count('EDEN_PERF_WORKER ') == 7 and sample.count('EDEN_PERF_PROGRESS ') == 6
         assert 'core=1 compilations=1 ' in sample
         assert re.search(r'name=CPUCore_2 cpu_ns=-\d+', sample)
+    assert re.search(r'EDEN_PERF_CPU_POINT core=5 .*thread=789 pc=5678', snapshots[0])
     assert int(re.search(r'name=CPUCore_1 cpu_ns=(\d+)', snapshots[0])[1]) > 0
     assert 'process_cpu_ns=-22 ' in snapshots[1]
     assert re.search(r'name=CPUCore_1 cpu_ns=-22 ', snapshots[1])

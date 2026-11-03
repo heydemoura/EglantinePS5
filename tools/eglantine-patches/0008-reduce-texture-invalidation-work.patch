@@ -1,0 +1,115 @@
+diff --git a/src/video_core/texture_cache/descriptor_table.h b/src/video_core/texture_cache/descriptor_table.h
+--- a/src/video_core/texture_cache/descriptor_table.h
++++ b/src/video_core/texture_cache/descriptor_table.h
+@@ -30,7 +30,12 @@
+     }
+ 
+     void Invalidate() noexcept {
+-        std::ranges::fill(read_descriptors, 0);
++        // A word is reset lazily when first read in this generation. Invalidation
++        // occurs for every deleted/scaled image, including sparse descriptor tables.
++        if (++generation == 0) {
++            std::ranges::fill(read_generations, 0);
++            generation = 1;
++        }
+     }
+ 
+     [[nodiscard]] std::pair<T, bool> Read(Tegra::MemoryManager const& gpu_memory, u32 index) noexcept {
+@@ -38,10 +43,15 @@
+         const GPUVAddr gpu_addr = current_gpu_addr + index * sizeof(T);
+         std::pair<T, bool> result;
+         gpu_memory.ReadBlockUnsafe(gpu_addr, std::addressof(result.first), sizeof(T));
+-        if ((read_descriptors[index / 64] & (1ULL << (index % 64))) != 0) {
++        const size_t word = index / 64;
++        if (read_generations[word] != generation) {
++            read_descriptors[word] = 0;
++            read_generations[word] = generation;
++        }
++        if ((read_descriptors[word] & (1ULL << (index % 64))) != 0) {
+             result.second = result.first != descriptors[index];
+         } else {
+-            read_descriptors[index / 64] |= 1ULL << (index % 64);
++            read_descriptors[word] |= 1ULL << (index % 64);
+             result.second = true;
+         }
+         if (result.second) {
+@@ -56,15 +66,16 @@
+         // Mario Brothership reallocates a lot of times, so use aggressive pre-alloc sizes
+         // std::vector<T> by default uses quadratic growth, but that isn't even enough to satisfy brothership
+         const size_t num_descriptors = ((limit + 0x80000) & (~0x7ffff)) + 1;
+-        size_t old_size = read_descriptors.size();
+         read_descriptors.resize(Common::DivCeil(num_descriptors, 64U));
+-        old_size = (std::min)(old_size, read_descriptors.size());
+-        std::fill(read_descriptors.begin(), read_descriptors.begin() + old_size, 0);
++        read_generations.resize(read_descriptors.size());
++        Invalidate();
+         //
+         descriptors.resize(num_descriptors);
+     }
+ 
+     std::vector<u64> read_descriptors;
++    std::vector<u64> read_generations;
++    u64 generation = 1;
+     std::vector<T> descriptors;
+     GPUVAddr current_gpu_addr{};
+     u32 current_limit{};
+diff --git a/src/video_core/texture_cache/texture_cache.h b/src/video_core/texture_cache/texture_cache.h
+--- a/src/video_core/texture_cache/texture_cache.h
++++ b/src/video_core/texture_cache/texture_cache.h
+@@ -45,6 +45,22 @@
+     return enabled;
+ }
+ 
++// Descriptor tables are invalidated below whenever cached views disappear. Their
++// next read must replace the cached ID even when the guest descriptor is unchanged.
++// Keep optional poisoning for diagnostics without walking every historical TIC
++// entry on every streamed texture deletion in native PS5 builds.
++inline bool PoisonInvalidatedViewIds() {
++#if defined(__PROSPERO__)
++    static const bool enabled = [] {
++        const char* value = std::getenv("EDEN_TEXTURE_CACHE_POISON_IDS");
++        return value != nullptr && value[0] == '1';
++    }();
++    return enabled;
++#else
++    return true;
++#endif
++}
++
+ using Tegra::Texture::TICEntry;
+ using Tegra::Texture::TSCEntry;
+ using VideoCore::Surface::GetFormatType;
+@@ -2251,9 +2267,13 @@
+     for (size_t c : active_channel_ids) {
+         auto& channel_info = channel_storage[c];
+ 
+-        if constexpr (ENABLE_VALIDATION)
+-            for (auto& e : channel_info.image_view_ids)
+-                e.second = CORRUPT_ID;
++        if constexpr (ENABLE_VALIDATION) {
++            if (PoisonInvalidatedViewIds()) {
++                for (auto& e : channel_info.image_view_ids) {
++                    e.second = CORRUPT_ID;
++                }
++            }
++        }
+         channel_info.graphics_image_table.Invalidate();
+         channel_info.compute_image_table.Invalidate();
+     }
+@@ -3723,9 +3743,13 @@
+     }
+     for (size_t c : active_channel_ids) {
+         auto& channel_info = channel_storage[c];
+-        if constexpr (ENABLE_VALIDATION)
+-            for (auto& e : channel_info.image_view_ids)
+-                e.second = CORRUPT_ID;
++        if constexpr (ENABLE_VALIDATION) {
++            if (PoisonInvalidatedViewIds()) {
++                for (auto& e : channel_info.image_view_ids) {
++                    e.second = CORRUPT_ID;
++                }
++            }
++        }
+         channel_info.graphics_image_table.Invalidate();
+         channel_info.compute_image_table.Invalidate();
+     }

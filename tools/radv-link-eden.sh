@@ -3,6 +3,7 @@
 # reuse the pinned RADV platform recipe for threads, libc, TLS and unwinding.
 eden_radv_link_recipe() {
     local archive=$1
+    python3 -B "$root/tools/isolate-radv.py" --check || return
     local reference="$root/../mihawk-vulkan-review"
     local radv_sdk="$reference/.deps/native/ps5-payload-sdk"
     source "$reference/tools/radv-link.sh"

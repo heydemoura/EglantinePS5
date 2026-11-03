@@ -1,3 +1,4 @@
+extern "C" void mkw_native_block(unsigned long long, const void*, unsigned long long);
 // EglantinePS5: Jit::Impl with one compiled-code namespace per guest process (inserted into
 // a64_interface.cpp in place of upstream's Impl; see headless/dynarmic/jit_group.h).
 //
@@ -59,6 +60,7 @@ public:
     }
 
     HaltReason Run() {
+        MkwJitTimer mkw_run{18 + unsigned(conf.processor_id)};
         ASSERT(!is_executing);
         EdenCount(conf.processor_id, EdenRuns);
         PerformRequestedCacheInvalidation(static_cast<HaltReason>(Atomic::Load(&jit_state.halt_reason)));
@@ -229,6 +231,20 @@ private:
         return IR::LocationDescriptor{jit_state.GetUniqueHash()};
     }
 
+    // Temporary read-only profiling counters for all six MKW guest cores.
+    static inline std::array<std::atomic<u64>, 24> mkw_jit_ns{};
+    static inline std::array<std::atomic<u64>, 24> mkw_jit_calls{};
+    struct MkwJitTimer {
+        unsigned slot;
+        u64 start = EdenClockNs();
+        ~MkwJitTimer() {
+            if (slot < mkw_jit_ns.size()) {
+                mkw_jit_ns[slot].fetch_add(EdenClockNs() - start, std::memory_order_relaxed);
+                mkw_jit_calls[slot].fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+    };
+
     CodePtr GetCurrentBlock() {
         return GetBlock(GetCurrentLocation());
     }
@@ -241,6 +257,7 @@ private:
     // Running; repeats if a clear started or finished in between.
     template<typename Lookup>
     CodePtr EdenEnter(Lookup&& lookup) {
+        MkwJitTimer mkw_timer{unsigned(conf.processor_id)};
         for (;;) {
             eden_state.store(EdenLookup, std::memory_order_seq_cst);
             EdenWaitWhileClearing();
@@ -298,10 +315,12 @@ private:
             const u64 optimized = EdenClockNs();
             emitter.eden_pending_sites.clear();
             const auto emitted = emitter.Emit(ir_block, false);
+            mkw_native_block(descriptor.Value(), emitted.entrypoint, emitted.size);
             eden_state.store(previous, std::memory_order_seq_cst);
             EdenReportCompile(descriptor, start, translated, optimized);
             eden_space.store(block_of_code.SpaceRemaining(), std::memory_order_relaxed);
 
+            MkwJitTimer mkw_registration{12 + unsigned(conf.processor_id)};
             std::lock_guard lock{group->mutex};
             if (group->epoch.load(std::memory_order_seq_cst) != epoch)
                 continue;  // every region was reset after the emission: compile again
@@ -349,6 +368,7 @@ private:
         Optimization::Optimize(ir_block, conf, polyfill_options);
         emitter.eden_pending_sites.clear();
         const auto emitted = emitter.Emit(ir_block, false);
+        mkw_native_block(descriptor.Value(), emitted.entrypoint, emitted.size);
         eden_pre_state.store(EdenOutside, std::memory_order_seq_cst);
         eden_space.store(block_of_code.SpaceRemaining(), std::memory_order_relaxed);
 
@@ -450,6 +470,7 @@ private:
 
     // Resets every region of the group; called outside generated code (Outside or Lookup).
     void EdenClearGroup() {
+        MkwJitTimer mkw_timer{6 + unsigned(conf.processor_id)};
         bool expected = false;
         if (!group->clearing.compare_exchange_strong(expected, true, std::memory_order_seq_cst)) {
             EdenWaitWhileClearing();  // another member is clearing everything

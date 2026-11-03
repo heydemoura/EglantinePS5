@@ -15,16 +15,26 @@ src="$root/Eglantine"
 commit=$(git -C "$src" rev-parse HEAD)
 stamp=eglantine-$commit
 if [[ -n $(git -C "$src" status --porcelain --untracked-files=all) ]]; then
-    stamp+=-$( { git -C "$src" diff HEAD; git -C "$src" ls-files --others --exclude-standard -z | xargs -0 -r sha256sum; } | sha256sum | cut -c1-12)
+    stamp+=-$( ( cd "$src"; git diff HEAD; git ls-files --others --exclude-standard -z | xargs -0 -r sha256sum ) | sha256sum | cut -c1-12)
 fi
 
-if [[ ! -f $tree/CMakeLists.txt || $(cat "$tree/.unpacked-from" 2>/dev/null) != "$stamp" ]]; then
+# rsync -a preserves old timestamps. Restoring an older source revision can then
+# leave a newer Ninja object untouched even though its contents no longer match.
+# Copy changed contents with a fresh destination timestamp; refresh legacy mirrors
+# once so previously missed rebuilds cannot survive this policy transition.
+sync_policy=content-mtime-v1
+policy_changed=0
+[[ $(cat "$tree/.eden-sync-policy" 2>/dev/null) == "$sync_policy" ]] || policy_changed=1
+if [[ ! -f $tree/CMakeLists.txt || $(cat "$tree/.unpacked-from" 2>/dev/null) != "$stamp" || $policy_changed == 1 ]]; then
     echo "== Eden source ($stamp)"
     mkdir -p "$tree"
-    rsync -a --delete \
-        --exclude=/.git --exclude=/.cache --exclude=/.unpacked-from --exclude=/GIT-COMMIT --exclude=/GIT-REFSPEC \
+    comparison=(--checksum)
+    if [[ $policy_changed == 1 ]]; then comparison=(--ignore-times); fi
+    rsync -a --no-times "${comparison[@]}" --delete \
+        --exclude=/.git --exclude=/.cache --exclude=/.eden-sync-policy --exclude=/.unpacked-from --exclude=/GIT-COMMIT --exclude=/GIT-REFSPEC \
         "$src"/ "$tree"/
     printf '%s\n' "$stamp" > "$tree/.unpacked-from"
+    printf '%s\n' "$sync_policy" > "$tree/.eden-sync-policy"
 fi
 printf '%s\n' "$commit" > "$tree/GIT-COMMIT"
 printf '%s\n' 'ps5-headless' > "$tree/GIT-REFSPEC"

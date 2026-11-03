@@ -624,6 +624,22 @@ void GuestMemoryUsage(std::size_t* span, std::size_t* held) noexcept {
     *held = guest_committed.load(std::memory_order_relaxed);
 }
 
+// Failure-only accounting uses stack storage; it must also work when allocation fails.
+static void ReportSparseCommitFailure(const SparseRange& range, std::size_t slot) noexcept {
+    const auto begin = range.begin.load(std::memory_order_relaxed);
+    const auto span = range.end - begin;
+    std::size_t owned = 0;
+    for (std::size_t i = 0; i < span / SparseSlot; ++i)
+        owned += range.owned[i].load(std::memory_order_relaxed);
+    char line[384];
+    std::snprintf(line, sizeof(line),
+        "EDEN_SPARSE_COMMIT_FAILURE range=%p span=%zu slot=%zu slot_bytes=%zu guest=%u range_held=%zu tables_held=%zu tables_reserved=%zu guest_held=%zu guest_reserved=%zu\n",
+        reinterpret_cast<void*>(begin), span, slot, SparseSlot, unsigned(range.guest), owned * SparseSlot,
+        sparse_committed.load(std::memory_order_relaxed), sparse_reserved.load(std::memory_order_relaxed),
+        guest_committed.load(std::memory_order_relaxed), guest_reserved.load(std::memory_order_relaxed));
+    Report(line);
+}
+
 void CommitSparsePage(std::uintptr_t page) noexcept {
     SparseRange* range = SparseRangeOf(page);
     if (range == nullptr) return; // dense: already writable
@@ -633,6 +649,7 @@ void CommitSparsePage(std::uintptr_t page) noexcept {
     if (range->state != nullptr) {
         // A range with slot states commits under the slot's lock (guest_memory_service.inc).
         if (!ServiceCommit(*range, slot)) {
+            ReportSparseCommitFailure(*range, slot);
             Report("EDEN_SPARSE_TABLES commit failed: out of memory\n");
             std::abort();
         }
@@ -642,6 +659,7 @@ void CommitSparsePage(std::uintptr_t page) noexcept {
     if (range->owned[slot].load(std::memory_order_relaxed)) return;
     if (!OwnSlot(begin + slot * SparseSlot, &range->physical[slot])) {
         // Out of memory in the middle of a guest mapping: there is no table to continue with.
+        ReportSparseCommitFailure(*range, slot);
         Report("EDEN_SPARSE_TABLES commit failed: out of memory\n");
         std::abort();
     }
@@ -762,16 +780,21 @@ bool CommitMemoryRangeFrom(void* address, std::size_t size, bool high) noexcept 
 #ifdef PS5_NATIVE
     const auto begin = reinterpret_cast<std::uintptr_t>(address);
     std::size_t done = 0, block = size;
-    unsigned blocks = 0;
+    unsigned blocks = 0, reserve_blocks = 0;
     while (done < size) {
         block = std::min(block, size - done);
         std::int64_t physical = -1;
         const int taken = high ? eden_direct_high(block, LargePage, 12, &physical)
                                : eden_direct_low(block, LargePage, 12, &physical);
         if (taken != 0) {
-            if (block == LargePage) break;  // not even one large page left
-            block = std::max(LargePage, block / 2 / LargePage * LargePage);
-            continue;
+            if (block != LargePage) {
+                block = std::max(LargePage, block / 2 / LargePage * LargePage);
+                continue;
+            }
+            // Only durable host heap pieces may use the emergency transfer.
+            // Low-pool large allocations retain their existing failure policy.
+            if (!high || !TakeHostReserveBlock(&physical)) break;
+            ++reserve_blocks;
         }
         void* at = reinterpret_cast<void*>(begin + done);
         if (sceKernelMapDirectMemory(&at, block, PROT_READ | PROT_WRITE, MAP_FIXED, physical, LargePage) != 0 ||
@@ -798,9 +821,9 @@ bool CommitMemoryRangeFrom(void* address, std::size_t size, bool high) noexcept 
     }
     if (blocks > 1) committed_split.fetch_add(1, std::memory_order_relaxed);
     // The heap grows through here: no stdio (it may allocate).
-    char line[112];
-    const int length = std::snprintf(line, sizeof(line), "EDEN_HEAP_PIECE bytes=%zu va=%p blocks=%u%s\n", size,
-                                     address, blocks, high ? "" : " large");
+    char line[160];
+    const int length = std::snprintf(line, sizeof(line), "EDEN_HEAP_PIECE bytes=%zu va=%p blocks=%u%s reserve_blocks=%u\n", size,
+                                     address, blocks, high ? "" : " large", reserve_blocks);
     if (length > 0) Note(line);
     std::memset(address, 0, size);
     return true;

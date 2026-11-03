@@ -1,0 +1,24 @@
+diff --git a/src/video_core/textures/astc.cpp b/src/video_core/textures/astc.cpp
+--- a/src/video_core/textures/astc.cpp
++++ b/src/video_core/textures/astc.cpp
+@@ -2045,6 +2045,20 @@
+                                (1U << 14) | (1U << 15);
+     for (size_t offset = 0; offset + 16 <= data.size(); offset += 16) {
+         const std::span<const u8> block = data.subspan(offset, 16);
++        // Single-partition endpoint modes occupy bits 13-16. Reserved block
++        // modes remain opaque errors, as in DecodeBlockInfo; void extents and
++        // multiple partitions keep the full parser below.
++        const u32 head = u32{block[0]} | (u32{block[1]} << 8) | (u32{block[2]} << 16);
++        const u32 mode = head & 0x7ff;
++        if ((mode & 0x1ff) != 0x1fc && ((head >> 11) & 3) == 0) {
++            if ((mode & 0xf) == 0 || ((mode & 3) == 0 && (mode & 0x1c0) == 0x1c0)) {
++                continue;
++            }
++            if ((AlphaModes >> ((head >> 13) & 0xf)) & 1) {
++                return false;
++            }
++            continue;
++        }
+         InputBitStream strm(block);
+         const TexelWeightParams params = DecodeBlockInfo(strm);
+         if (params.m_bError) {

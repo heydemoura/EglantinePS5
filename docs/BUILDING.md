@@ -119,6 +119,21 @@ Next to this repository (`../`), as git checkouts:
   file. The three checkouts have to be at the commits `tools/deps.json` pins; when the Mesa pin
   changes, `make prepare` builds RADV again from the new revision.
 
+Native Vulkan builds select RADV by default, including direct calls to
+`tools/build-headless-native.sh`. `EDEN_VULKAN_DRIVER=CUSTOM` explicitly selects
+the legacy driver. Configure, native linking and packaging verify the isolated
+RADV archive against its source hash, release provenance and pinned Mesa/SDK;
+`python3 tools/isolate-radv.py --check` runs that validation without changing it.
+The package's `build/headless-native/frontend.json` records the driver hashes
+and revisions used by the build, including the sync-clock adapter.
+
+Isolation redirects only the pinned PS5 queue condition's init, broadcast and
+timed-wait references to Mesa's monotonic helpers. Its deadlines use a monotonic
+clock; a default realtime condition otherwise expires them immediately. The
+source archive remains unchanged. Native checks verify condition storage ABI
+and the linked call targets. Moving either Mesa or SDK pin requires reviewing
+this narrow adapter in `tools/isolate-radv.py`.
+
 The `libSceAgcDriver` import facade both drivers link against is built from
 `tools/stubs/libSceAgcDriver.c`. Small contracts from our research repositories are in
 `third_party/`.

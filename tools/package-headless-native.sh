@@ -13,7 +13,7 @@ app="${EDEN_PACKAGE_DIR:-$root/dist/headless/PPSA98515}"
 # A separate clean staging directory lets driver candidates omit private game
 # assets without deleting or copying the existing development installation.
 if [[ -n ${EDEN_PACKAGE_DIR:-} ]]; then
-    [[ $(realpath -m "$app") == "$root"/build/*/PPSA98515 ]] || exit 2
+    [[ $(realpath -m "$app") == "$(realpath -m "$root/build")"/*/PPSA98515 ]] || exit 2
     [[ ${1:-} != --game ]] || exit 2
 fi
 test -x "$builder"
@@ -68,7 +68,7 @@ if [[ ${EDEN_DEV_PROFILE:-} == ON && -f "$root/headless/dev-settings.txt" ]]; th
 fi
 # The exact-title upstream Lapy helper is verified before it reaches this package.
 python3 - "$root" "$scratch" "$app" "${1:-}" <<'PY'
-import json, pathlib, re, runpy, shutil, sys
+import json, pathlib, re, runpy, shutil, subprocess, sys
 root, scratch, app = map(pathlib.Path, sys.argv[1:4])
 game = sys.argv[4] == '--game'
 integration = sys.argv[4] in ('--integration', '--game')
@@ -90,6 +90,13 @@ assert built == value['contentVersion'], f'the program says {built}, param.json 
 assert int(value['attribute3']) & 0x80040 == 0x80040, 'param.json no longer declares the 120 Hz output'
 runpy.run_path(str(root / 'tools/load_alignment.py'))['check_load_alignment']((app / 'eboot.bin').read_bytes())
 profile = (root / 'build/headless-native/CMakeCache.txt').read_text()
+radv_artifact = None
+if 'EDEN_VULKAN_DRIVER:STRING=RADV' in profile and 'EDEN_PS5_VULKAN:BOOL=ON' in profile:
+    subprocess.run([sys.executable, str(root / 'tools/isolate-radv.py'), '--check'], check=True)
+    manifest = json.loads((root / 'build/radv-isolated/manifest.json').read_text())
+    radv_artifact = {key: manifest[key] for key in
+                     ('source_sha256', 'isolated_sha256', 'mesa_revision', 'sdk_revision',
+                      'sync_clock_adapter', 'sync_clock_adapter_sha256')}
 assert sum(profile.count('EDEN_DEVICE_FRONTEND:BOOL=' + v) for v in ('ON', 'OFF')) == 1
 devices = 'EDEN_DEVICE_FRONTEND:BOOL=ON' in profile
 graphics = 'EDEN_PS5_OPENGL:BOOL=ON' in profile
@@ -103,6 +110,7 @@ shutil.copy2(root / 'build/fixture' / fixture_name, app / 'core-homebrew.nro')
     'renderer': 'opengl-4.6-compatibility' if graphics else 'null', 'guest_fixture': 'retail-game' if game else 'cpu-state-memory-atomics-fp-simd-services' if integration else 'timer-sync-service-storage-hid-audio-renderer-voice-mix-src-high' if devices else 'timer-sync-service-storage',
     'vulkan': 'EDEN_PS5_VULKAN:BOOL=ON' in profile,
     'vulkan_driver': 'RADV' if 'EDEN_VULKAN_DRIVER:STRING=RADV' in profile else 'CUSTOM',
+    'vulkan_artifact': radv_artifact,
     'development_backend': 'Vulkan' if 'EDEN_DEV_VULKAN:BOOL=ON' in profile else 'user-preference',
     'development_rom_id': next((line.split('=', 1)[1] for line in profile.splitlines()
                                 if line.startswith('EDEN_DEV_ROM_ID:STRING=')), ''),

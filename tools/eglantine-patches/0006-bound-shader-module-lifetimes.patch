@@ -1,0 +1,294 @@
+diff --git a/src/video_core/renderer_vulkan/vk_compute_pipeline.cpp b/src/video_core/renderer_vulkan/vk_compute_pipeline.cpp
+--- a/src/video_core/renderer_vulkan/vk_compute_pipeline.cpp
++++ b/src/video_core/renderer_vulkan/vk_compute_pipeline.cpp
+@@ -24,6 +24,7 @@
+ #include "video_core/vulkan_common/vulkan_wrapper.h"
+ #include "video_core/gpu_logging/gpu_logging.h"
+ #include "common/logging.h"
++#include "common/scope_exit.h"
+ #include "common/settings.h"
+ 
+ namespace Vulkan {
+@@ -90,6 +91,7 @@
+     }
+ 
+     auto func{[this, shader_notify, pipeline_statistics] {
++        SCOPE_EXIT { spv_module = {}; };
+         const VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT subgroup_size_ci{
+             .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO_EXT,
+             .pNext = nullptr,
+diff --git a/src/video_core/renderer_vulkan/vk_graphics_pipeline.cpp b/src/video_core/renderer_vulkan/vk_graphics_pipeline.cpp
+--- a/src/video_core/renderer_vulkan/vk_graphics_pipeline.cpp
++++ b/src/video_core/renderer_vulkan/vk_graphics_pipeline.cpp
+@@ -17,6 +17,7 @@
+ #include "video_core/renderer_vulkan/pipeline_helper.h"
+ 
+ #include "common/bit_field.h"
++#include "common/scope_exit.h"
+ #include "video_core/renderer_vulkan/maxwell_to_vk.h"
+ #include "video_core/renderer_vulkan/pipeline_statistics.h"
+ #include "video_core/renderer_vulkan/vk_buffer_cache.h"
+@@ -324,7 +325,11 @@
+         }
+     }
+ 
++    // Select this while the constructor still owns the modules. A queued build
++    // may finish (and drop that ownership) before QueueWork returns.
++    configure_func = ConfigureFunc(*spv_modules, stage_infos);
+     auto func{[this, shader_notify, &render_pass_cache, pipeline_statistics] {
++        SCOPE_EXIT { spv_modules.reset(); };
+         const VkRenderPass render_pass{render_pass_cache.Get(MakeRenderPassKey(key.state, device))};
+         Validate();
+         try {
+@@ -355,7 +360,6 @@
+     } else {
+         func();
+     }
+-    configure_func = ConfigureFunc(*spv_modules, stage_infos);
+ }
+ 
+ void GraphicsPipeline::AddTransition(GraphicsPipeline* transition) {
+diff --git a/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp b/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp
+--- a/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp
++++ b/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp
+@@ -446,6 +446,12 @@
+                            Common::ThreadPlacement::Background),
+     translation_workers(num_translation_threads, "VkPipelineTranslator", {},
+                         Common::ThreadPlacement::Background) {
++#ifdef PS5_NATIVE
++    // The driver copies each module's SPIR-V. Keep reuse useful without holding
++    // every translated module for the whole session in the CPU/GPU shared pool.
++    shader_reuse.SetMemoryBudget(size_t{64} << 20);
++    LOG_INFO(Render_Vulkan, "PS5 shader reuse cache budget: 64 MiB of SPIR-V/fixed entry storage");
++#endif
+     const char* tensor_mode = std::getenv("EDEN_NX2_TENSOR");
+     const bool tensor_enabled = tensor_mode && std::string_view{tensor_mode} == "fast" &&
+                                 device.IsExtCooperativeMatrixSupported();
+@@ -1022,6 +1028,18 @@
+         }
+         if (use_shader_reuse) {
+             shader_reuse.Add(translation_key, shaders);
++#ifdef PS5_NATIVE
++            const auto stats = shader_reuse.GetStats();
++            auto reported = shader_reuse_evictions_reported.load(std::memory_order_relaxed);
++            if (stats.evictions > reported &&
++                (reported == 0 || stats.evictions - reported >= 128) &&
++                shader_reuse_evictions_reported.compare_exchange_strong(
++                    reported, stats.evictions, std::memory_order_relaxed)) {
++                LOG_INFO(Render_Vulkan,
++                         "PS5 shader reuse cache: {} MiB / {} MiB, {} keys, {} evictions",
++                         stats.bytes >> 20, stats.budget >> 20, stats.entries, stats.evictions);
++            }
++#endif
+         }
+     }
+     Common::ThreadWorker* const thread_worker{build_in_parallel ? &workers : nullptr};
+@@ -1142,6 +1160,7 @@
+     }
+     std::array<const Shader::Info*, Maxwell::MaxShaderStage> infos{};
+     auto modules{std::make_shared<GraphicsShaderModules>()};
++    size_t spirv_bytes{};
+ 
+     const Shader::IR::Program* previous_stage{};
+     Shader::Backend::Bindings binding;
+@@ -1163,6 +1182,7 @@
+         ConvertLegacyToGeneric(program, runtime_info);
+         VideoCommon::LoadingProbe::compiler.Mark("SPIRV", key.unique_hashes[index]);
+         const std::vector<u32> code{EmitSPIRV(profile, runtime_info, program, binding)};
++        spirv_bytes += code.size() * sizeof(u32);
+         device.SaveShader(code);
+         VideoCommon::LoadingProbe::compiler.Mark("module", key.unique_hashes[index]);
+         (*modules)[stage_index] = BuildShader(device, code);
+@@ -1195,6 +1215,7 @@
+ 
+     auto shaders{std::make_shared<ReusableShaders>()};
+     shaders->modules = std::move(modules);
++    shaders->spirv_bytes = spirv_bytes;
+     for (size_t stage = 0; stage < infos.size(); ++stage) {
+         if (infos[stage]) {
+             shaders->infos[stage] = *infos[stage];
+diff --git a/src/video_core/renderer_vulkan/vk_pipeline_cache.h b/src/video_core/renderer_vulkan/vk_pipeline_cache.h
+--- a/src/video_core/renderer_vulkan/vk_pipeline_cache.h
++++ b/src/video_core/renderer_vulkan/vk_pipeline_cache.h
+@@ -235,6 +235,7 @@
+ 
+     /// Declared before every thread pool, which all use it.
+     ShaderReuseCache shader_reuse;
++    std::atomic<u64> shader_reuse_evictions_reported{};
+ 
+     Shader::Profile profile;
+     Shader::HostTranslateInfo host_info;
+diff --git a/src/video_core/renderer_vulkan/vk_shader_reuse.cpp b/src/video_core/renderer_vulkan/vk_shader_reuse.cpp
+--- a/src/video_core/renderer_vulkan/vk_shader_reuse.cpp
++++ b/src/video_core/renderer_vulkan/vk_shader_reuse.cpp
+@@ -214,7 +214,8 @@
+         if (it == entries.end()) {
+             return {};
+         }
+-        variants = it->second;
++        variants = it->second->variants;
++        lru.splice(lru.end(), lru, it->second);
+     }
+     // Checked without the lock: asking a live environment reads guest memory.
+     for (const std::shared_ptr<const ReusableShaders>& shaders : variants) {
+@@ -222,7 +223,7 @@
+             return {.shaders = shaders};
+         }
+     }
+-    return {.rejected = true};
++    return {.shaders = {}, .rejected = true};
+ }
+ 
+ bool ShaderReuseCache::Contains(const ShaderTranslationKey& key) const {
+@@ -232,18 +233,64 @@
+ 
+ void ShaderReuseCache::Add(const ShaderTranslationKey& key,
+                            std::shared_ptr<const ReusableShaders> shaders) {
++    Lru retired;
++    {
++        std::scoped_lock lock{mutex};
++        const size_t bytes = shaders->MemoryCost();
++        if (bytes > memory_budget) return;
++        if (const auto it = entries.find(key); it != entries.end()) {
++            const Variants& variants = it->second->variants;
++            // Workers replaying the disk cache can translate the same shaders at the same time.
++            if (variants.size() >= MaxVariants ||
++                std::ranges::any_of(variants, [&shaders](const auto& variant) {
++                    return variant->reads == shaders->reads;
++                })) return;
++            lru.splice(lru.end(), lru, it->second);
++        }
++        Trim(bytes, retired);
++        auto it = entries.find(key); // Trim may have evicted this key too.
++        if (it == entries.end()) {
++            Entry entry{.key = key, .variants = {}, .bytes = bytes};
++            entry.variants.push_back(shaders);
++            lru.push_back(std::move(entry));
++            const auto added = std::prev(lru.end());
++            try {
++                entries.emplace(key, added);
++            } catch (...) {
++                retired.splice(retired.end(), lru, added);
++                throw;
++            }
++        } else {
++            it->second->variants.push_back(shaders);
++            it->second->bytes += bytes;
++        }
++        retained_bytes += bytes;
++    }
++}
++
++void ShaderReuseCache::Trim(size_t incoming_bytes, Lru& retired) {
++    while (retained_bytes > memory_budget - incoming_bytes) {
++        const auto oldest = lru.begin();
++        retained_bytes -= oldest->bytes;
++        entries.erase(oldest->key);
++        retired.splice(retired.end(), lru, oldest);
++        ++evictions;
++    }
++}
++
++void ShaderReuseCache::SetMemoryBudget(size_t bytes) {
++    Lru retired;
++    {
++        std::scoped_lock lock{mutex};
++        memory_budget = bytes;
++        Trim(0, retired);
++    }
++}
++
++ShaderReuseCache::Stats ShaderReuseCache::GetStats() const {
+     std::scoped_lock lock{mutex};
+-    Variants& variants{entries[key]};
+-    if (variants.size() >= MaxVariants) {
+-        return;
+-    }
+-    // Workers replaying the disk cache can translate the same shaders at the same time.
+-    const bool known{std::ranges::any_of(variants, [&shaders](const auto& variant) {
+-        return variant->reads == shaders->reads;
+-    })};
+-    if (!known) {
+-        variants.push_back(std::move(shaders));
+-    }
++    return {.bytes = retained_bytes, .budget = memory_budget,
++            .entries = entries.size(), .evictions = evictions};
+ }
+ 
+ } // namespace Vulkan
+diff --git a/src/video_core/renderer_vulkan/vk_shader_reuse.h b/src/video_core/renderer_vulkan/vk_shader_reuse.h
+--- a/src/video_core/renderer_vulkan/vk_shader_reuse.h
++++ b/src/video_core/renderer_vulkan/vk_shader_reuse.h
+@@ -17,6 +17,8 @@
+ 
+ #include <array>
+ #include <compare>
++#include <limits>
++#include <list>
+ #include <memory>
+ #include <mutex>
+ #include <optional>
+@@ -188,6 +190,7 @@
+ /// The shaders of a graphics pipeline, as built for the first key that needed them.
+ struct ReusableShaders {
+     std::shared_ptr<const GraphicsShaderModules> modules;
++    size_t spirv_bytes{};
+     std::array<Shader::Info, Maxwell::MaxShaderStage> infos;
+     /// What translation asked each program's environment, in the order the environments come.
+     boost::container::static_vector<TranslationReads, Maxwell::MaxShaderProgram> reads;
+@@ -197,6 +200,13 @@
+ 
+     /// Whether a pipeline with these environments would have been translated to these shaders.
+     [[nodiscard]] bool FitEnvironments(std::span<Shader::Environment* const> envs) const;
++
++    /// SPIR-V copied by the driver plus this entry's fixed storage. Dynamic
++    /// environment/descriptor storage and allocator overhead are not included.
++    [[nodiscard]] size_t MemoryCost() const noexcept {
++        constexpr size_t maximum = std::numeric_limits<size_t>::max();
++        return spirv_bytes > maximum - sizeof(*this) ? maximum : spirv_bytes + sizeof(*this);
++    }
+ };
+ 
+ /// Shaders built for earlier graphics pipelines, by translation key. Thread safe: the GPU thread,
+@@ -217,15 +227,40 @@
+ 
+     void Add(const ShaderTranslationKey& key, std::shared_ptr<const ReusableShaders> shaders);
+ 
++    /// Eviction drops cache ownership; compilation workers keep their own references.
++    void SetMemoryBudget(size_t bytes);
++
++    struct Stats {
++        size_t bytes;
++        size_t budget;
++        size_t entries;
++        u64 evictions;
++    };
++    [[nodiscard]] Stats GetStats() const;
++
+ private:
+     /// Variants kept per key: same programs and state, different environment answers (say, a
+     /// texture bound as 2D by one pipeline and as an array by another). Further ones are not
+     /// kept, so a key whose answers keep changing does not grow without bound.
+     static constexpr size_t MaxVariants = 4;
+     using Variants = boost::container::small_vector<std::shared_ptr<const ReusableShaders>, 1>;
++    struct Entry {
++        ShaderTranslationKey key;
++        Variants variants;
++        size_t bytes{};
++    };
++    using Lru = std::list<Entry>;
++
++    /// Called with mutex held. Destruction of retired shader modules happens
++    /// after the caller releases it, outside the cache's lock.
++    void Trim(size_t incoming_bytes, Lru& retired);
+ 
+     mutable std::mutex mutex;
+-    ::Common::unordered_map<ShaderTranslationKey, Variants, ShaderTranslationKeyHash> entries;
++    mutable Lru lru;
++    ::Common::unordered_map<ShaderTranslationKey, Lru::iterator, ShaderTranslationKeyHash> entries;
++    size_t retained_bytes{};
++    size_t memory_budget{std::numeric_limits<size_t>::max()};
++    u64 evictions{};
+ };
+ 
+ } // namespace Vulkan

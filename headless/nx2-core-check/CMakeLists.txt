@@ -18,6 +18,9 @@ file(GLOB ampere_tests CONFIGURE_DEPENDS "${EDEN_SOURCE}/src/tests/video_core/am
 # This host check exercises the header-only native capture/lowering and memory helpers.
 list(FILTER ampere_tests EXCLUDE REGEX "ampere_(bindless_tex|sured)\\.cpp$")
 add_executable(nx2-core-check ${ampere_tests}
+    logging.cpp
+    "${EDEN_SOURCE}/src/tests/common/host_command_completion.cpp"
+    "${EDEN_SOURCE}/src/tests/common/host_command_queue.cpp"
     "${EDEN_SOURCE}/src/tests/core/read_traps.cpp"
     "${EDEN_SOURCE}/src/tests/core/nx2_readback_cache.cpp"
     "${EDEN_SOURCE}/src/tests/core/nx2_core_readback_capacity.cpp"
@@ -25,7 +28,11 @@ add_executable(nx2-core-check ${ampere_tests}
     "${EDEN_SOURCE}/src/tests/video_core/nx2_command_ranges.cpp"
     "${EDEN_SOURCE}/src/tests/video_core/nx2_command_sync.cpp"
     "${EDEN_SOURCE}/src/tests/video_core/nx2_sparse_region.cpp"
-    "${EDEN_SOURCE}/src/tests/video_core/memory_budget.cpp")
+    "${EDEN_SOURCE}/src/tests/video_core/nx2_sparse_tiles.cpp"
+    "${EDEN_SOURCE}/src/tests/video_core/nx2_sparse_images.cpp"
+    "${EDEN_SOURCE}/src/tests/video_core/nx2_sparse_image_write.cpp"
+    "${EDEN_SOURCE}/src/tests/video_core/memory_budget.cpp"
+    "${EDEN_SOURCE}/src/tests/video_core/query_region_visit.cpp")
 file(GLOB boost_includes "${DEPENDENCY_SOURCE}/.cache/cpm/boost/*/libs/*/include")
 target_include_directories(nx2-core-check PRIVATE "${EDEN_SOURCE}/src" "${FMT_INCLUDE}" ${boost_includes})
 target_link_libraries(nx2-core-check PRIVATE Catch2::Catch2WithMain)

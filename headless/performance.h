@@ -23,12 +23,12 @@ void BeginPcSampling();
 void PollGpuPc();
 // Development: A64 block compilation split into translate, optimize, emit and the emitter's
 // block-range registration (part of emit), per guest core, in nanoseconds.
-inline std::array<std::array<std::atomic<unsigned long long>, 4>, 4> jit_phase_ns{};
+inline std::array<std::array<std::atomic<unsigned long long>, 4>, 6> jit_phase_ns{};
 // Development: A64 blocks per guest core that no core had compiled before, that this core had
 // compiled before (after an invalidation), and that another core compiled first, by how long
 // before: under 1 ms, 10 ms, 100 ms, 1 s, 10 s, and later. Counted only with dev-settings
 // jit_dups=on (a process-wide lock and map insert per compiled block).
-inline std::array<std::array<std::atomic<unsigned long long>, 8>, 4> jit_duplicates{};
+inline std::array<std::array<std::atomic<unsigned long long>, 8>, 6> jit_duplicates{};
 inline std::atomic<bool> jit_duplicate_tracking{false};
 // Guest core whose host PCs the development sampler collects (dev-settings pc_core=N, default 0).
 inline std::atomic<unsigned> pc_sample_core{0};
@@ -44,13 +44,74 @@ inline std::atomic<bool> firmware_applets{false};
 // One writer per guest core. JIT state is read only by its owning worker after Run.
 enum class CpuPhase : unsigned { Kernel, Guest, Idle };
 struct alignas(64) CpuState { std::atomic<CpuPhase> phase{}; };
-inline std::array<CpuState, 4> cpu_state{};
+inline std::array<CpuState, 6> cpu_state{};
 void SampleCpu(unsigned core, unsigned long long thread, unsigned long long pc, unsigned svc, unsigned fpcr);
 struct alignas(64) Totals {
     std::atomic<unsigned long long> calls{}, nanoseconds{}, requested_bytes{};
 };
-inline std::array<Totals, 4> compilation;
-inline std::array<std::atomic<unsigned long long>, 4> evacuations{};
+inline std::array<Totals, 6> compilation;
+// Temporary MKW timing probes.
+inline Totals mkw_transcode, mkw_transcode_finish;
+inline std::array<Totals, 512> mkw_guest_run{}, mkw_main_wakers{};
+// Temporary bounded dependency and run-exit samples. Exit PCs are not statistical PC samples.
+inline std::array<std::array<Totals, 512>, 11> mkw_worker_wakers{};
+struct MkwRunExit {
+    std::atomic<unsigned long long> key{}, calls{}, ns{}, max_ns{};
+};
+inline std::array<MkwRunExit, 8192> mkw_run_exits{};
+inline std::atomic<unsigned long long> mkw_run_exit_overflow{};
+// Latest slow slice for each observed guest worker, sampled at most once per second.
+// Atomic sequence brackets protect the external reader from partially published records.
+inline std::array<std::array<std::atomic<unsigned long long>, 24>, 11> mkw_slow_runs{};
+template <typename Jit, typename Memory>
+inline void MkwSlowRun(unsigned long long tid, unsigned long long now,
+                       unsigned long long ns, unsigned halt, const Jit& jit, Memory& memory) {
+    if (tid < 181 || tid > 191 || ns < 2'000'000) return;
+    auto& row = mkw_slow_runs[tid - 181];
+    if (now - row[1].load(std::memory_order_relaxed) < 1'000'000'000) return;
+    row[0].fetch_add(1, std::memory_order_seq_cst);
+    row[1].store(now); row[2].store(ns); row[3].store(jit.GetPC());
+    row[4].store(jit.GetRegister(30)); row[5].store(jit.GetFpcr()); row[6].store(halt);
+    row[7].store(jit.GetRegister(0)); row[8].store(jit.GetRegister(1));
+    auto fp = jit.GetRegister(29);
+    row[9].store(fp);
+    for (unsigned i = 10; i < 24; ++i) {
+        unsigned long long ret = 0;
+        if (fp && (fp & 7) == 0 && memory.IsValidVirtualAddressRange(fp, 16)) {
+            ret = memory.Read64(fp + 8);
+            const auto next = memory.Read64(fp);
+            fp = next > fp && next - fp < 1024 * 1024 ? next : 0;
+        } else fp = 0;
+        row[i].store(ret);
+    }
+    row[0].fetch_add(1, std::memory_order_seq_cst);
+}
+
+inline void MkwRecordRunExit(unsigned long long tid, unsigned long long pc,
+                             unsigned long long ns) {
+    if (tid < 181 || tid > 191 || pc >= (1ULL << 48)) return;
+    const auto key = (tid << 48) | pc;
+    unsigned slot = static_cast<unsigned>((pc >> 2) ^ (pc >> 16) ^ tid) % mkw_run_exits.size();
+    for (unsigned probe = 0; probe < mkw_run_exits.size(); ++probe) {
+        auto& row = mkw_run_exits[slot];
+        auto held = row.key.load(std::memory_order_relaxed);
+        if (held == 0) {
+            row.key.compare_exchange_strong(held, key, std::memory_order_relaxed);
+            held = row.key.load(std::memory_order_relaxed);
+        }
+        if (held == key) {
+            row.calls.fetch_add(1, std::memory_order_relaxed);
+            row.ns.fetch_add(ns, std::memory_order_relaxed);
+            auto max = row.max_ns.load(std::memory_order_relaxed);
+            while (max < ns && !row.max_ns.compare_exchange_weak(max, ns, std::memory_order_relaxed)) {}
+            return;
+        }
+        slot = (slot + 1) % mkw_run_exits.size();
+    }
+    mkw_run_exit_overflow.fetch_add(1, std::memory_order_relaxed);
+}
+
+inline std::array<std::atomic<unsigned long long>, 6> evacuations{};
 inline Totals storage;
 inline Totals jit_protection;
 inline Totals rasterizer_draw;
@@ -245,6 +306,15 @@ inline void WaitEnd(unsigned long long tid, unsigned reason, long long now_ns,
     const long long start = wait_threads[slot].start.exchange(0, std::memory_order_relaxed);
     if (start == 0) return;
     const unsigned long long n = static_cast<unsigned long long>(now_ns > start ? now_ns - start : 0);
+    if (tid == 86 && waker_tid < mkw_main_wakers.size()) {
+        mkw_main_wakers[waker_tid].calls.fetch_add(1, std::memory_order_relaxed);
+        mkw_main_wakers[waker_tid].nanoseconds.fetch_add(n, std::memory_order_relaxed);
+    }
+    if (tid >= 181 && tid <= 191 && waker_tid < 512) {
+        auto& row = mkw_worker_wakers[tid - 181][waker_tid];
+        row.calls.fetch_add(1, std::memory_order_relaxed);
+        row.nanoseconds.fetch_add(n, std::memory_order_relaxed);
+    }
     wait_threads[slot].ns.fetch_add(n, std::memory_order_relaxed);
     wait_threads[slot].calls.fetch_add(1, std::memory_order_relaxed);
     wait_threads[slot].waker.store(waker_tid, std::memory_order_relaxed);
@@ -358,7 +428,7 @@ inline std::array<std::atomic<unsigned long long>, 20> render_conditions{};
 struct IdleCounters {
     std::atomic<unsigned long long> calls{0}, nanoseconds{0}, sleeps{0};
 };
-inline std::array<IdleCounters, 4> guest_idle{};
+inline std::array<IdleCounters, 6> guest_idle{};
 // PAUSE iterations a guest core spins on its interrupt flag before sleeping (~20 ns each on the
 // console). Guest job systems hand work between cores ~150 times a frame; sleeping on each
 // handoff put the host's thread wake-up latency on the critical path. 100 us (the default) took
@@ -395,13 +465,14 @@ inline void AddSince(Totals& totals, long long start) {
 struct alignas(64) JitCallbacks {
     std::atomic<unsigned long long> reads{}, writes{}, exclusive_writes{};
 };
-inline std::array<JitCallbacks, 4> jit_callbacks{};
+inline std::array<JitCallbacks, 6> jit_callbacks{};
 inline void CountJit(std::atomic<unsigned long long>& counter) {
     counter.fetch_add(1, std::memory_order_relaxed);
 }
 // GPU thread only (Vulkan frame report): cumulative GPU-thread idle/dispatch/wait
 // totals with the owner's CPU clock, then a guest-core CPU snapshot.
 void ReportGpuThread(unsigned frame);
+void ReportMemoryPressure(unsigned seconds);
 // The heap's line in stderr.log: what it holds of the pool, what of that its blocks use, what it has given back.
 void ReportHeap(const char* why);
 // Gives the heap's empty spaces back to the pool; the bytes returned.

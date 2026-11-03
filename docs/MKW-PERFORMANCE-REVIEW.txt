@@ -1,0 +1,261 @@
+Mario Kart World PS5 performance review — 2026-11-02
+
+Scope
+This draft preserves the accumulated investigation, including experimental
+instrumentation, as requested. The core remains Zortos 3140648a668aaebf87bae2dea17512fdca125ba0.
+Maintained patch 0004 is incremental over the existing three patches. The
+review branch is based on main 3c32faa and preserves its extracted-content
+and Pokopia fixes. No core fork switch or driver binary is included.
+
+The accumulated changes cover task/mesh shader handling, GPU mapping and
+readback tracking, bounded texture uploads and ASTC decoding, staging
+reclamation, targeted command completion, guest-memory/fiber/JIT budgets,
+per-frame ordered-read telemetry, and faster native directory enumeration.
+The latter scans metadata to construct the virtual RomFS; game contents are
+still read on demand. Known files need one stat; known directories need none.
+NFS/NTFS entries use followed stat outside the listing callback because the
+shared interface may report zero file sizes and hold its own mutex.
+
+Measured loading results
+One bounded console run per candidate, using identical profiling schedules:
+                         loader(s)  guest startup(s) first-frame total(s)
+42 baseline                44.794       72.804             117.598
+43 range-local mapping     44.801       34.745              79.546
+45 mapping + metadata      32.732       33.583              66.315
+Times are monotonic EDEN_STAGE durations from session start. First frame is
+not title-ready time. Different randomized attract scenes prevent a matched
+gameplay FPS comparison. Profiling itself adds overhead. Viewed captures
+showed rendered title terrain/kart/background; title performance remained
+around 13 FPS. Neither sustained 40 FPS nor 60 FPS has been achieved.
+
+Early loading profiles were dominated by stat/lstat. Later profiles showed
+full GPU mapping-table rebuild/sort work; range-local updates reduced that
+work. The first FPS collapse preceded severe heap pressure. Texture/render
+allocations and temporary ASTC decode images add pressure later, but the
+measurements do not establish memory exhaustion as the sole loading cause.
+The diagnostic driver's roughly 6 GiB sparse reservation aliases a single
+2 MiB zero block; that reservation is not 6 GiB of eager physical allocation.
+
+Direct mapped readback experiment (candidate 41)
+Non-sparse allocations <=512 KiB, bounded 16 MiB live pool, persistent host
+mapping and producer-range certificates. Only already-completed producers
+qualify. GPU submission includes a HOST_READ visibility barrier; unfinished
+or unknown writers fall back. Guest RAM is not imported. Asynchronous
+snapshots retain staging. Mapping removes copies, not ordering requirements.
+
+Console validation compared 21,242,192 bytes against staging with zero
+mismatches. Five stationary Free Roam phases at Whistlestop Summit included
+validation, baseline, direct, baseline, direct; 15 frames per phase. NPC
+motion remained variable. Pooled baseline/direct windows, 30 frames each:
+  FPS:                         13.1602 / 13.2011
+  Ordered reads/frame:        230.633 / 231.8
+  Completion CPU ms/frame:    43.8233 / 42.8957
+  Queue delay ms/frame:       41.6296 / 40.6801
+  Service ms/frame:            1.16084 / 1.16741
+  GPU wait API ms/frame:       0.31765 / 0.32171
+Direct mode removed exactly 20,224 GPU staging bytes/frame in both windows.
+Buffer copies within ordered CPU-read callbacks were zero in both modes;
+these downloads occur elsewhere. Ordered-read counts did not decrease and
+no meaningful FPS gain was established. Overlapping CPU totals must not be
+interpreted as a wall-clock frame breakdown. Cache visibility is validated
+only for these tested ranges and driver, not every mapping or workload.
+
+Provenance and limitations
+Candidate 42/41 eboot SHA256:
+b2bbef620dd5cf552965ba555558d171ab1cebe916e91ade5d92796fd9294483
+Candidate 43:
+176880b2518121773bc65c78f667a473d7834ebd1899bd30e86b731f8b807263
+Candidate 45:
+131d7b674c044231afc0644005d4a05ec7dd1351f504fd9dc9a0c2849ad93dbb
+Candidate 44 was superseded before deployment after finding the NTFS size
+issue. Candidate 45 includes the corrected metadata helper.
+
+The console runs used the locally modified Mesa 26.2.0 RADV build revision
+7b59ef27, isolated archive SHA256:
+fdd18c8d492e9b7abf4324bfeacd4fb5b4134059f8c72ef7eb801b66c9c54e98
+That diagnostic archive is not included in this PR. Driver portability and
+production-driver behavior need separate validation. No new ps5-vulkan
+patch was established by the loading investigation.
+
+Raw profiles, shader/GPFIFO captures, game data and console control files
+are excluded. Local evidence identifiers are upload41-run-1793650997402206680,
+upload42-run-1793651528995439211, upload43-run-1793652079947463883 and
+upload45-run-1793652545495037157. The normal console executable/settings
+were restored and hash verified after the last experiment.
+
+Review controls
+EDEN_MKW_DIAGNOSTICS defaults OFF. Enable it explicitly at build time for
+one-shot Mario Kart launch controls and intrusive snapshots/environment
+probes. Some bounded core and CPU instrumentation remains compiled/enabled;
+this is a broad research draft, not a claim of zero production overhead.
+Published-semaphore and partial-readback experiments need further review.
+Later diagnostic builds on the current-main base were exercised on console;
+the latest timestamp build reached the title/menu, then exhausted memory
+before Free Roam. The complete accumulated normal configuration has not been
+console-tested. Earlier experiment binaries remain the readback evidence.
+
+Host validation
+Patch reproduction: four patches, 128 touched files, matching the working
+core. ASan/UBSan checks passed for mapped allocation policy, range tracker
+(240,000 oracle queries), writer tracker (10,000 allocation lifetimes), and
+native directory metadata including symlinks, malformed records and NFS.
+Heap stress (including ThreadSanitizer), targeted GPU completion and staging
+reclamation checks passed. The release hot-path check intentionally remains
+failing because the accumulated draft retains experimental timers. The host
+startup fixture now expects six progress slots and excludes the PS5 sampler
+on non-PS5 hosts. Related CPU/JIT sampling arrays were also expanded to six
+slots to fix an out-of-bounds read exposed by this fixture. See the PR description for the native build/check result.
+
+AI assistance
+Implementation, analysis, review preparation and this report were assisted
+by OpenAI Codex. Human review is required before merging this research draft.
+
+Follow-up: separate frontend and backend queue delay
+Reanalyzed all five complete candidate-41 captures (75 frames, 17,238 reads)
+without modifying the original evidence. Total queue delay partitions into
+3,064.440 ms before frontend pop and 30.657 ms between pop and backend start.
+Total read-call time across threads was 3,396.993 ms. The analyzer now exports
+both partitions per read, per frame and per read type, and checks their sum
+against the existing queue duration whenever all timestamps are present.
+These are overlapping thread durations, not a frame-wall-time decomposition.
+
+The main semaphore site (guest PC 0x856894d0 at observational guest address
+0x2106235000) accounts for 74–85% of each window's call time; another PC at
+the same address adds time in two windows. Most observations changed value.
+The longest read took 40.186 ms, including 40.160 ms before pop, about 1.8 us
+between pop and service, and 8.9 us in service. A clean cache at service does
+not prove that these reads could safely bypass earlier commands.
+
+An older candidate-38 Free Roam profile contains Vulkan command handoff,
+macro processing and fence-drain waits ahead of reads. It is not synchronous
+with candidate-41 events, so it does not attribute each long read to a specific
+command. Next runtime evidence should correlate preceding-command execution
+with each long read, including forced fence drains and command handoffs.
+No frame-rate gain is claimed from this analyzer change. Read-only console
+status was idle during this follow-up; no deployment or restart was performed.
+
+Follow-up: memory accounting and allocation lifetime
+Five-second diagnostic reports distinguish committed guest pages, sparse
+tables, heap arenas, large allocations and the largest free physical block.
+In run 1793655818645405571, sparse tables remained around 228-230 MiB while
+guest backing grew from 3977 to 4473 MiB and heap arenas from 1472 to 1632 MiB
+(plus 396 MiB of large allocations). Tables were not the dominant growth.
+This does not justify reclaiming live sparse slots without lifetime proof.
+
+Bounded VMA detailed maps and tools/analyze-vma-map.py separate dedicated
+allocations, wholly empty blocks and unused space within live blocks. In run
+1793656450297553771 at 150 s, pooled backing was 2056 MiB plus 1722.91 MiB
+dedicated, with no wholly empty pooled blocks and 573.47 MiB unused inside
+live blocks. Tiny allocations pinned many 64 MiB blocks. The run exhausted
+device memory at 224 s; clearing only empty blocks cannot solve this case.
+
+An opt-in ASTC temporary-image allocator uses 16 MiB custom-pool blocks,
+bounded to 32 blocks per memory type, with ordinary allocation fallback.
+It preserves existing GPU completion/lifetime rules and does not relocate
+live images. EDEN_PS5_TRANSIENT_POOLS enables it; diagnostic builds enable
+it explicitly. Allocation/binding failures clean partial resources.
+Run 1793657655811844512 reached viewed Free Roam and completed its bounded
+observation. At 90 s its pooled backing was 1816 MiB versus 2064 MiB in the
+earlier run, but scenes differed: this is not a controlled 248 MiB saving.
+Later unused space inside live default-pool blocks returned to 839.95 MiB.
+The final approximately 30 seconds averaged 15.453 FPS. Ten complete traced
+frames had 225 ordered reads/frame and 319.411 ms summed frontend queue delay
+across threads. No matched FPS gain or sustained stability is established.
+
+Adding allocator fields exposed a build-cache hazard: direct-mode ccache
+could reuse consumers compiled with the original header while other objects
+used the generated override. Native builds now disable direct-mode lookup,
+declare explicit generated-header dependencies, and verify factory, renderer,
+allocator and texture-cache object dependencies before packaging.
+
+Follow-up: worker notification A/B and semaphore clock
+The scheduler now has distinct work and drain condition variables. Selective
+notification is experimental and defaults off. The alternative uses notify_one
+for work and avoids unnecessary drain broadcasts; completion order is retained.
+Both comparison modes use the split condition variables, so the baseline is
+not the original upstream shared-CV implementation.
+
+Run 1793658554054919162 used the same process, stationary forest kart/camera,
+and acknowledged mode sequence 0,1,0,1. All four 10-frame streams were complete.
+Pooled baseline/selective results (20 frames each):
+  FPS:                         12.3113 / 12.0735
+  Ordered reads/frame:        213.7 / 207.85
+  Read-call CPU ms/frame:      52.5568 / 51.8739
+  Frontend queue ms/frame:     48.4376 / 47.8636
+  Backend queue ms/frame:       0.38163 / 0.37118
+  GPU wait API ms/frame:        0.32541 / 0.31606
+  GPU and CPU copy B/frame:    999140 / 973491.2
+CPU durations overlap across threads. Animated scene traffic and short windows
+can account for count/copy variation. No meaningful wait/FPS benefit was shown;
+selective notification stays disabled. Profiles confirm the notification policy
+changed, so the negative result is retained rather than presented as a gain.
+
+Satisfied Ampere semaphore acquires now avoid reading the diagnostic clock;
+unsatisfied acquires still initialize their warning timer. Comparisons,
+draining, waiter registration, fence release and the second read are unchanged.
+The real-branch ASan/UBSan fixture covers satisfied, blocked, released, latched,
+unmapped and invalid operations. No isolated console FPS benefit is claimed.
+
+Follow-up: bounded GPU timestamps
+Diagnostic builds enable a 512-slot timestamp probe with valid-bit wrap handling,
+nonblocking collection, cumulative counters and device-lifetime cleanup after
+the scheduler worker joins. Disabled builds add no device-idle wait. Fixtures
+cover readiness, wrap, ring exhaustion, invalid capabilities and relaunch.
+
+Latest native diagnostic build/package passed. Eboot SHA256:
+aeedd6b5c254b8555f7043ea6aa3d6d3b1d9d4a2684c23ed3261e8fd632580f6
+Run 1793659386298621062 reached viewed title/menu with working query results.
+Seven late windows totalled 35.059 s, 50,770 submissions and 4.0811 s of
+graphics timestamp spans (1448 submissions/s). The preceding upload command
+buffer, gaps and other GPU work are outside these brackets. These numbers
+are not whole-device utilization or proof that the entire game is CPU-bound;
+timestamp instrumentation itself adds overhead. Free Roam was not reached.
+At 234 s the Vulkan worker failed with VK_ERROR_OUT_OF_DEVICE_MEMORY and a
+largest free physical block of zero. Memory exhaustion remains unresolved.
+
+The diagnostic source fixtures and allocator-header checks passed; the full
+release hot-path rule still fails on retained experimental timers. Detailed
+copy-source overflow is now explicitly reported: strict analysis rejects it;
+an optional mode retains complete ordered-read/frame aggregates but omits
+incomplete source attribution. Missing copy events are never counted as zero.
+Original executable, package metadata, settings and input controls were restored
+and verified after these runs. Raw console/game captures remain excluded.
+
+Next measurements should cover upload plus graphics work and classify actual
+submission initiators alongside each frame's waits. Allocation fragmentation
+and sustained Free Roam stability remain open before any 40 FPS claim.
+
+Follow-up: upload-plus-graphics spans and submission callers
+Run 1793660399464408198 (fresh PID 640) moved the start timestamp to the upload
+command buffer, retaining the end timestamp in graphics. Both submission APIs
+place uploads first. Bounded caller counters capture recording-thread origins
+by value and count successful worker submissions; overflow is explicit. The
+matched ELF and runtime anchor resolve ASLR. Optimized tail calls can omit
+intermediate callers, so attribution is not a complete stack.
+
+Viewed title, menu, Free Roam and late Free Roam showed Shy Guy Bazaar scenery,
+road, kart, minimap and moving NPC traffic. Ten complete traced frames measured
+12.1411 FPS and 280.6 ordered reads/frame, without dropped read/copy events.
+Summed read-call time was 513.596 ms, frontend queue 461.393 ms, backend queue
+5.014 ms and GPU wait API 3.378 ms across those frames. Individual calls had
+median 0.025098 ms, p95 0.044823 ms and maximum 44.146885 ms. CPU durations
+overlap across threads. One semaphore site contributed 84.19% of call time,
+one read/frame, and changed value on all ten observations. Most other reads
+were short and unchanged. Clean-at-service alone cannot justify bypassing
+the dominant dependency. Both GPU and CPU copy totals were 12,735,088 bytes.
+
+The last three complete GPU windows after entering Free Roam covered 15.0036 s:
+30,751 submissions, no caller overflow and 1.4575 s upload-plus-graphics spans.
+24,083 submissions came through FenceManager::QueueFence, 4,800 through buffer
+Finish, 1,111 through DmaPusher::DispatchCalls, 552 through texture Finish,
+184 through presentation and 21 through transcode pressure completion. This
+is about 2,050 submissions/s. Inter-submission gaps and other work remain
+outside the timestamps; query overhead prevents an uninstrumented FPS claim.
+
+The diagnostic native build/package, sanitizer fixtures and allocator-header
+checks passed. The run ended at its planned observation with no fresh crash;
+largest free physical block was still only 197 MiB near the end. This is no
+sustained stability or movement-input test. Original console files/settings
+and input controls were restored and verified. The 40 FPS goal remains open.
+Next distinguish buffer/texture/query fence requirements and the callers of
+runtime Finish before changing batching or guest completion ordering.

@@ -40,6 +40,10 @@ void GuestMemoryUsage(std::size_t* span, std::size_t* held) noexcept;
 void SparseUsage(std::size_t* reserved, std::size_t* committed) noexcept;
 } // namespace Common
 
+#ifdef PS5_NATIVE
+#include "mkw_native_sample.inc"
+#endif
+
 namespace Eden::Performance {
 namespace {
 constexpr std::array names{"CPUCore_0", "CPUCore_1", "CPUCore_2", "CPUCore_3",
@@ -245,9 +249,9 @@ struct CpuSample {
     unsigned svc = ~0u, fpcr = 0;
     unsigned long long compilations = 0, compile_ns = 0;
 };
-std::array<CpuSample, 4> cpu_samples;
+std::array<CpuSample, 6> cpu_samples;
 // Read/written only by the worker owning this core; samples use workers_mutex.
-std::array<unsigned, 4> sampled_epoch{~0u, ~0u, ~0u, ~0u};
+std::array<unsigned, 6> sampled_epoch{~0u, ~0u, ~0u, ~0u, ~0u, ~0u};
 clockid_t process_clock{};
 int CurrentCpuClock(clockid_t* clock, bool process = false) {
 #ifdef PS5_NATIVE
@@ -447,6 +451,29 @@ std::size_t TrimHeap(const char* why) {
         ReportHeap(text);
     }
     return returned;
+}
+
+extern "C" void eden_vma_probe(unsigned) __attribute__((weak));
+void ReportMemoryPressure(unsigned seconds) {
+    if (seconds >= 90 && seconds <= 270 && seconds % 60 == 30 && eden_vma_probe)
+        eden_vma_probe(seconds);
+    std::size_t tables = 0, table_span = 0, guest = 0, guest_span = 0;
+    ::Common::SparseUsage(&table_span, &tables);
+    ::Common::GuestMemoryUsage(&guest_span, &guest);
+    unsigned blocks = 0;
+    const auto large = eden_heap_large_held ? eden_heap_large_held(&blocks) : 0;
+    std::printf("MKW_MEMORY seconds=%u tables=%zu table_span=%zu guest=%zu guest_span=%zu heap=%zu large=%zu large_blocks=%u",
+        seconds, tables, table_span, guest, guest_span,
+        eden_heap_committed ? eden_heap_committed() : std::size_t{0}, large, blocks);
+#ifdef PS5_NATIVE
+    const auto total = sceKernelGetDirectMemorySize();
+    std::int64_t start = 0;
+    std::size_t largest = 0;
+    const auto status = total > 0 ? sceKernelAvailableDirectMemorySize(0, total, 0x4000, &start, &largest) : -1;
+    std::printf(" direct_total=%lld largest_free=%zu query_status=%d", static_cast<long long>(total), largest, int(status));
+#endif
+    std::printf("\n");
+    std::fflush(stdout);
 }
 
 void ReportGpuThread(unsigned frame) {
@@ -693,6 +720,9 @@ void ReportGpuThread(unsigned frame) {
 }
 
 void RegisterWorker(const char* name) {
+#ifdef PS5_NATIVE
+    MkwNativeSample::Register(name);
+#endif
     Eden::Crash::NameThread(name);  // a crash report names the thread
 #if defined(EDEN_DEV_PROFILE) && defined(PS5_NATIVE)
     Eden::Stall::NoteThread(name);
@@ -1164,3 +1194,5 @@ extern "C" void eden_jit_compile(unsigned core, unsigned long long ns) {
     Eden::Performance::compilation[core].calls.fetch_add(1, std::memory_order_relaxed);
     Eden::Performance::compilation[core].nanoseconds.fetch_add(ns, std::memory_order_relaxed);
 }
+
+#include "ordered_read_trace.inc"
