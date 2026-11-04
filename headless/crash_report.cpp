@@ -636,3 +636,8 @@ Last TakeLast(const std::string& logs_folder, const std::string& eden_log) {
 }
 
 } // namespace Eden::Crash
+
+// The calling thread's name for the guest memory service's writer counts (src/guest_memory_service.inc).
+extern "C" const char* eden_current_thread_name() noexcept {
+    return Eden::Crash::ThreadName((std::uintptr_t)pthread_self());
+}

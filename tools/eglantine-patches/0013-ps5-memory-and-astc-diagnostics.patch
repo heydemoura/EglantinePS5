@@ -1,0 +1,420 @@
+diff --git a/src/video_core/renderer_vulkan/vk_texture_cache.cpp b/src/video_core/renderer_vulkan/vk_texture_cache.cpp
+index b11b889..ff3c993 100644
+--- a/src/video_core/renderer_vulkan/vk_texture_cache.cpp
++++ b/src/video_core/renderer_vulkan/vk_texture_cache.cpp
+@@ -7,6 +7,7 @@
+ // SPDX-License-Identifier: GPL-3.0-or-later
+ 
+ #include <algorithm>
++#include <atomic>
+ #include <limits>
+ #include <array>
+ #include <cstdlib>
+@@ -312,7 +313,15 @@ constexpr std::array<VkFormat, 2> OpaqueAstcViewFormats{VK_FORMAT_BC1_RGBA_UNORM
+ [[nodiscard]] ImageInfo TrimmedHostInfo(const Device& device, const ImageInfo& info, u32& level_offset) {
+     level_offset = 0;
+     const bool decoded = WillUseAcceleratedAstcDecode(device, info);
+-    if (info.type != ImageType::e2D || !(decoded || WillUseGpuBcnTranscode(device, info))) {
++    // ASTC decoded and re-compressed on the CPU takes the size cap too when it is lowered
++    // (EDEN_NS2_MAX_TEXTURE): the upload drops the levels the host image does not keep.
++    static const bool cap_lowered = [] {
++        const char* value = std::getenv("EDEN_NS2_MAX_TEXTURE");
++        return value != nullptr && std::strtoul(value, nullptr, 10) < 2048;
++    }();
++    const bool cpu_astc = cap_lowered && IsPixelFormatASTC(info.format) && !device.IsOptimalAstcSupported() &&
++                          info.size.depth == 1 && info.resources.layers == 1;
++    if (info.type != ImageType::e2D || !(decoded || WillUseGpuBcnTranscode(device, info) || cpu_astc)) {
+         return info;
+     }
+     const u32 levels = static_cast<u32>(info.resources.levels);
+@@ -326,7 +335,12 @@ constexpr std::array<VkFormat, 2> OpaqueAstcViewFormats{VK_FORMAT_BC1_RGBA_UNORM
+     // Switch 2 ASTC textures decoded on the GPU keep at most 2048 texels a side: a 4K texture is
+     // held from its next mip level on (a quarter of the video memory and decode work). The game's
+     // own mips are used, so nothing is resampled. EDEN_NS2_FULL_TEXTURES=1 keeps them whole.
+-    constexpr u32 MaxNativeSize = 2048;
++    // EDEN_NS2_MAX_TEXTURE=<texels> lowers the cap (1024, 512) where video memory is short.
++    static const u32 MaxNativeSize = [] {
++        const char* value = std::getenv("EDEN_NS2_MAX_TEXTURE");
++        const unsigned long size = value != nullptr ? std::strtoul(value, nullptr, 10) : 0;
++        return size >= 256 && size <= 2048 ? static_cast<u32>(size) : 2048U;
++    }();
+     static const bool full_textures = std::getenv("EDEN_NS2_FULL_TEXTURES") != nullptr;
+     if (info.native_tiling && !full_textures) {
+         while (level_offset + 1 < levels &&
+@@ -2222,6 +2236,44 @@ Image::Image(TextureCacheRuntime& runtime_, const ImageInfo& info_, GPUVAddr gpu
+         flags |= VideoCommon::ImageFlagBits::Converted;
+         flags |= VideoCommon::ImageFlagBits::CostlyLoad;
+     }
++    if (IsPixelFormatASTC(info.format) && !runtime->device.IsOptimalAstcSupported()) {
++        // ASTC_PATH (EDEN_ASTC_PATH_DIAG=1): which decode path each new ASTC image takes.
++        static const bool diag = [] {
++            const char* value = std::getenv("EDEN_ASTC_PATH_DIAG");
++            return value != nullptr && value[0] == '1';
++        }();
++        if (diag) {
++            static std::atomic<u64> counts[5]{};
++            const bool huge = IsHugeAstcArray(runtime->device, info);
++            const bool gpu_rgba = WillUseAcceleratedAstcDecode(runtime->device, info);
++            const bool gpu_bcn = WillUseGpuBcnTranscode(runtime->device, info);
++            const bool accelerated = True(flags & VideoCommon::ImageFlagBits::AcceleratedUpload);
++            const bool async = True(flags & VideoCommon::ImageFlagBits::AsynchronousDecode);
++            const u32 path = huge ? 0 : gpu_bcn && accelerated ? 1 : gpu_rgba && accelerated ? 2
++                           : async ? 3 : 4;
++            static constexpr const char* names[5]{"gpu_huge_rgba", "gpu_bcn", "gpu_rgba",
++                                                  "cpu_async", "cpu_sync"};
++            const u64 n = ++counts[path];
++            const u64 total = counts[0] + counts[1] + counts[2] + counts[3] + counts[4];
++            if (path >= 3 && n <= 300) {
++                LOG_WARNING(Render_Vulkan,
++                            "ASTC_PATH path={} gpu=0x{:x} fmt={} type={} size={}x{}x{} layers={} "
++                            "levels={} decode_mode={} recompression={} gpu_rgba={} gpu_bcn={}",
++                            names[path], gpu_addr, static_cast<u32>(info.format),
++                            static_cast<u32>(info.type), info.size.width, info.size.height,
++                            info.size.depth, info.resources.layers, info.resources.levels,
++                            static_cast<u32>(Settings::values.accelerate_astc.GetValue()),
++                            static_cast<u32>(Settings::GetAstcRecompression()), gpu_rgba, gpu_bcn);
++            }
++            if (total % 200 == 0) {
++                LOG_WARNING(Render_Vulkan,
++                            "ASTC_PATH_SUMMARY total={} gpu_huge_rgba={} gpu_bcn={} gpu_rgba={} "
++                            "cpu_async={} cpu_sync={}",
++                            total, counts[0].load(), counts[1].load(), counts[2].load(),
++                            counts[3].load(), counts[4].load());
++            }
++        }
++    }
+     if (IsPixelFormatBCn(info.format) && !runtime->device.IsOptimalBcnSupported()) {
+         flags |= VideoCommon::ImageFlagBits::Converted;
+         flags |= VideoCommon::ImageFlagBits::CostlyLoad;
+diff --git a/src/video_core/texture_cache/image_base.h b/src/video_core/texture_cache/image_base.h
+index d64cb90..c4c8438 100644
+--- a/src/video_core/texture_cache/image_base.h
++++ b/src/video_core/texture_cache/image_base.h
+@@ -61,6 +61,9 @@ enum class ImageFlagBits : u32 {
+     /// the parts written are uploaded.
+     SparseTiles = 1 << 23,
+     PartialDownload = 1 << 24, ///< CPU backing contains only requested GPU-written bytes.
++    /// Its guest memory was given back (EDEN_NX2_TC_DROP_GUEST): never evicted, since it could not
++    /// be loaded again from that memory.
++    GuestDropped = 1 << 25,
+ };
+ DECLARE_ENUM_FLAG_OPERATORS(ImageFlagBits)
+ 
+diff --git a/src/video_core/texture_cache/texture_cache.h b/src/video_core/texture_cache/texture_cache.h
+index 922d017..1ffae46 100644
+--- a/src/video_core/texture_cache/texture_cache.h
++++ b/src/video_core/texture_cache/texture_cache.h
+@@ -15,6 +15,10 @@
+ #include <vector>
+ #include <optional>
+ #include <bit>
++#include <bitset>
++#include "core/device_memory.h"
++// The guest's memory gives texture slots back (src/guest_memory_service.inc; 0 on other builds).
++namespace Common { std::size_t GuestMemoryDropSlot(std::uint64_t offset) noexcept; }
+ #include "common/container/unordered_map.h"
+ #include <boost/container/small_vector.hpp>
+ 
+@@ -175,6 +179,9 @@ void TextureCache<P>::RunGarbageCollector() {
+             ++probe_decoding_skips;
+             return false;
+         }
++        if (True(image.flags & ImageFlagBits::GuestDropped)) {
++            return false; // its guest memory is gone: it could not be loaded again
++        }
+         const bool must_download = IsDownloadable(image) && False(image.flags & ImageFlagBits::BadOverlap);
+         // A costly image (decoded ASTC) evicted in aggressive mode comes back through the GPU
+         // decoder the next time it is drawn: at Mario Kart World's title screen on the console,
+@@ -281,6 +288,149 @@ void TextureCache<P>::RunGarbageCollector() {
+         Configure(true);
+         Collect();
+     }
++    // Cold blocks given back whole. Collecting image by image leaves the device memory blocks
++    // partly used (new images land in the holes), and on the console a partly used block holds a
++    // stretch of the pool the CPU and the GPU share: the pool ends up in pieces too small for the
++    // driver's next 64 MiB block or the JIT's next 16 MiB step, with hundreds of MiB free in holes
++    // (Mario Kart World's title, with the guest's cold memory compressed). So while memory is
++    // critical, the emptiest blocks whose images were all left unused for EDEN_NX2_TC_COLD_FRAMES
++    // frames (default 120) have every image evicted, a few blocks every 30 frames, and go back to
++    // the driver whole. EDEN_NX2_TC_COLD_BLOCKS=<n> (default 4, 0: off) blocks a pass.
++    if constexpr (requires(const Image& image) { image.MemoryBlock(); }) {
++        static const u64 cold_frames = [] {
++            const char* value = std::getenv("EDEN_NX2_TC_COLD_FRAMES");
++            return value != nullptr ? std::strtoull(value, nullptr, 10) : 120ULL;
++        }();
++        static const size_t cold_blocks = [] {
++            const char* value = std::getenv("EDEN_NX2_TC_COLD_BLOCKS");
++            return value != nullptr ? static_cast<size_t>(std::strtoull(value, nullptr, 10)) : size_t{4};
++        }();
++        // EDEN_NX2_TC_COLD_FILL=<percent> (default 60): only blocks less full than this. With
++        // EDEN_NX2_TC_COLD_FRAMES=0 a block goes even with images in use: they are made again from the
++        // guest's memory when next drawn, in fuller blocks (a defragmentation by eviction).
++        static const u64 cold_fill = [] {
++            const char* value = std::getenv("EDEN_NX2_TC_COLD_FILL");
++            return value != nullptr ? std::strtoull(value, nullptr, 10) : 60ULL;
++        }();
++        static u64 cold_pass_frame = 0;
++        if (cold_blocks != 0 && total_used_memory >= critical_memory && frame_tick >= cold_pass_frame + 30) {
++            cold_pass_frame = frame_tick;
++            struct BlockUse {
++                u64 used = 0, size = 0, youngest = 0;
++                bool pinned = false;
++                std::vector<ImageId> images;
++            };
++            std::unordered_map<u64, BlockUse> blocks;
++            for (const auto [image_id, image] : slot_images) {
++                const auto block = image->MemoryBlock();
++                if (block.block == 0 || block.block_size == 0) continue;
++                auto& use = blocks[block.block];
++                use.used += block.size;
++                use.size = block.block_size;
++                use.images.push_back(image_id);
++                // A block with an image the GPU wrote (it would have to be read back first), one being
++                // decoded or one not registered stays.
++                if (False(image->flags & ImageFlagBits::Registered) || True(image->flags & ImageFlagBits::IsDecoding) ||
++                    True(image->flags & ImageFlagBits::GuestDropped) ||
++                    (IsDownloadable(*image) && False(image->flags & ImageFlagBits::BadOverlap))) {
++                    use.pinned = true;
++                } else {
++                    use.youngest = (std::max)(use.youngest, lru_cache.Tick(image->lru_index));
++                }
++            }
++            std::vector<std::pair<u64, u64>> candidates; // (used, block)
++            {   // TEMPORARY: why blocks are or are not given back
++                size_t pinned = 0, cold = 0, sparse = 0, both = 0, images_in_blocks = 0;
++                u64 used_total = 0, size_total = 0, age_min = ~0ULL;
++                for (const auto& [block, use] : blocks) {
++                    pinned += use.pinned;
++                    const bool is_cold = !use.pinned && use.youngest + cold_frames <= frame_tick;
++                    const bool is_sparse = use.used * 10 < use.size * 6;
++                    cold += is_cold;
++                    sparse += is_sparse;
++                    both += is_cold && is_sparse;
++                    images_in_blocks += use.images.size();
++                    used_total += use.used;
++                    size_total += use.size;
++                    if (!use.pinned) age_min = (std::min)(age_min, frame_tick - use.youngest);
++                }
++                LOG_WARNING(HW_GPU, "MKW_COLD_BLOCKS frame={} blocks={} images={} used={}MiB of {}MiB pinned={} cold={} under60={} both={} youngest_block_age={}",
++                            frame_tick, blocks.size(), images_in_blocks, used_total >> 20, size_total >> 20, pinned, cold,
++                            sparse, both, age_min);
++            }
++            for (const auto& [block, use] : blocks) {
++                if (!use.pinned && use.youngest + cold_frames <= frame_tick && use.used * 100 < use.size * cold_fill) {
++                    candidates.emplace_back(use.used, block);
++                }
++            }
++            std::sort(candidates.begin(), candidates.end());
++            if (candidates.size() > cold_blocks) candidates.resize(cold_blocks);
++            for (const auto& [used, block] : candidates) {
++                for (const ImageId image_id : blocks[block].images) {
++                    auto& image = slot_images[image_id];
++                    if (IsDownloadable(image) && False(image.flags & ImageFlagBits::BadOverlap)) {
++                        auto map = runtime.DownloadStagingBuffer(image.unswizzled_size_bytes);
++                        const auto copies = FullDownloadCopies(image.info);
++                        image.DownloadMemory(map, copies);
++                        runtime.Finish();
++                        SwizzleImage(*gpu_memory, image.gpu_addr, image.info, copies, map.mapped_span, swizzle_data_buffer);
++                        ++gc_download_deletes;
++                    }
++                    if (True(image.flags & ImageFlagBits::Tracked)) {
++                        UntrackImage(image, image_id);
++                    }
++                    ++gc_cold_block_images;
++                    UnregisterImage(image_id);
++                    DeleteImage(image_id, image.scale_tick > frame_tick + 5);
++                }
++                ++gc_cold_blocks;
++            }
++        }
++    }
++    // The guest's copy of converted textures given back (EDEN_NX2_TC_DROP_GUEST=1). An ASTC texture is
++    // held twice: as the game wrote it (the console's GPU cannot read it) and as the host image
++    // converted from it. While memory is critical, the 2 MiB slots of the guest's memory that hold
++    // only such textures (every 4 KiB page under a registered ASTC image the GPU never wrote) go
++    // back to the pool without a copy, and those images are never evicted (GuestDropped). The game
++    // reading such memory again gets zeroes (counted, EDEN_DROP); writing it is the game reusing it.
++    {
++        static const bool drop_guest = [] {
++            const char* value = std::getenv("EDEN_NX2_TC_DROP_GUEST");
++            return value != nullptr && value[0] == '1';
++        }();
++        static u64 drop_pass_frame = 0;
++        if (drop_guest && total_used_memory >= critical_memory && frame_tick >= drop_pass_frame + 120) {
++            drop_pass_frame = frame_tick;
++            constexpr u64 SlotBytes = u64{2} << 20, PageBytes = 4096;
++            struct Cover {
++                std::bitset<SlotBytes / PageBytes> pages;
++                std::vector<ImageId> images;
++            };
++            std::unordered_map<u64, Cover> covers;
++            for (const auto [image_id, image] : slot_images) {
++                if (False(image->flags & ImageFlagBits::Registered) || True(image->flags & ImageFlagBits::GpuModified) ||
++                    True(image->flags & ImageFlagBits::IsDecoding) || !IsPixelFormatASTC(image->info.format)) {
++                    continue;
++                }
++                const u64 begin = image->cpu_addr, end = image->cpu_addr + image->guest_size_bytes;
++                for (u64 page = (begin + PageBytes - 1) / PageBytes * PageBytes; page + PageBytes <= end; page += PageBytes) {
++                    const u64 physical = static_cast<u64>(device_memory.GetPhysicalRawAddressFromDAddr(page));
++                    if (physical < Core::DramMemoryMap::Base) continue;
++                    const u64 offset = physical - Core::DramMemoryMap::Base;
++                    auto& cover = covers[offset / SlotBytes];
++                    cover.pages.set(static_cast<size_t>((offset % SlotBytes) / PageBytes));
++                    if (cover.images.empty() || cover.images.back() != image_id) cover.images.push_back(image_id);
++                }
++            }
++            for (auto& [slot, cover] : covers) {
++                if (!cover.pages.all() || Common::GuestMemoryDropSlot(slot * SlotBytes) == 0) continue;
++                for (const ImageId image_id : cover.images) {
++                    slot_images[image_id].flags |= ImageFlagBits::GuestDropped;
++                }
++                ++gc_dropped_slots;
++            }
++        }
++    }
+     if (static u32 probe_rows{}; frame_tick % 30 == 0 && probe_rows++ < 256) {
+         LOG_WARNING(HW_GPU, "MKW_GC frame={} usage={} expected={} critical={} scanned={} deletes={} estimated={} allocated={} costly_skips={} dirty_skips={} decoding_skips={}",
+                     frame_tick, probe_initial_usage, expected_memory, critical_memory, probe_scanned,
+@@ -426,6 +576,10 @@ void TextureCache<P>::TickFrame() {
+                  images_created, images_deleted, gc_deletes + gc_costly_deletes, gc_costly_deletes,
+                  gc_download_deletes,
+                  async_decodes_queued, astc_opaque_images, astc_alpha_images);
++        LOG_INFO(HW_GPU, "Texture cache last 600 frames: {} cold blocks given back whole ({} images)",
++                 gc_cold_blocks, gc_cold_block_images);
++        gc_cold_blocks = gc_cold_block_images = 0;
++        LOG_INFO(HW_GPU, "Texture cache: {} guest slots of converted textures given back so far", gc_dropped_slots);
+         LOG_INFO(HW_GPU, "Texture cache last 600 frames: {} uploads from guest memory, {} MiB (largest {} MiB, {} by layer)",
+                  images_uploaded, uploaded_bytes >> 20, largest_upload >> 20, layer_uploads);
+         images_uploaded = uploaded_bytes = largest_upload = layer_uploads = 0;
+@@ -2169,6 +2323,19 @@ void TextureCache<P>::UploadImageContents(Image& image, StagingBuffer& staging)
+         unswizzle_data_buffer.resize_destructive(image.unswizzled_size_bytes);
+         auto copies = UnswizzleImage(*gpu_memory, gpu_addr, image.info, swizzle_data, unswizzle_data_buffer);
+         ConvertImage(unswizzle_data_buffer, image.info, mapped_span, copies);
++        if (image.host_level_offset != 0) {
++            // The host image keeps only levels >= host_level_offset (TrimmedHostInfo): drop the
++            // copies of the levels it does not have, and host level 0 is that guest level.
++            const s32 skip = static_cast<s32>(image.host_level_offset);
++            copies.erase(std::remove_if(copies.begin(), copies.end(),
++                                        [skip](const BufferImageCopy& copy) {
++                                            return copy.image_subresource.base_level < skip;
++                                        }),
++                         copies.end());
++            for (BufferImageCopy& copy : copies) {
++                copy.image_subresource.base_level -= skip;
++            }
++        }
+         image.UploadMemory(staging, copies);
+     } else {
+         const auto copies = UnswizzleImage(*gpu_memory, gpu_addr, image.info, swizzle_data, mapped_span);
+diff --git a/src/video_core/texture_cache/texture_cache_base.h b/src/video_core/texture_cache/texture_cache_base.h
+index f3d7239..f454def 100644
+--- a/src/video_core/texture_cache/texture_cache_base.h
++++ b/src/video_core/texture_cache/texture_cache_base.h
+@@ -599,6 +599,7 @@ private:
+     DelayedDestructionRing<Image, TICKS_TO_DESTROY> sentenced_images;
+     /// Bytes of images per device memory block, for the collector (refreshed every 60 frames).
+     std::unordered_map<u64, u64> block_image_bytes;
++    u64 gc_cold_blocks{}, gc_cold_block_images{}, gc_dropped_slots{};
+     u64 block_image_bytes_frame{~0ULL};
+     DelayedDestructionRing<ImageView, TICKS_TO_DESTROY> sentenced_image_view;
+     DelayedDestructionRing<Framebuffer, TICKS_TO_DESTROY> sentenced_framebuffers;
+diff --git a/src/video_core/texture_cache/util.cpp b/src/video_core/texture_cache/util.cpp
+index fcabd05..5ba0312 100644
+--- a/src/video_core/texture_cache/util.cpp
++++ b/src/video_core/texture_cache/util.cpp
+@@ -11,6 +11,10 @@
+ 
+ #include <algorithm>
+ #include <array>
++#include <atomic>
++#include <chrono>
++#include <cstdlib>
++#include <mutex>
+ #include <cstring>
+ #include <numeric>
+ #include <limits>
+@@ -23,6 +27,7 @@
+ #include "common/bit_util.h"
+ #include "common/common_types.h"
+ #include "common/div_ceil.h"
++#include "common/logging.h"
+ #include "common/scratch_buffer.h"
+ #include "common/settings.h"
+ #include "video_core/compatible_formats.h"
+@@ -1504,8 +1509,76 @@ void ConvertedLayout(const ImageInfo& info, std::span<BufferImageCopy> copies) {
+     }
+ }
+ 
++// ASTC_CPU_DIAG (EDEN_ASTC_PATH_DIAG=1): every CPU ASTC decode (sync or async worker): which
++// textures, how many and how long. Investigation of why ASTC ever takes the CPU path.
++namespace {
++bool AstcPathDiag() {
++    static const bool enabled = [] {
++        const char* value = std::getenv("EDEN_ASTC_PATH_DIAG");
++        return value != nullptr && value[0] == '1';
++    }();
++    return enabled;
++}
++struct AstcCpuStats {
++    std::mutex mutex;
++    u64 calls{};
++    u64 texels{};
++    double ms{};
++    double max_ms{};
++    u64 logged{};
++    std::chrono::steady_clock::time_point last_summary{std::chrono::steady_clock::now()};
++};
++AstcCpuStats& AstcCpuStatsInstance() {
++    static AstcCpuStats stats;
++    return stats;
++}
++} // Anonymous namespace
++
++static void ConvertImageImpl(std::span<const u8> input, const ImageInfo& info,
++                             std::span<u8> output, std::span<BufferImageCopy> copies);
++
+ void ConvertImage(std::span<const u8> input, const ImageInfo& info, std::span<u8> output,
+                   std::span<BufferImageCopy> copies) {
++    if (!AstcPathDiag() || !IsPixelFormatASTC(info.format)) {
++        ConvertImageImpl(input, info, output, copies);
++        return;
++    }
++    u64 texels = 0;
++    for (const BufferImageCopy& copy : copies) {
++        texels += u64{copy.image_extent.width} * copy.image_extent.height *
++                  copy.image_extent.depth * copy.image_subresource.num_layers;
++    }
++    const auto start = std::chrono::steady_clock::now();
++    ConvertImageImpl(input, info, output, copies);
++    const auto now = std::chrono::steady_clock::now();
++    const double ms = std::chrono::duration<double, std::milli>(now - start).count();
++    auto& stats = AstcCpuStatsInstance();
++    std::scoped_lock lock{stats.mutex};
++    ++stats.calls;
++    stats.texels += texels;
++    stats.ms += ms;
++    stats.max_ms = (std::max)(stats.max_ms, ms);
++    if (stats.logged < 400) {
++        ++stats.logged;
++        LOG_WARNING(HW_GPU,
++                    "ASTC_CPU_DECODE fmt={} type={} size={}x{}x{} layers={} levels={} texels={} "
++                    "ms={:.2f} recompression={} decode_mode={} opaque={}",
++                    static_cast<u32>(info.format), static_cast<u32>(info.type), info.size.width,
++                    info.size.height, info.size.depth, info.resources.layers,
++                    info.resources.levels, texels, ms,
++                    static_cast<u32>(Settings::GetAstcRecompression()),
++                    static_cast<u32>(Settings::values.accelerate_astc.GetValue()),
++                    info.astc_opaque);
++    }
++    if (now - stats.last_summary >= std::chrono::seconds{5}) {
++        stats.last_summary = now;
++        LOG_WARNING(HW_GPU, "ASTC_CPU_SUMMARY calls={} mtexels={:.1f} total_ms={:.0f} max_ms={:.1f}",
++                    stats.calls, stats.texels / 1e6, stats.ms, stats.max_ms);
++    }
++}
++
++static void ConvertImageImpl(std::span<const u8> input, const ImageInfo& info,
++                             std::span<u8> output, std::span<BufferImageCopy> copies) {
+     u32 output_offset = 0;
+     Common::ScratchBuffer<u8> decode_scratch;
+ 

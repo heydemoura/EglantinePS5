@@ -64,7 +64,7 @@ def parse_variant(text):
     for item in filter(None, rest.split(',')):
         item = item.strip()
         k, _, v = item.partition('=')
-        if k in ('measure', 'env'): extra[k] = v
+        if k in ('measure', 'env', 'res'): extra[k] = v
         else: perf[k] = v.lower() == 'true'
     return label, perf, extra
 
@@ -155,7 +155,12 @@ def run_variant(label, perf, extra, original_config):
         for name, path, n in [('stderr.log', '/data/eglantineps5/logs/stderr.log', 400000),
                               ('eden_log.txt', '/data/eglantineps5/user/log/eden_log.txt', 600000),
                               ('heap.log', '/data/eglantineps5/logs/heap.log', 400000)]:
-            try: (vdir / ('live-' + name)).write_text(tail(path, n))
+            try:
+                text = tail(path, n); live = vdir / ('live-' + name)
+                # A restart truncates the log: keep what the crashed process wrote.
+                if live.exists() and len(text) < live.stat().st_size // 2:
+                    live.rename(vdir / ('precrash-' + name))
+                live.write_text(text)
             except Exception as e: log('snapshot', name, repr(e))
     while time.monotonic() - m_start < measure:
         for row in frames_of(tail('/data/eglantineps5/logs/heap.log')):

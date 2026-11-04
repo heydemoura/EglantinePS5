@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "fastmem.h"
+#include <lz4.h>
 
 #ifdef PS5_NATIVE
 // Keep CPU heaps/tables and JIT views out of RADV's high-word-2 GPU window.
@@ -54,6 +55,7 @@ std::int32_t sceKernelMapDirectMemory(void**, std::size_t, int, int, std::int64_
 std::int32_t sceKernelReleaseDirectMemory(std::int64_t, std::size_t);
 std::int32_t sceKernelReserveVirtualRange(void**, std::size_t, int, std::size_t);
 std::int32_t sceKernelEnableDmemAliasing();
+std::int32_t sceKernelAvailableDirectMemorySize(std::int64_t, std::int64_t, std::size_t, std::int64_t*, std::size_t*);
 int sceKernelDebugOutText(int, const char*);
 }
 #endif
@@ -306,8 +308,16 @@ extern "C" int eden_direct_low(std::size_t size, std::size_t alignment, int type
 std::int64_t zero_block = -1;
 
 // A 2 MiB block of direct memory, zeroed through a mapping of its own that is gone again.
+// With the pager (guest_memory_service.inc), the guest's blocks come from the top of the pool, where
+// the 2 MiB holes it leaves are reused by the next ones and do not cut up the stretches the graphics
+// driver (64 MiB blocks) and the JIT (16 MiB steps) take from the bottom.
+std::atomic<bool> guest_blocks_high{false};
+int GuestBlock(std::int64_t* physical) {
+    return guest_blocks_high.load(std::memory_order_relaxed) ? eden_direct_high(SparseSlot, SparseSlot, 12, physical)
+                                                             : eden_direct_low(SparseSlot, SparseSlot, 12, physical);
+}
 bool ZeroedBlock(std::int64_t* physical) {
-    if (eden_direct_low(SparseSlot, SparseSlot, 12, physical) != 0)
+    if (GuestBlock(physical) != 0)
         return false;
     void* view = reinterpret_cast<void*>(cpu_mapping_hint);
     if (sceKernelMapDirectMemory(&view, SparseSlot, PROT_READ | PROT_WRITE, 0, *physical, SparseSlot) != 0) {
@@ -912,7 +922,8 @@ struct CodeRange {
     std::uintptr_t writable = 0;
     std::size_t span = 0;
     std::atomic<std::size_t> committed{0};
-    std::int64_t physical[CodeSteps] = {};
+    std::int64_t physical[CodeSteps] = {}; // -1: the step is in pieces (below)
+    std::int64_t pieces[CodeSteps][CodeStep / LargePage] = {};
 };
 std::array<CodeRange, 16> code_ranges;
 std::mutex code_mutex;
@@ -924,7 +935,33 @@ bool CommitCodeStep(CodeRange& range, std::size_t offset) {
     void* const executable = reinterpret_cast<void*>(range.executable.load(std::memory_order_relaxed) + offset);
 #ifdef PS5_NATIVE
     std::int64_t physical = -1;
-    if (eden_direct_low(CodeStep, LargePage, 12, &physical) != 0) return false;
+    if (eden_direct_low(CodeStep, LargePage, 12, &physical) != 0) {
+        // No 16 MiB range left in the pool (cut into 2 MiB holes by the guest memory's pager):
+        // the step from 2 MiB pieces, mapped side by side in both views.
+        auto& pieces = range.pieces[offset / CodeStep];
+        for (std::size_t piece = 0; piece < CodeStep / LargePage; ++piece) {
+            std::int64_t block = -1;
+            if (eden_direct_low(LargePage, LargePage, 12, &block) != 0) return false;
+            void* at = static_cast<char*>(writable) + piece * LargePage;
+            if (sceKernelMapDirectMemory(&at, LargePage, PROT_READ | PROT_WRITE, MAP_FIXED, block, LargePage) != 0 ||
+                at != static_cast<char*>(writable) + piece * LargePage) {
+                (void)sceKernelReleaseDirectMemory(block, LargePage);
+                return false;
+            }
+            at = static_cast<char*>(executable) + piece * LargePage;
+            if (sceKernelMapDirectMemory(&at, LargePage, PROT_READ, MAP_FIXED, block, LargePage) != 0 ||
+                at != static_cast<char*>(executable) + piece * LargePage)
+                return false;
+            pieces[piece] = block;
+        }
+        std::memset(writable, 0, CodeStep);
+        if (mprotect(executable, CodeStep, PROT_READ | PROT_EXEC) != 0) return false;
+        range.physical[offset / CodeStep] = -1;
+        static std::atomic<unsigned> noted{0};
+        if (noted.fetch_add(1, std::memory_order_relaxed) < 16) Report("EDEN_JIT_STEP in 2 MiB pieces (no 16 MiB range left)\n");
+        code_committed.fetch_add(CodeStep, std::memory_order_relaxed);
+        return true;
+    }
     // A step that fails half way stays as it is: the caller has no cache to go on with.
     void* at = writable;
     if (sceKernelMapDirectMemory(&at, CodeStep, PROT_READ | PROT_WRITE, MAP_FIXED, physical, LargePage) != 0 ||
@@ -1035,7 +1072,12 @@ bool FreeCodeRange(void* executable) noexcept {
             std::abort();
 #ifdef PS5_NATIVE
         for (std::size_t step = 0; step < committed / CodeStep; ++step)
-            if (sceKernelReleaseDirectMemory(range.physical[step], CodeStep) != 0) std::abort();
+            if (range.physical[step] >= 0) {
+                if (sceKernelReleaseDirectMemory(range.physical[step], CodeStep) != 0) std::abort();
+            } else {
+                for (const std::int64_t block : range.pieces[step])
+                    if (sceKernelReleaseDirectMemory(block, LargePage) != 0) std::abort();
+            }
 #endif
         code_reserved.fetch_sub(range.span, std::memory_order_relaxed);
         code_committed.fetch_sub(committed, std::memory_order_relaxed);

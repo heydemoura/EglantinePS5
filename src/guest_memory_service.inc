@@ -22,8 +22,18 @@
 //
 // 64-bit games only: a 32-bit game's fastmem window aliases the backing, which takes it whole.
 
+extern "C" const char* eden_current_thread_name() noexcept __attribute__((weak));
+
 namespace {
-enum : std::uint8_t { SlotZero = 0, SlotOwn = 1, SlotShared = 2, SlotFine = 3, SlotLock = 0x80, SlotMask = 0x7f };
+//   Cold    an Own slot the pager made inaccessible to see whether it is still used: any access
+//           faults and makes it Own again; one left alone long enough goes to the page file
+//   Paged   the slot's bytes are in the page file and its memory went back; any access faults and
+//           reads them back (EDEN_GUEST_PAGING=1, while the pool is short)
+//   Dropped the slot held only texture data the graphics cache had already converted, and its memory
+//           went back without a copy (EDEN_NX2_TC_DROP_GUEST); any access faults and gets zeroes
+//           (counted as reads and writes: a write is the game reusing the memory, a read lost data)
+enum : std::uint8_t { SlotZero = 0, SlotOwn = 1, SlotShared = 2, SlotFine = 3, SlotCold = 4, SlotPaged = 5,
+                      SlotDropped = 6, SlotLock = 0x80, SlotMask = 0x7f };
 constexpr std::size_t FinePage = 16384, FinePages = SparseSlot / FinePage;
 // A written slot becomes Fine with at least this many pages of zeroes (512 KiB given back).
 constexpr std::size_t FineMinZeroPages = 32;
@@ -46,6 +56,11 @@ struct Counters {
     std::atomic<std::uint64_t> fined{0}, unfined{0}, fine_failures{0};
 };
 Counters counters;
+// The pager (below, "The pager").
+std::atomic<std::uint64_t> dropped_slots{0}, dropped_reads{0}, dropped_writes{0};
+std::atomic<bool> pager_requested{false};
+std::atomic<std::uint64_t> pager_out{0}, pager_in{0}, pager_rewarm{0}, pager_marks{0}, pager_failures{0},
+    pager_in_ns{0};
 void ResetCounters() noexcept {
     for (auto* counter : {&counters.faults, &counters.promotions, &counters.copies, &counters.waits,
                           &counters.returns_clear, &counters.returns_free, &counters.returns_scan, &counters.dedup,
@@ -252,6 +267,16 @@ bool PromoteShared(SparseRange& range, std::size_t slot) noexcept {
 void ReturnSlot(SparseRange& range, std::size_t slot) noexcept {
     const std::uintptr_t at = SlotAddress(range, slot);
     const std::uint8_t state = SlotState(range, slot);
+    if (state == SlotPaged || state == SlotDropped) {
+        // It has no block (its bytes are compressed, or were dropped).
+#ifdef PS5_NATIVE
+        if (!MapSlot(at, PROT_READ, zero_block)) std::abort();
+#else
+        if (mprotect(reinterpret_cast<void*>(at), SparseSlot, PROT_READ) != 0) std::abort();
+#endif
+        range.physical[slot] = -1;
+        return;
+    }
     if (state == SlotFine) {
         const std::size_t kept = FineKept(range, slot);
 #ifdef PS5_NATIVE
@@ -457,7 +482,43 @@ std::atomic<std::uint64_t> promotions_in_app_code{0}, promotions_elsewhere{0};
 thread_local std::uintptr_t fault_pcs[WriterPcs] = {};
 thread_local bool fault_in_app_code = false;
 
+// Promotions by the name of the thread that wrote (headless/crash_report.cpp names threads; weak so
+// the host checks link without it), split by where the faulting instruction was.
+struct ThreadWrites {
+    std::atomic<int> state{0}; // 0 free, 1 being filled, 2 ready
+    char name[24]{};
+    std::atomic<std::uint64_t> count[2]{};
+};
+constexpr std::size_t ThreadWriteNames = 64;
+ThreadWrites thread_writes[ThreadWriteNames];
+std::atomic<std::uint64_t> thread_writes_unmatched{0};
+void NoteWriterThread() noexcept {
+    const char* name = eden_current_thread_name ? eden_current_thread_name() : "unknown";
+    if (name == nullptr) name = "unknown";
+    const int which = fault_in_app_code ? 0 : 1;
+    for (ThreadWrites& entry : thread_writes) {
+        int state = entry.state.load(std::memory_order_acquire);
+        if (state == 0) {
+            if (entry.state.compare_exchange_strong(state, 1, std::memory_order_acq_rel)) {
+                std::size_t length = 0;
+                for (; name[length] && length + 1 < sizeof(entry.name); ++length) entry.name[length] = name[length];
+                entry.name[length] = 0;
+                entry.count[which].fetch_add(1, std::memory_order_relaxed);
+                entry.state.store(2, std::memory_order_release);
+                return;
+            }
+        }
+        while (state == 1) state = entry.state.load(std::memory_order_acquire);
+        if (std::strncmp(entry.name, name, sizeof(entry.name) - 1) == 0) {
+            entry.count[which].fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+    }
+    thread_writes_unmatched.fetch_add(1, std::memory_order_relaxed);
+}
+
 void NoteWriter() noexcept {
+    NoteWriterThread();
     (fault_in_app_code ? promotions_in_app_code : promotions_elsewhere).fetch_add(1, std::memory_order_relaxed);
     std::uintptr_t key = 0xCBF29CE484222325ull;
     for (const std::uintptr_t pc : fault_pcs) key = (key ^ pc) * 0x100000001B3ull;
@@ -562,6 +623,13 @@ extern "C" void eden_guest_memory_waits(unsigned long long* won, unsigned long l
     *refused = counters.failures.load(std::memory_order_relaxed);
 }
 
+namespace {
+bool PageIn(SparseRange& range, std::size_t slot) noexcept; // the pager, below
+void PagerBackOff(std::size_t slot) noexcept;
+std::uint64_t PagerStored() noexcept;
+std::uint64_t PagerIncompressible() noexcept;
+} // namespace
+
 // A write fault at `address`: true when it was a write to a slot of the guest's memory that is
 // now writable (the faulting instruction repeats), false for anything else.
 bool HandleGuestWriteFault(void* fault) noexcept {
@@ -606,6 +674,31 @@ bool HandleGuestWriteFault(void* fault) noexcept {
             }
         } else if (state == SlotShared) {
             done = PromoteShared(*range, slot);
+        } else if (state == SlotCold) {
+            // Still used: the pager leaves it be (it is marked Cold again later).
+            done = mprotect(reinterpret_cast<void*>(SlotAddress(*range, slot)), SparseSlot, PROT_READ | PROT_WRITE) == 0;
+            if (done) {
+                pager_rewarm.fetch_add(1, std::memory_order_relaxed);
+                PagerBackOff(slot);
+            }
+        } else if (state == SlotPaged) {
+            done = PageIn(*range, slot);
+        } else if (state == SlotDropped) {
+            const bool write = (Eden::Fastmem::fault_error_code & 2) != 0;
+            done = PromoteZero(*range, slot);
+            if (done) {
+                (write ? dropped_writes : dropped_reads).fetch_add(1, std::memory_order_relaxed);
+                if (!write) {
+                    static std::atomic<unsigned> logged{0};
+                    if (logged.fetch_add(1, std::memory_order_relaxed) < 64) {
+                        char line[160];
+                        const int n = std::snprintf(line, sizeof(line),
+                            "EDEN_DROP read of a dropped slot %zu at %p (zeroes given; app code %d)\n", slot,
+                            reinterpret_cast<void*>(address), fault_in_app_code ? 1 : 0);
+                        if (n > 0) Note(line);
+                    }
+                }
+            }
         }
         return done;
     };
@@ -651,6 +744,7 @@ void ServiceSignal(int signal, siginfo_t* info, void* context) {
         }
     }
 #endif
+    Eden::Fastmem::fault_error_code = context ? Eden::Fastmem::ContextErr(context) : 0;
     if (HandleGuestWriteFault(info ? info->si_addr : nullptr)) return;
     const struct sigaction& previous = signal == SIGSEGV ? service_previous_segv : service_previous_bus;
     if (previous.sa_flags & SA_SIGINFO) {
@@ -901,6 +995,33 @@ void ServiceReport(SparseRange& range, const char* when) noexcept {
         reserve_count.load(std::memory_order_relaxed) * (SparseSlot >> 20),
         (unsigned long long)counters.host_reserve_used.load() * (SparseSlot >> 20));
     if (length > 0) Report(line);
+    if (const auto drops = dropped_slots.load(std::memory_order_relaxed); drops != 0) {
+        std::size_t dropped_now = 0;
+        for (std::size_t slot = 0; slot < slots; ++slot) dropped_now += SlotState(range, slot) == SlotDropped;
+        char line[200];
+        if (std::snprintf(line, sizeof(line), "EDEN_DROP %s dropped=%llu now=%zu (%zuMiB) reads=%llu writes=%llu\n", when,
+                          (unsigned long long)drops, dropped_now, dropped_now * (SparseSlot >> 20),
+                          (unsigned long long)dropped_reads.load(), (unsigned long long)dropped_writes.load()) > 0)
+            Report(line);
+    }
+    if (pager_requested.load(std::memory_order_relaxed)) {
+        std::size_t cold = 0, paged = 0;
+        for (std::size_t slot = 0; slot < slots; ++slot) {
+            const auto state = SlotState(range, slot);
+            cold += state == SlotCold;
+            paged += state == SlotPaged;
+        }
+        char pages[256];
+        const auto ins = pager_in.load();
+        if (std::snprintf(pages, sizeof(pages),
+                          "EDEN_PAGER %s cold=%zu paged=%zu (%zuMiB in %lluMiB) out=%llu in=%llu in_avg_us=%llu rewarm=%llu marks=%llu incompressible=%llu failures=%llu\n",
+                          when, cold, paged, paged * (SparseSlot >> 20), (unsigned long long)(PagerStored() >> 20),
+                          (unsigned long long)pager_out.load(),
+                          (unsigned long long)ins, (unsigned long long)(ins ? pager_in_ns.load() / ins / 1000 : 0),
+                          (unsigned long long)pager_rewarm.load(), (unsigned long long)pager_marks.load(),
+                          (unsigned long long)PagerIncompressible(), (unsigned long long)pager_failures.load()) > 0)
+            Report(pages);
+    }
     // Who wrote the slots that were promoted: the largest places (offsets in the app's image).
     struct Top { const WriterSite* site; std::uint64_t count; } top[10]{};
     for (const WriterSite& site : writer_sites) {
@@ -918,6 +1039,22 @@ void ServiceReport(SparseRange& range, const char* when) noexcept {
                              "EDEN_CRAM_WRITERS promotions by code of the app %llu, by other code %llu\n",
                              (unsigned long long)promotions_in_app_code.load(), (unsigned long long)promotions_elsewhere.load());
     if (used > 0) Report(writers);
+    {
+        char threads[1024];
+        int length = std::snprintf(threads, sizeof(threads), "EDEN_CRAM_THREADS (name=app_code/other_code) unmatched=%llu:",
+                                   (unsigned long long)thread_writes_unmatched.load());
+        for (const ThreadWrites& entry : thread_writes) {
+            if (entry.state.load(std::memory_order_acquire) != 2) continue;
+            if (length <= 0 || static_cast<std::size_t>(length) >= sizeof(threads) - 64) break;
+            length += std::snprintf(threads + length, sizeof(threads) - length, " %s=%llu/%llu", entry.name,
+                                    (unsigned long long)entry.count[0].load(), (unsigned long long)entry.count[1].load());
+        }
+        if (length > 0 && static_cast<std::size_t>(length) < sizeof(threads) - 2) {
+            threads[length++] = '\n';
+            threads[length] = 0;
+            Report(threads);
+        }
+    }
     for (const Top& entry : top) {
         if (entry.count == 0) break;
         int length = std::snprintf(writers, sizeof(writers), "EDEN_CRAM_WRITER %llu:", (unsigned long long)entry.count);
@@ -962,6 +1099,264 @@ void MeasureFinePages(SparseRange& range) noexcept {
         repeats * Fine >> 20);
     if (length > 0) Report(line);
 }
+
+// ---- The pager: cold slots of the guest's memory go to a file while the pool is short ----
+//
+// A game's memory only grows: Mario Kart World writes ~5 MB/s of new memory at its title (each
+// course it shows in turn) and never frees any, toward the 9.3 GB it mapped, while the pool also
+// holds the emulator and the graphics driver. Slots the game has not touched for a while (a course
+// it is not showing) go to a page file and their memory back to the pool; a touch reads them back.
+// Whether a slot is used is seen by making it inaccessible (Cold): the first access faults and
+// makes it Own again. A slot still Cold after ColdTicks passes is written out (Paged).
+#ifdef PS5_NATIVE
+std::uint32_t* pager_cold_since = nullptr;
+// A Paged slot's bytes, LZ4-compressed on the heap; only the pager thread allocates and frees them
+// (a read back in a fault handler only reads one: the pager frees it once the slot is not Paged).
+std::uint8_t** pager_blob = nullptr;
+std::uint32_t* pager_blob_bytes = nullptr;
+std::uint32_t* pager_skip_until = nullptr;    // an incompressible slot is left alone until this pass
+// A slot found still used when it was Cold is left alone 10 s, then 20, 40, 80 and at most 160 s
+// before it is made Cold again: each Cold/Own round is two protection changes, and the console's
+// kernel ran out of page tables after ~70,000 of them in four minutes ("page table exhausted").
+std::uint8_t* pager_rewarms = nullptr;
+std::atomic<std::uint64_t> pager_stored{0};   // compressed bytes held
+std::size_t pager_slots = 0;
+std::atomic<std::uint64_t> pager_incompressible{0};
+std::atomic<std::uint32_t> pager_tick{0};
+std::thread pager;
+// Tunable while it is tried (env.txt): EDEN_PAGER_LOW_MIB (page while the pool's largest free block
+// is smaller), EDEN_PAGER_COLD_S (untouched this long before it is written out), EDEN_PAGER_MARK
+// (slots made Cold a pass) and EDEN_PAGER_OUT (slots written out a pass, which bounds how much the
+// file's writes delay a read back).
+std::size_t PagerSetting(const char* name, std::size_t fallback) noexcept {
+    const char* value = std::getenv(name);
+    return value != nullptr && *value != 0 ? static_cast<std::size_t>(std::strtoull(value, nullptr, 10)) : fallback;
+}
+std::uint32_t ColdTicks = 30 * 4;   // 30 s at 250 ms a pass
+std::size_t MarkPerTick = 32;       // 64 MiB of Own slots made Cold a pass
+std::size_t OutPerTick = 8;         // 16 MiB written out a pass at most (64 MB/s)
+std::size_t LowWaterMiB = 768;
+
+bool PoolShort() noexcept {
+    if (memory_waiters.load(std::memory_order_acquire) != 0) return true;
+    const std::int64_t total = sceKernelGetDirectMemorySize();
+    std::int64_t start = 0;
+    std::size_t largest = 0;
+    if (total <= 0 || sceKernelAvailableDirectMemorySize(0, total, 0x4000, &start, &largest) != 0) return false;
+    return largest < (LowWaterMiB << 20);
+}
+
+constexpr std::size_t MaxStoredBytes = SparseSlot * 3 / 4; // less than 25% saved: not worth a fault
+std::vector<char> pager_scratch;               // the pager thread's compression buffer
+
+// The slot shows nothing at all: every access faults.
+bool MapNone(std::uintptr_t at) noexcept {
+    void* address = reinterpret_cast<void*>(at);
+    if (sceKernelMapDirectMemory(&address, SparseSlot, PROT_NONE, MAP_FIXED, zero_block, SparseSlot) == 0 &&
+        address == reinterpret_cast<void*>(at))
+        return true;
+    return mmap(reinterpret_cast<void*>(at), SparseSlot, PROT_NONE, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) ==
+           reinterpret_cast<void*>(at);
+}
+
+// Own -> Cold (locked by the caller).
+bool MarkCold(SparseRange& range, std::size_t slot) noexcept {
+    if (mprotect(reinterpret_cast<void*>(SlotAddress(range, slot)), SparseSlot, PROT_NONE) != 0) return false;
+    pager_cold_since[slot] = pager_tick.load(std::memory_order_relaxed);
+    pager_marks.fetch_add(1, std::memory_order_relaxed);
+    return true;
+}
+
+// Cold -> Paged (locked by the caller): the bytes are compressed where they are, the slot read-only
+// meanwhile (a write faults and waits for the lock). False (and the slot left alone for a while)
+// when they do not compress well enough; the caller makes it Own again.
+bool PageOut(SparseRange& range, std::size_t slot, std::uint32_t tick) noexcept {
+    const std::int64_t physical = range.physical[slot];
+    const std::uintptr_t at = SlotAddress(range, slot);
+    if (mprotect(reinterpret_cast<void*>(at), SparseSlot, PROT_READ) != 0) return false;
+    const int stored = LZ4_compress_default(reinterpret_cast<const char*>(at), pager_scratch.data(),
+                                            static_cast<int>(SparseSlot), static_cast<int>(pager_scratch.size()));
+    if (stored <= 0 || static_cast<std::size_t>(stored) > MaxStoredBytes) {
+        pager_skip_until[slot] = tick + 4 * 120; // two minutes
+        pager_incompressible.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+    auto* blob = static_cast<std::uint8_t*>(std::malloc(static_cast<std::size_t>(stored)));
+    if (blob == nullptr) return false;
+    std::memcpy(blob, pager_scratch.data(), static_cast<std::size_t>(stored));
+    if (!MapNone(SlotAddress(range, slot))) {
+        std::free(blob);
+        return false;
+    }
+    pager_blob[slot] = blob;
+    pager_blob_bytes[slot] = static_cast<std::uint32_t>(stored);
+    pager_stored.fetch_add(static_cast<std::uint64_t>(stored), std::memory_order_relaxed);
+    if (sceKernelReleaseDirectMemory(physical, SparseSlot) != 0) std::abort();
+    range.physical[slot] = -1;
+    guest_committed.fetch_sub(SparseSlot, std::memory_order_relaxed);
+    pager_out.fetch_add(1, std::memory_order_relaxed);
+    return true;
+}
+
+// Paged -> Own (locked; in the fault handler): a block, the bytes read back into it, mapped.
+bool PageIn(SparseRange& range, std::size_t slot) noexcept {
+    const auto start = std::chrono::steady_clock::now();
+    std::int64_t physical = -1;
+    if (GuestBlock(&physical) != 0 && !ReserveBlock(&physical)) return false;
+    void* view = reinterpret_cast<void*>(cpu_mapping_hint);
+    if (sceKernelMapDirectMemory(&view, SparseSlot, PROT_READ | PROT_WRITE, 0, physical, SparseSlot) != 0) {
+        (void)sceKernelReleaseDirectMemory(physical, SparseSlot);
+        return false;
+    }
+    const int size = LZ4_decompress_safe(reinterpret_cast<const char*>(pager_blob[slot]), static_cast<char*>(view),
+                                          static_cast<int>(pager_blob_bytes[slot]), static_cast<int>(SparseSlot));
+    if (munmap(view, SparseSlot) != 0) std::abort();
+    if (size != static_cast<int>(SparseSlot)) {
+        pager_failures.fetch_add(1, std::memory_order_relaxed);
+        Note("EDEN_PAGER a paged slot could not be decompressed\n");
+        std::abort(); // its bytes are lost: better a crash report than a game that reads garbage
+    }
+    if (!MapSlot(SlotAddress(range, slot), PROT_READ | PROT_WRITE, physical)) {
+        (void)sceKernelReleaseDirectMemory(physical, SparseSlot);
+        return false;
+    }
+    range.physical[slot] = physical;
+    guest_committed.fetch_add(SparseSlot, std::memory_order_relaxed);
+    pager_in.fetch_add(1, std::memory_order_relaxed);
+    pager_in_ns.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now() - start).count()), std::memory_order_relaxed);
+    return true;
+}
+
+void PagerBackOff(std::size_t slot) noexcept {
+    if (pager_rewarms == nullptr) return;
+    const unsigned times = pager_rewarms[slot] < 4 ? pager_rewarms[slot]++ : 4;
+    pager_skip_until[slot] = pager_tick.load(std::memory_order_relaxed) + (40u << times);
+}
+
+std::mutex pager_mutex;
+std::condition_variable pager_wake;
+bool pager_stop = false;
+
+void PagerLoop(SparseRange* range) {
+    const std::size_t slots = (range->end - range->begin.load(std::memory_order_relaxed)) / SparseSlot;
+    std::size_t hand = 0;
+    std::unique_lock lock{pager_mutex};
+    while (!pager_stop) {
+        pager_wake.wait_for(lock, std::chrono::milliseconds(250), [] { return pager_stop; });
+        if (pager_stop) break;
+        lock.unlock();
+        const std::uint32_t tick = pager_tick.fetch_add(1, std::memory_order_relaxed) + 1;
+        // Compressed copies of slots read back since (or given back) go.
+        for (std::size_t slot = 0; slot < slots; ++slot) {
+            if (pager_blob[slot] == nullptr || SlotState(*range, slot) == SlotPaged) continue;
+            LockSlot(*range, slot);
+            if (SlotState(*range, slot) != SlotPaged) {
+                std::free(pager_blob[slot]);
+                pager_stored.fetch_sub(pager_blob_bytes[slot], std::memory_order_relaxed);
+                pager_blob[slot] = nullptr;
+                pager_blob_bytes[slot] = 0;
+            }
+            UnlockSlot(*range, slot, SlotState(*range, slot));
+        }
+        if (PoolShort()) {
+            std::size_t out = 0;
+            for (std::size_t slot = 0; slot < slots && out < OutPerTick; ++slot) {
+                if (SlotState(*range, slot) != SlotCold || tick - pager_cold_since[slot] < ColdTicks) continue;
+                LockSlot(*range, slot);
+                bool paged = SlotState(*range, slot) == SlotCold && PageOut(*range, slot, tick);
+                if (!paged && SlotState(*range, slot) == SlotCold &&
+                    mprotect(reinterpret_cast<void*>(SlotAddress(*range, slot)), SparseSlot, PROT_READ | PROT_WRITE) == 0) {
+                    UnlockSlot(*range, slot, SlotOwn); // incompressible: usable again, and skipped a while
+                    continue;
+                }
+                UnlockSlot(*range, slot, paged ? SlotPaged : SlotState(*range, slot));
+                out += paged;
+            }
+            std::size_t marked = 0;
+            for (std::size_t n = 0; n < slots && marked < MarkPerTick; ++n, hand = (hand + 1) % slots) {
+                if (SlotState(*range, hand) != SlotOwn || tick < pager_skip_until[hand]) continue;
+                LockSlot(*range, hand);
+                const bool cold = SlotState(*range, hand) == SlotOwn && MarkCold(*range, hand);
+                UnlockSlot(*range, hand, cold ? SlotCold : SlotState(*range, hand));
+                marked += cold;
+            }
+        }
+        lock.lock();
+    }
+}
+
+void PagerStart(SparseRange& range) noexcept {
+    const char* value = std::getenv("EDEN_GUEST_PAGING");
+    pager_requested.store(value != nullptr && value[0] == '1', std::memory_order_relaxed);
+    if (!pager_requested.load(std::memory_order_relaxed)) return;
+    // Off unless asked (EDEN_GUEST_HIGH=1): with it on, Mario Kart World's GPU faulted (device lost)
+    // while loading, twice, and the console went down the second time.
+    guest_blocks_high.store(PagerSetting("EDEN_GUEST_HIGH", 0) != 0, std::memory_order_relaxed);
+    LowWaterMiB = PagerSetting("EDEN_PAGER_LOW_MIB", LowWaterMiB);
+    ColdTicks = static_cast<std::uint32_t>(PagerSetting("EDEN_PAGER_COLD_S", ColdTicks / 4) * 4);
+    MarkPerTick = PagerSetting("EDEN_PAGER_MARK", MarkPerTick);
+    OutPerTick = PagerSetting("EDEN_PAGER_OUT", OutPerTick);
+    const std::size_t slots = (range.end - range.begin.load(std::memory_order_relaxed)) / SparseSlot;
+    pager_slots = slots;
+    pager_cold_since = new (std::nothrow) std::uint32_t[slots]();
+    pager_skip_until = new (std::nothrow) std::uint32_t[slots]();
+    pager_blob = new (std::nothrow) std::uint8_t*[slots]();
+    pager_blob_bytes = new (std::nothrow) std::uint32_t[slots]();
+    pager_rewarms = new (std::nothrow) std::uint8_t[slots]();
+    pager_scratch.resize(static_cast<std::size_t>(LZ4_compressBound(static_cast<int>(SparseSlot))));
+    if (!pager_cold_since || !pager_skip_until || !pager_blob || !pager_blob_bytes || !pager_rewarms) {
+        pager_requested.store(false, std::memory_order_relaxed);
+        Note("EDEN_PAGER off: no memory for its tables\n");
+        return;
+    }
+    {
+        const std::lock_guard lock{pager_mutex};
+        pager_stop = false;
+    }
+    pager = std::thread(PagerLoop, &range);
+    Note("EDEN_PAGER on\n");
+}
+
+void PagerStop() noexcept {
+    if (!pager_requested.load(std::memory_order_relaxed)) return;
+    {
+        const std::lock_guard lock{pager_mutex};
+        pager_stop = true;
+    }
+    pager_wake.notify_all();
+    if (pager.joinable()) pager.join();
+}
+
+// After the guest's memory was given back: the file goes.
+void PagerClose() noexcept {
+    if (pager_blob == nullptr) return;
+    // Called once the guest's memory was given back: no slot is read back any more.
+    // (The tables are sized for this session's range; a later session makes its own.)
+    for (std::size_t slot = 0; pager_blob_bytes != nullptr && slot < pager_slots; ++slot) std::free(pager_blob[slot]);
+    pager_stored.store(0, std::memory_order_relaxed);
+    delete[] pager_blob;
+    delete[] pager_blob_bytes;
+    delete[] pager_cold_since;
+    delete[] pager_skip_until;
+    delete[] pager_rewarms;
+    pager_rewarms = nullptr;
+    pager_blob = nullptr;
+    pager_blob_bytes = nullptr;
+    pager_cold_since = nullptr;
+    pager_skip_until = nullptr;
+}
+std::uint64_t PagerStored() noexcept { return pager_stored.load(std::memory_order_relaxed); }
+std::uint64_t PagerIncompressible() noexcept { return pager_incompressible.load(std::memory_order_relaxed); }
+#else
+void PagerBackOff(std::size_t) noexcept {}
+std::uint64_t PagerStored() noexcept { return 0; }
+std::uint64_t PagerIncompressible() noexcept { return 0; }
+bool PageIn(SparseRange&, std::size_t) noexcept { return false; }
+void PagerStart(SparseRange&) noexcept {}
+void PagerStop() noexcept {}
+void PagerClose() noexcept {}
+#endif
 
 void ScannerLoop(SparseRange* range) {
     auto next_report = std::chrono::steady_clock::now() + std::chrono::seconds(30);
@@ -1118,6 +1513,7 @@ void ServiceStart(SparseRange& range) noexcept {
 #ifdef PS5_NATIVE
     keeper = std::thread(ReserveKeeper);
 #endif
+    PagerStart(range);
     char line[128];
     const int length = std::snprintf(line, sizeof(line), "EDEN_CRAM on: scan=%d dedup=%d fine=%d reserve=%zuMiB\n",
                                      scan_requested.load() ? 1 : 0, dedup_requested.load() ? 1 : 0,
@@ -1134,6 +1530,7 @@ void ServiceStop(SparseRange& range) noexcept {
     }
     scanner_wake.notify_all();
     if (scanner.joinable()) scanner.join();
+    PagerStop();
 #ifdef PS5_NATIVE
     if (keeper.joinable()) keeper.join();
 #endif
@@ -1155,15 +1552,16 @@ void ReleaseServiceBlocks(SparseRange& range) noexcept {
             const std::size_t kept = FineKept(range, slot);
             if (kept != 0 && sceKernelReleaseDirectMemory(range.physical[slot], kept * FinePage) != 0) std::abort();
             guest_committed.fetch_sub(kept * FinePage, std::memory_order_relaxed);
-        } else if (state == SlotOwn) {
+        } else if (state == SlotOwn || state == SlotCold) {
             if (sceKernelReleaseDirectMemory(range.physical[slot], SparseSlot) != 0) std::abort();
         } else if (state == SlotShared && UnshareBlock(range.physical[slot]) == 0) {
             if (sceKernelReleaseDirectMemory(range.physical[slot], SparseSlot) != 0) std::abort();
             guest_committed.fetch_sub(SparseSlot, std::memory_order_relaxed);
         }
-        if (state == SlotOwn) guest_committed.fetch_sub(SparseSlot, std::memory_order_relaxed);
+        if (state == SlotOwn || state == SlotCold) guest_committed.fetch_sub(SparseSlot, std::memory_order_relaxed);
         range.owned[slot].store(false, std::memory_order_relaxed);
     }
+    PagerClose();
 #else
     const std::size_t slots = (range.end - range.begin.load(std::memory_order_relaxed)) / SparseSlot;
     for (std::size_t slot = 0; slot < slots; ++slot) {
@@ -1174,6 +1572,39 @@ void ReleaseServiceBlocks(SparseRange& range) noexcept {
 #endif
 }
 } // namespace
+
+// ---- The graphics cache gives texture memory back (EDEN_NX2_TC_DROP_GUEST) ----
+
+// The slot at `offset` of the guest's memory holds only texture data the graphics cache converted and
+// keeps: its memory goes back, with no copy. Bytes given back (0: not a slot with a block).
+std::size_t GuestMemoryDropSlot(std::uint64_t offset) noexcept {
+#ifdef PS5_NATIVE
+    SparseRange* const range = service_range.load(std::memory_order_acquire);
+    if (range == nullptr) return 0;
+    const std::size_t slot = static_cast<std::size_t>(offset / SparseSlot);
+    if (slot >= (range->end - range->begin.load(std::memory_order_relaxed)) / SparseSlot) return 0;
+    LockSlot(*range, slot);
+    const std::uint8_t state = SlotState(*range, slot);
+    std::size_t freed = 0;
+    if ((state == SlotOwn || state == SlotCold) && MapNone(SlotAddress(*range, slot))) {
+        if (sceKernelReleaseDirectMemory(range->physical[slot], SparseSlot) != 0) std::abort();
+        range->physical[slot] = -1;
+        guest_committed.fetch_sub(SparseSlot, std::memory_order_relaxed);
+        freed = SparseSlot;
+    } else if (state == SlotPaged && MapNone(SlotAddress(*range, slot))) {
+        freed = 1; // nothing held; its compressed copy goes with the pager's next pass
+    } else {
+        UnlockSlot(*range, slot, state);
+        return 0;
+    }
+    dropped_slots.fetch_add(1, std::memory_order_relaxed);
+    UnlockSlot(*range, slot, SlotDropped);
+    return freed;
+#else
+    (void)offset;
+    return 0;
+#endif
+}
 
 // ---- What the guest's kernel tells the service ----
 

@@ -48,6 +48,16 @@ inline std::uint64_t& ContextRip(void* context) noexcept {
     return *reinterpret_cast<std::uint64_t*>(&static_cast<ucontext_t*>(context)->uc_mcontext.gregs[REG_RIP]);
 #endif
 }
+// The page fault's error code (bit 1: the access was a write).
+inline std::uint64_t ContextErr(void* context) noexcept {
+#ifndef __linux__
+    return static_cast<std::uint64_t*>(context)[0xd8 / 8]; // mc_err, just before mc_rip
+#else
+    return static_cast<std::uint64_t>(static_cast<ucontext_t*>(context)->uc_mcontext.gregs[REG_ERR]);
+#endif
+}
+// Set by the fault handlers before they ask guest_write_fault: the error code of the fault.
+inline thread_local std::uint64_t fault_error_code = 0;
 inline std::uint64_t& ContextRsp(void* context) noexcept {
 #ifndef __linux__
     return static_cast<std::uint64_t*>(context)[0xf8 / 8];
