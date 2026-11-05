@@ -10,6 +10,8 @@
 
 **EglantinePS5 is an unofficial PlayStation 5 port of [Eglantine](https://github.com/Djihads80/Eglantine)**, a Switch 2 capable fork of [Eden](https://github.com/eden-emulator/mirror) - an accurate, high-performance emulator. All credit for the emulator core belongs to the Eglantine and Eden projects and their contributors. EglantinePS5 is not affiliated with or endorsed by the Eglantine team, the Eden team or Sony.
 
+The emulator core is now [Lichii](https://github.com/zortos293/Eglantine/releases) `99ac3d5955` (2026-11-05), the Eglantine fork with wider Switch 2 game compatibility; what changed for the PS5 port is in [docs/LICHII-CORE.md](docs/LICHII-CORE.md).
+
 This is an early alpha. Video, audio, controller input, and saves have been confirmed working. Compatibility and performance will vary between games. The current release is **v1.000.000**.
 
 ## Source code

@@ -1993,8 +1993,15 @@ write_derived("${PORT_BUILD_DIR}/sink_details.cpp" "#include \"devices.h\"\n${si
 file(READ "${PROJECT_SOURCE_DIR}/src/audio_core/sink/sink_stream.cpp" stream_source)
 string(REPLACE "    if (type == StreamType::In)\n        return;"
     "    if (type == StreamType::In)\n        return;\n    static_assert(std::is_same_v<decltype(samples_buffer), Common::RingBuffer<s16, 0x10000>>);\n    if (buffer.frames * device_channels > 0x10000 - samples_buffer.Size())\n        throw std::overflow_error(\"Audio PCM queue capacity exceeded\");" stream_source "${stream_source}")
-string(REPLACE "        samples_buffer.Push(new_samples);"
-    "        if (system_channels == 1 && device_channels == 2) {\n            for (std::size_t i = 0; i < new_samples.size(); i += 2) new_samples[i + 1] = new_samples[i];\n        }\n        samples_buffer.Push(new_samples);" stream_source "${stream_source}")
+# The Lichii core keeps the pushed count (Sysmix streams assert it); a missed anchor would leave
+# the right channel of mono streams silent, so it stops the configure instead.
+set(mono_upmix_anchor "        pushed = samples_buffer.Push(new_samples);")
+string(FIND "${stream_source}" "${mono_upmix_anchor}" mono_upmix_at)
+if(mono_upmix_at LESS 0)
+    message(FATAL_ERROR "sink_stream.cpp: the mono upmix anchor is gone")
+endif()
+string(REPLACE "${mono_upmix_anchor}"
+    "        if (system_channels == 1 && device_channels == 2) {\n            for (std::size_t i = 0; i < new_samples.size(); i += 2) new_samples[i + 1] = new_samples[i];\n        }\n${mono_upmix_anchor}" stream_source "${stream_source}")
 # Refresh the held frame before a partial hardware block underruns.
 string(REPLACE "    std::memcpy(last_frame.data(), &output_buffer[(frames_written - 1) * frame_size], frame_size_bytes);" "" stream_source "${stream_source}")
 string(REPLACE "        samples_buffer.Pop(&output_buffer[frames_written * frame_size], frames_available * frame_size);"
@@ -2191,7 +2198,11 @@ if(EDEN_PS5_OPENGL)
         # The new core completion targets one caller, with a stop-aware native wait.
         # Keep the pinned legacy adaptation for older source revisions.
         string(FIND "${gpu_worker}" "if (completion) completion->Wait();" targeted_wait_at)
-        if(NOT targeted_wait_at LESS 0)
+        # The Lichii core waits on the write lock's condition variable with the worker's stop
+        # token (stop_source above) and signals it under that lock: stop-aware and woken as is.
+        string(FIND "${gpu_worker}" "state.cv.wait(lk, stop_source.get_token(), [this, fence] {" cv_wait_at)
+        if(NOT cv_wait_at LESS 0)
+        elseif(NOT targeted_wait_at LESS 0)
             string(REPLACE "if (completion) completion->Wait();"
                 "if (completion && !completion->Wait(stop_source.get_token())) return 0;"
                 gpu_worker "${gpu_worker}")
@@ -2409,6 +2420,8 @@ ${paths_source}")
     # Eglantine measures the TSC of CPUs without leaf 0x15 itself, for frequency 0 only; the block
     # below covers every frequency under 1 GHz, so that one goes (tools/check-tsc-fallback.py).
     string(REPLACE "    // AMD CPUs have no leaf 0x15 (Zen 4 stops at 0x10): measure their invariant TSC too, or every\n    // guest clock read (CNTPCT, which games read thousands of times a frame) goes through the\n    // host's much slower QueryPerformanceCounter.\n    if (caps.invariant_tsc && caps.tsc_frequency == 0) {\n        caps.tsc_frequency = X64::EstimateRDTSCFrequency();\n    }\n\n" "" features_source "${features_source}")
+    # The Lichii core's version of that block (CPUs without leaf 0x15 only) goes the same way.
+    string(REPLACE "    // AMD CPUs have no leaf 0x15 (Zen 4 stops at 0x10): measure their invariant TSC too, or every\n    // guest clock read (CNTPCT, which games read thousands of times a frame) goes through the\n    // host's much slower QueryPerformanceCounter. Intel CPUs that have the leaf but report no\n    // crystal frequency (e.g. Coffee Lake) keep the OS clock: an i5-9400F crashed at launch on the\n    // measured RDTSC clock.\n    if (max_std_fn < 0x15 && caps.invariant_tsc && caps.tsc_frequency == 0) {\n        caps.tsc_frequency = X64::EstimateRDTSCFrequency();\n    }\n\n" "" features_source "${features_source}")
     string(REPLACE "    if (max_std_fn >= 0x16) {"
         "    if (caps.invariant_tsc && caps.tsc_frequency < 1'000'000'000ULL) {\n        caps.tsc_frequency = X64::EstimateRDTSCFrequency();\n    }\n\n    if (max_std_fn >= 0x16) {" features_source "${features_source}")
     write_derived("${PORT_BUILD_DIR}/cpu_features.cpp" "${features_source}")
@@ -2477,7 +2490,7 @@ list(APPEND common_sources "${PORT_BUILD_DIR}/multi_level_page_table.cpp")
     # Use getdents type information and one followed stat for each file size.
     eden_patch(vfs_real_source
         "std::vector<VirtualFile> RealVfsDirectory::GetFiles() const {\n    return IterateEntries<RealVfsFile, VfsFile>();\n}"
-        "std::vector<VirtualFile> RealVfsDirectory::GetFiles() const {\n    if (perms == OpenMode::AllowAppend) return {};\n    std::error_code error;\n    const auto entries = Eden::ReadNativeDirectoryMetadata(path, false, error);\n    if (error) { LOG_ERROR(Common_Filesystem, \"Directory enumeration failed: {}: {}\", path, error.message()); return {}; }\n    std::vector<VirtualFile> out;\n    out.reserve(entries.size());\n    for (const auto& entry : entries)\n        out.push_back(base.OpenFileFromEntry(FS::PathToUTF8String(entry.path), entry.size, path, perms));\n    return out;\n}")
+        "std::vector<VirtualFile> RealVfsDirectory::GetFiles() const {\n    if (perms == OpenMode::AllowAppend) return {};\n    std::error_code error;\n    const auto entries = Eden::ReadNativeDirectoryMetadata(path, false, error);\n    if (error) { LOG_ERROR(Common_Filesystem, \"Directory enumeration failed: {}: {}\", path, error.message()); return {}; }\n    std::vector<VirtualFile> out;\n    out.reserve(entries.size());\n    for (const auto& entry : entries)\n        out.push_back(base.OpenFileFromEntry(FS::PathToUTF8String(entry.path), entry.size, perms));\n    return out;\n}")
     eden_patch(vfs_real_source
         "std::vector<VirtualDir> RealVfsDirectory::GetSubdirectories() const {\n    return IterateEntries<RealVfsDirectory, VfsDirectory>();\n}"
         "std::vector<VirtualDir> RealVfsDirectory::GetSubdirectories() const {\n    if (perms == OpenMode::AllowAppend) return {};\n    std::error_code error;\n    const auto entries = Eden::ReadNativeDirectoryMetadata(path, true, error);\n    if (error) { LOG_ERROR(Common_Filesystem, \"Directory enumeration failed: {}: {}\", path, error.message()); return {}; }\n    std::vector<VirtualDir> out;\n    out.reserve(entries.size());\n    for (const auto& entry : entries)\n        out.push_back(base.OpenDirectory(FS::PathToUTF8String(entry.path), perms));\n    return out;\n}")
@@ -2518,8 +2531,8 @@ ${fs_service}")
     write_derived("${PORT_BUILD_DIR}/filesystem.cpp" "${fs_service}")
     list(REMOVE_ITEM core_sources hle/service/filesystem/filesystem.cpp)
     list(APPEND core_sources "${PORT_BUILD_DIR}/filesystem.cpp")
-    list(REMOVE_ITEM core_sources internal_network/network.cpp "${MULTIPLAYER_OUTPUT}/socket_network.cpp")
-    file(READ "${MULTIPLAYER_OUTPUT}/socket_network.cpp" network_source)
+    list(REMOVE_ITEM core_sources internal_network/network.cpp)
+    file(READ "${PROJECT_SOURCE_DIR}/src/core/internal_network/network.cpp" network_source)
     string(REPLACE "namespace Network {" "namespace Network {\n#ifndef IPPROTO_DCCP\nconstexpr int IPPROTO_DCCP = 33;\n#endif" network_source "${network_source}")
     # Native pipes can be created but fail their first byte write with ENOMEM.
     # Preserve Eden's poll/write/read wakeup design using a local socket pair.
@@ -2739,7 +2752,7 @@ target_link_libraries(eden-headless PRIVATE core eden-pad)
 # A game's text entry on the PS5's own on-screen keyboard (system_keyboard.h, keyboard_applet.h).
 target_sources(eden-headless PRIVATE "${EDEN_PORT_DIR}/system_keyboard.cpp")
 target_sources(eden-headless PRIVATE "${EDEN_PORT_DIR}/multiplayer.cpp")
-target_include_directories(eden-headless BEFORE PRIVATE "${MULTIPLAYER_SOCKET_HEADERS}" "${MULTIPLAYER_OUTPUT}")
+target_include_directories(eden-headless BEFORE PRIVATE "${MULTIPLAYER_OUTPUT}")
 if(PS5_NATIVE)
     target_link_libraries(eden-headless PRIVATE
         "${sdk}/target/lib/libSceImeDialog.so" "${sdk}/target/lib/libSceSysmodule.so"

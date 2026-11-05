@@ -616,10 +616,7 @@ private:
     bool ExplicitWorkgroupLayout() const {
         return profile.support_explicit_workgroup_layout &&
                (!info.uses_int8 || profile.support_workgroup_layout_8bit_access) &&
-               (!info.uses_int16 || profile.support_workgroup_layout_16bit_access) &&
-               (!info.uses_tensor_mul_add ||
-                (program.shared_memory_size != 0 && profile.support_workgroup_layout_16bit_access &&
-                 profile.supported_spirv >= 0x00010400));
+               (!info.uses_int16 || profile.support_workgroup_layout_16bit_access);
     }
 
     nir_def* LoadShared(nir_def* offset, unsigned components, unsigned bits, unsigned align) {

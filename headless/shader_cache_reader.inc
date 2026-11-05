@@ -9,10 +9,12 @@
 namespace {
 struct DamagedCache {};
 
-// An entry's environment begins with five sizes; none can exceed what is left of the file.
+// An entry's environment begins with six sizes (code, texture types, pixel formats, constant
+// buffer values, storage pointer types, constant buffer replacements); none can exceed what is
+// left of the file.
 void CheckEnvironment(std::ifstream& file, std::streamoff end) {
     const std::streamoff start = file.tellg();
-    std::array<u64, 5> sizes{};
+    std::array<u64, 6> sizes{};
     file.read(reinterpret_cast<char*>(sizes.data()), sizeof(sizes));
     const u64 left = static_cast<u64>(end - start);
     for (const u64 size : sizes) {

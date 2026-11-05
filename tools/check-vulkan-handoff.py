@@ -44,6 +44,8 @@ namespace LoadingProbe { struct Probe { void Mark(const char*) {} }; inline Prob
 namespace GpuSplit { inline bool check_owner{}; inline void CheckOwner(const char*) {} }
 }
 namespace Common {
+// The Lichii core registers its worker for the CPU trace (common/dkb_cpu_trace.h).
+namespace DkbCpuTrace { enum class Role { VulkanWorker }; struct Registration { explicit Registration(Role) {} }; }
 enum class ThreadPriority { Critical };
 void SetCurrentThreadName(const char*) {}
 void SetCurrentThreadPriority(ThreadPriority) {}

@@ -1,4 +1,6 @@
-extern "C" void mkw_native_block(unsigned long long, const void*, unsigned long long);
+// Defined by eden-headless (mkw_native_sample.inc); weak so the host checks that link the
+// shared JIT without it (eden-memory-check) still link.
+extern "C" void mkw_native_block(unsigned long long, const void*, unsigned long long) __attribute__((weak));
 // EglantinePS5: Jit::Impl with one compiled-code namespace per guest process (inserted into
 // a64_interface.cpp in place of upstream's Impl; see headless/dynarmic/jit_group.h).
 //
@@ -315,7 +317,8 @@ private:
             const u64 optimized = EdenClockNs();
             emitter.eden_pending_sites.clear();
             const auto emitted = emitter.Emit(ir_block, false);
-            mkw_native_block(descriptor.Value(), emitted.entrypoint, emitted.size);
+            if (mkw_native_block)
+                mkw_native_block(descriptor.Value(), emitted.entrypoint, emitted.size);
             eden_state.store(previous, std::memory_order_seq_cst);
             EdenReportCompile(descriptor, start, translated, optimized);
             eden_space.store(block_of_code.SpaceRemaining(), std::memory_order_relaxed);
@@ -368,7 +371,8 @@ private:
         Optimization::Optimize(ir_block, conf, polyfill_options);
         emitter.eden_pending_sites.clear();
         const auto emitted = emitter.Emit(ir_block, false);
-        mkw_native_block(descriptor.Value(), emitted.entrypoint, emitted.size);
+        if (mkw_native_block)
+            mkw_native_block(descriptor.Value(), emitted.entrypoint, emitted.size);
         eden_pre_state.store(EdenOutside, std::memory_order_seq_cst);
         eden_space.store(block_of_code.SpaceRemaining(), std::memory_order_relaxed);
 

@@ -1,20 +1,19 @@
 diff --git a/src/video_core/renderer_vulkan/vk_compute_pipeline.cpp b/src/video_core/renderer_vulkan/vk_compute_pipeline.cpp
-index a689d81..ae903a8 100644
+index f069dd87e9..1c3b515149 100644
 --- a/src/video_core/renderer_vulkan/vk_compute_pipeline.cpp
 +++ b/src/video_core/renderer_vulkan/vk_compute_pipeline.cpp
-@@ -5,6 +5,9 @@
- // SPDX-License-Identifier: GPL-2.0-or-later
- 
- #include <algorithm>
-+#include <cstdlib>
+@@ -8,6 +8,8 @@
+ #include <atomic>
+ #include <cstdlib>
+ #include <limits>
 +#include <string>
 +#include <string_view>
  #include <vector>
  
  #include <boost/container/small_vector.hpp>
-@@ -96,7 +99,11 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
-             .requiredSubgroupSize = GuestWarpSize,
-         };
+@@ -254,7 +256,11 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
+                                    info.uses_subgroup_shuffles || info.uses_subgroup_mask ||
+                                    info.uses_quad_shuffles || info.uses_fswzadd;
          VkPipelineCreateFlags flags{};
 -        if (device.IsKhrPipelineExecutablePropertiesEnabled() && Settings::values.renderer_debug.GetValue()) {
 +        // EDEN_NX2_PIPELINE_STATS=1: the driver's statistics of every large compute pipeline in the log
@@ -25,7 +24,7 @@ index a689d81..ae903a8 100644
              flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;
          }
          if (uses_descriptor_buffer) {
-@@ -147,6 +154,25 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
+@@ -304,6 +310,25 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
          if (pipeline_statistics) {
              pipeline_statistics->Collect(device, *pipeline);
          }
@@ -48,14 +47,14 @@ index a689d81..ae903a8 100644
 +                LOG_WARNING(Render_Vulkan, "NX2_PIPELINE_STATS compute{}", line);
 +            }
 +        }
-         std::scoped_lock lock{build_mutex};
-         is_built = true;
-         build_condvar.notify_one();
+         // Nothing reads the module once the pipeline exists; the driver keeps its SPIR-V while it
+         // lives.
+         spv_module.reset();
 diff --git a/src/video_core/vulkan_common/vulkan_device.cpp b/src/video_core/vulkan_common/vulkan_device.cpp
-index 053406b..cf7ec06 100644
+index d28dd131eb..4439389607 100644
 --- a/src/video_core/vulkan_common/vulkan_device.cpp
 +++ b/src/video_core/vulkan_common/vulkan_device.cpp
-@@ -1536,7 +1536,8 @@ void Device::RemoveUnsuitableExtensions() {
+@@ -1584,7 +1584,8 @@ void Device::RemoveUnsuitableExtensions() {
                                         VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME);
  
      // VK_KHR_pipeline_executable_properties

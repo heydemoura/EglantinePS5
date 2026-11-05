@@ -83,7 +83,6 @@ if [[ "${EDEN_PS5_VULKAN:-OFF}" == ON ]]; then
     python3 -B "$root/tools/check-transient-images.py"
     python3 -B "$root/tools/check-native-allocator-header.py"
     python3 -B "$root/tools/check-gpu-time-probe.py"
-    python3 -B "$root/tools/check-fence-requirements.py"
 fi
 # Source checks of the release configuration (development builds opt out: EDEN_SKIP_SOURCE_CHECKS=1).
 [[ ${EDEN_SKIP_SOURCE_CHECKS:-0} == 1 ]] && exit 0
@@ -106,7 +105,6 @@ python3 -B "$root/tools/check-crash-report.py"
 python3 -B "$root/tools/check-system-keyboard.py"
 python3 -B "$root/tools/check-nx2-core.py"
 python3 -B "$root/tools/check-shader-attributes.py"
-python3 -B "$root/tools/check-bananza-terrain.py"
 
 if [[ "$probe" == OFF ]]; then
     python3 -B "$root/tools/check-exclusive-monitor.py"

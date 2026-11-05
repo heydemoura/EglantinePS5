@@ -1,19 +1,18 @@
 diff --git a/src/core/loader/deconstructed_rom_directory.cpp b/src/core/loader/deconstructed_rom_directory.cpp
-index cda1645548..aa1bea9e75 100644
+index 491535a62d..dd00840a67 100644
 --- a/src/core/loader/deconstructed_rom_directory.cpp
 +++ b/src/core/loader/deconstructed_rom_directory.cpp
-@@ -6,6 +6,8 @@
- 
- #include <algorithm>
+@@ -8,6 +8,7 @@
  #include <cctype>
-+#include <charconv>
+ #include <charconv>
+ #include <chrono>
 +#include "core/file_sys/vfs/vfs_layered.h"
  #include <cstring>
- #include <string_view>
- #include "common/logging.h"
-@@ -77,12 +79,71 @@ struct PatchCollection {
- 
- namespace {
+ #include <map>
+ #include <memory>
+@@ -100,12 +101,71 @@ FileSys::VirtualDir FindLooseRomFSDirectory(const FileSys::VirtualDir& parent) {
+     return nullptr;
+ }
  
 +// Extracted dumps may keep base/ and updates/<decimal content version>/ separately.
 +// Newer files override older files, while unchanged files remain available from base.
@@ -83,7 +82,7 @@ index cda1645548..aa1bea9e75 100644
      for (const auto& f : exefs_dir->GetFiles()) {
          if (f->GetExtension() == "romfs") {
              return f;
-@@ -169,8 +230,9 @@ AppLoader_DeconstructedRomDirectory::AppLoader_DeconstructedRomDirectory(FileSys
+@@ -286,8 +346,9 @@ AppLoader_DeconstructedRomDirectory::AppLoader_DeconstructedRomDirectory(FileSys
      : AppLoader(std::move(file_))
      , override_update(override_update_)
  {
@@ -95,16 +94,16 @@ index cda1645548..aa1bea9e75 100644
  
      // Title ID
      const auto npdm = file_dir->GetFile("main.npdm");
-@@ -233,7 +295,7 @@ AppLoader_DeconstructedRomDirectory::AppLoader_DeconstructedRomDirectory(FileSys
+@@ -350,7 +411,7 @@ AppLoader_DeconstructedRomDirectory::AppLoader_DeconstructedRomDirectory(FileSys
          name = control->GetApplicationName();
      }
  
--    romfs = FindLooseRomFS(file_dir);
-+    romfs = FindLooseRomFS(physical_dir);
+-    romfs_exefs_dir = file_dir;
++    romfs_exefs_dir = physical_dir;
      if (const auto title_dir = file_dir->GetParentDirectory()) {
-         romfs_version = RomFSProductVersion(title_dir->GetSubdirectory("romfs"));
+         romfs_version = RomFSProductVersion(FindLooseRomFSDirectory(title_dir));
      }
-@@ -270,7 +332,7 @@ AppLoader_DeconstructedRomDirectory::LoadResult AppLoader_DeconstructedRomDirect
+@@ -397,7 +458,7 @@ AppLoader_DeconstructedRomDirectory::LoadResult AppLoader_DeconstructedRomDirect
              return {ResultStatus::ErrorNullFile, {}};
          }
  

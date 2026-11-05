@@ -69,7 +69,6 @@ extern "C" size_t eden_heap_last_failure(unsigned*, size_t*);
 #include "video_core/dma_pusher.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/host1x/syncpoint_manager.h"
-#include "video_core/nx2_loading_probe.h"
 #include "stall_watchdog.h"
 #include "dev_vulkan.h"
 #include "../src/fastmem.h"
@@ -1689,61 +1688,6 @@ int main(int argc, char** argv) {
                                                     name ? name->c_str() : "unknown");
                                     }
                                 }
-                            }
-                            if (diagnostic_sample == 1) {
-                                VideoCommon::LoadingProbe::capture_enabled = true;
-                                LOG_CRITICAL(HW_GPU, "MKW GPFIFO ring armed, maximum8MiB/4096records");
-                            }
-                            if (diagnostic_sample == 4) Tegra::GpfifoCapture::Flush("mkw-loading-snapshot");
-                            const auto report = [](const char* name, auto& channel) {
-                                LOG_CRITICAL(Render_Vulkan, "MKW progress {} phase={} arg={:#x} serial={}", name,
-                                    channel.phase.load(), channel.argument.load(), channel.serial.load());
-                            };
-                            report("gpu", VideoCommon::LoadingProbe::gpu);
-                            report("compiler", VideoCommon::LoadingProbe::compiler);
-                            report("driver", VideoCommon::LoadingProbe::driver);
-                            report("record", VideoCommon::LoadingProbe::record);
-                            report("queue", VideoCommon::LoadingProbe::queue);
-                            report("wait", VideoCommon::LoadingProbe::wait);
-                            report("command", VideoCommon::LoadingProbe::command);
-                            report("blit", VideoCommon::LoadingProbe::blit);
-                            report("writeback", VideoCommon::LoadingProbe::writeback);
-                            report("enqueue", VideoCommon::LoadingProbe::enqueue);
-                            LOG_CRITICAL(HW_GPU, "MKW enqueue registry_owned={}",
-                                VideoCommon::LoadingProbe::enqueue_registry_owned.load());
-                            LOG_CRITICAL(HW_GPU, "MKW blit source={:#x} destination={:#x} lookup_loops={} rebind_loops={}",
-                                VideoCommon::LoadingProbe::blit_src.load(), VideoCommon::LoadingProbe::blit_dst.load(),
-                                VideoCommon::LoadingProbe::blit_lookup_loops.load(), VideoCommon::LoadingProbe::blit_rebind_loops.load());
-                            LOG_CRITICAL(HW_GPU, "MKW command address={:#x} word={} raw={:#x} channel={} subchannel={} remaining={} value={:#x}",
-                                VideoCommon::LoadingProbe::command_address.load(),
-                                VideoCommon::LoadingProbe::command_word.load(),
-                                VideoCommon::LoadingProbe::command_raw.load(),
-                                VideoCommon::LoadingProbe::command_channel.load(),
-                                VideoCommon::LoadingProbe::command_subchannel.load(),
-                                VideoCommon::LoadingProbe::command_remaining.load(),
-                                VideoCommon::LoadingProbe::command_value.load());
-                            auto& syncpoints = system.Host1x().GetSyncpointManager();
-                            for (unsigned slot = 0; slot < VideoCommon::LoadingProbe::guest_waits.size(); ++slot) {
-                                auto& probe = VideoCommon::LoadingProbe::guest_waits[slot];
-                                if (!probe.requests.load()) continue;
-                                const auto point = probe.point.load();
-                                LOG_CRITICAL(Service, "MKW sync slot={} session={:#x} point={} target={:#x} current={:#x} pending={} requests={}",
-                                    slot, probe.session.load(), point, probe.target.load(),
-                                    point < 192 ? syncpoints.GetGuestSyncpointValue(point) : 0U,
-                                    probe.pending.load(), probe.requests.load());
-                            }
-                            const auto sync_ro = VideoCommon::LoadingProbe::sync_ro.load();
-                            const auto sync_rw = VideoCommon::LoadingProbe::sync_rw.load();
-                            LOG_CRITICAL(Service, "MKW sync shared ro={:#x} rw={:#x} count={} polls={} acks={}",
-                                sync_ro, sync_rw, VideoCommon::LoadingProbe::sync_count.load(),
-                                VideoCommon::LoadingProbe::sync_polls.load(), VideoCommon::LoadingProbe::sync_acks.load());
-                            auto& diagnostic_memory = system.ApplicationMemory();
-                            for (unsigned point = 0; point < 192; ++point) {
-                                const auto current = syncpoints.GetGuestSyncpointValue(point);
-                                if (!current) continue;
-                                const auto mirror = sync_ro && diagnostic_memory.IsValidVirtualAddressRange(sync_ro + 0x40 + point * 8, 8)
-                                    ? diagnostic_memory.Read64(sync_ro + 0x40 + point * 8) : 0ULL;
-                                LOG_CRITICAL(Service, "MKW sync counter={} current={:#x} mirror={:#x}", point, current, mirror);
                             }
                             if (diagnostic_sample == 4 || diagnostic_sample == 7) {
                                 if (auto* process = system.ApplicationProcess())

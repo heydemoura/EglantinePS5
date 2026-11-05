@@ -21,17 +21,21 @@ code=r'''
 #include <cstdint>
 #include <optional>
 #include <vector>
+#include <atomic>
 using u32=unsigned;using GPUVAddr=uint64_t;
 #define LOG_ERROR(...) ((void)0)
 namespace VideoCommon::Nx2Profile { enum class Counter { AcquireChecks, AcquireWaits }; void Add(Counter,unsigned) {} }
 enum class GpuSemaphoreOperation : u32 { AcquireEqual=1,AcquireGequal=2,AcquireMask=3 };
-unsigned clocks{},drains{},releases{},adds{},removes{},reads{};
-u32 first_word{},second_word{};bool latch{},mapped=true;
+unsigned clocks{},drains{},releases{},adds{},removes{},reads{},raw_reads{};
+u32 first_word{},second_word{},raw_word{};bool latch{},mapped=true,raw_first{};
+bool AcquireChecksRawWordFirst(){return raw_first;}
 std::chrono::steady_clock::time_point Now(){++clocks;return std::chrono::steady_clock::time_point{std::chrono::seconds{42}};}
 void DrainBack(){++drains;}
-struct Memory {std::optional<GPUVAddr> GpuToCpuAddress(GPUVAddr a){return mapped?std::optional{a}:std::nullopt;}};
+struct Memory {std::optional<GPUVAddr> GpuToCpuAddress(GPUVAddr a){return mapped?std::optional{a}:std::nullopt;}
+ template<class T> T Read(GPUVAddr){++raw_reads;return raw_word;}};
 struct Rasterizer {void ReleaseFences(){++releases;}};
-struct DmaPusher {Memory memory_manager;Rasterizer raster;Rasterizer* rasterizer=&raster;};
+struct DmaPusher {Memory memory_manager;Rasterizer raster;Rasterizer* rasterizer=&raster;std::atomic<unsigned> suspensions{};};
+void ReleaseFences(DmaPusher& dma_pusher){dma_pusher.rasterizer->ReleaseFences();}
 u32 ReadSemaphoreWord(DmaPusher&,GPUVAddr){return ++reads==1?first_word:second_word;}
 struct Nx2SemaphoreWaiters {
  static Nx2SemaphoreWaiters& Get(){static Nx2SemaphoreWaiters w;return w;}
@@ -51,11 +55,14 @@ struct Puller {
  }
 };
 ''' + match_source + r'''
-void reset(){clocks=drains=releases=adds=removes=reads=0;latch=false;mapped=true;first_word=second_word=0;}
+void reset(){clocks=drains=releases=adds=removes=reads=raw_reads=0;latch=false;mapped=true;raw_first=false;first_word=second_word=raw_word=0;}
 int main(){DmaPusher dma;
  for(auto op:{GpuSemaphoreOperation::AcquireEqual,GpuSemaphoreOperation::AcquireGequal,GpuSemaphoreOperation::AcquireMask}){
   reset();Puller p;first_word=7;p.Run(dma,op);assert(clocks==0&&drains==1&&reads==1&&releases==0&&adds==0&&!p.pending_acquire);
  }
+ // The guest's own word already meets the acquire (EDEN_NX2_ACQUIRE_DRAIN_FIRST unset): no drain, no clock.
+ reset();Puller raw;raw_first=true;raw_word=7;raw.Run(dma,GpuSemaphoreOperation::AcquireEqual);
+ assert(clocks==0&&drains==0&&raw_reads==1&&reads==0&&!raw.pending_acquire);
  reset();Puller blocked;blocked.Run(dma,GpuSemaphoreOperation::AcquireEqual);
  assert(clocks==1&&drains==1&&adds==1&&reads==2&&releases==1&&blocked.pending_acquire);
  assert(blocked.pending_acquire->since.time_since_epoch()==std::chrono::seconds{42});
@@ -71,4 +78,4 @@ with tempfile.TemporaryDirectory(prefix='semaphore-clock-')as temp:
  p=Path(temp);(p/'check.cpp').write_text(code)
  subprocess.run(['clang++-18','-std=c++20','-O1','-g','-fsanitize=address,undefined',str(p/'check.cpp'),'-o',str(p/'check')],check=True)
  subprocess.run([str(p/'check')],check=True)
-print('Semaphore acquire clock PASS: satisfied equal/gequal/mask skip clock; blocked, released, latched, unmapped and invalid paths preserve ordering')
+print('Semaphore acquire clock PASS: satisfied raw word and equal/gequal/mask skip clock; blocked, released, latched, unmapped and invalid paths preserve ordering')

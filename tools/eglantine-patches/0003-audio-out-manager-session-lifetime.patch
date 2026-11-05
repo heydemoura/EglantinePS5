@@ -41,18 +41,9 @@ index 178ee57df6..2bff10e0a1 100644
  };
  
 diff --git a/src/core/hle/service/audio/audio_out_manager.cpp b/src/core/hle/service/audio/audio_out_manager.cpp
-index 3b2087932c..0a0e5299a7 100644
+index 507c815e93..93143514d5 100644
 --- a/src/core/hle/service/audio/audio_out_manager.cpp
 +++ b/src/core/hle/service/audio/audio_out_manager.cpp
-@@ -15,7 +15,7 @@ using namespace AudioCore::AudioOut;
- 
- IAudioOutManager::IAudioOutManager(Core::System& system_)
-     : ServiceFramework{system_, "audout:u"}
--    , impl(system_)
-+    , impl{std::make_shared<AudioCore::AudioOut::Manager>(system_)}
- {
-     // clang-format off
-     static const FunctionInfo functions[] = {
 @@ -84,7 +84,7 @@ Result IAudioOutManager::OpenAudioOutAuto(
      LOG_DEBUG(Service_Audio, "Opening new AudioOut, sessionid={}, free sessions={}", new_session_id,
                impl->num_free_sessions);
@@ -63,7 +54,7 @@ index 3b2087932c..0a0e5299a7 100644
      R_TRY(audio_out->GetImpl()->GetSystem().Initialize(device_name, parameter, process_handle.Get(),
                                                         aruid.pid));
 diff --git a/src/core/hle/service/audio/audio_out_manager.h b/src/core/hle/service/audio/audio_out_manager.h
-index ec974aaba4..cefa70f68e 100644
+index 8bc0271b2e..cefa70f68e 100644
 --- a/src/core/hle/service/audio/audio_out_manager.h
 +++ b/src/core/hle/service/audio/audio_out_manager.h
 @@ -6,6 +6,8 @@
@@ -75,12 +66,3 @@ index ec974aaba4..cefa70f68e 100644
  #include "audio_core/audio_out_manager.h"
  #include "audio_core/out/audio_out.h"
  #include "core/hle/service/cmif_types.h"
-@@ -43,7 +45,7 @@ private:
-         AudioCore::AudioOut::AudioOutParameter parameter,
-         InCopyHandle<Kernel::KProcess> process_handle, ClientAppletResourceUserId aruid);
- 
--    std::optional<AudioCore::AudioOut::Manager> impl;
-+    std::shared_ptr<AudioCore::AudioOut::Manager> impl;
- };
- 
- } // namespace Service::Audio

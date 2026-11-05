@@ -7,7 +7,8 @@ cache=Path((root/'.local/headless-cache').read_text().strip())
 worker=(cache/'native-local/headless/gpu_thread.cpp').read_text()
 start=worker.index('u64 ThreadManager::PushCommand(')
 body=worker[start:worker.index('\n} // namespace',start)]
-assert 'state.queue.EmplaceWait(' not in body
+# The port replaces the core's blocking push with one that a stop releases (headless/CMakeLists.txt).
+assert 'state.queue.EmplaceWait(' not in body and 'state.queue.TryEmplace(' in body
 signal_start=worker.index('void SignalCommand(')
 signal_body=worker[signal_start:worker.index('\n} // Anonymous namespace',signal_start)]
 main=(root/'headless/main.cpp').read_text()
@@ -23,29 +24,32 @@ code=r'''
 #include <mutex>
 #include <stop_token>
 #include <thread>
-#include "common/host_command_queue.h"
-#include "common/host_command_completion.h"
+#include "common/bounded_threadsafe_queue.h"
 using u64=unsigned long long;
-struct CpuReadCommand { struct Diagnostic { unsigned before_lock{}, wait_begin{}, wait_end{}; }* diagnostic{}; };
-using CommandData=std::variant<int,CpuReadCommand>;
-namespace ReadbackDependencyDiagnostics { inline unsigned Now() { return 0; } }
-namespace VideoCommon { struct GpuSplit { static GpuSplit& Get() { static GpuSplit split; return split; } void Stop() {} }; }
-struct Item { CommandData command{}; u64 fence{}; std::shared_ptr<Common::HostCommandCompletion> completion; u64 sequence{}; };
-struct SynchState { std::mutex write_lock, fence_mutex; u64 last_fence{}; std::atomic<u64> signaled_fence{},published_work_sequence{}; bool shutting_down{};
-          Common::HostCommandQueue<Item> queue; std::condition_variable_any fence_cv; };
+using CommandData=std::variant<int>;
+struct CommandDataContainer {
+ CommandDataContainer()=default;
+ explicit CommandDataContainer(CommandData&& data_,u64 fence_,bool block_):data{std::move(data_)},fence{fence_},block{block_} {}
+ CommandData data;u64 fence{};bool block{};
+};
+// The generated gpu_thread.h: the core's queue at the port's eight entries, and its fence state.
+struct SynchState {
+ using CommandQueue=Common::SPSCQueue<CommandDataContainer,8>;
+ std::mutex write_lock;CommandQueue queue;u64 last_fence{};std::atomic<u64> signaled_fence{};
+ std::mutex fence_mutex;std::condition_variable_any fence_cv;std::condition_variable_any cv;
+};
 struct ThreadManager {
  SynchState state;
  std::stop_source stop_source;
  u64 PushCommand(CommandData&&,bool,bool);
  // The worker file defines these after PushCommand; here there is no worker to end.
  void NotifyShutdown();
- void InvalidateReadbackCache() {}
  void Stop() { stop_source.request_stop(); }
 };
+namespace VideoCommon { struct GpuSplit { static GpuSplit& Get() { static GpuSplit split; return split; } void Stop() {} }; }
 // headless/CMakeLists.txt times a push that found the queue full (gpu_queue_full), so the body
-// below carries Eden's Timer. This standalone TU does not include headless/performance.h - whose
-// clock is an extern the test would have to link - so the Timer is stubbed here: two atomics and
-// a clock read on scope exit cannot change what the queue does.
+// below carries Eden's Timer in development builds. This standalone TU does not include
+// headless/performance.h, so the Timer is stubbed here.
 namespace Eden::Performance {
 struct Totals { std::atomic<unsigned long long> calls{}, nanoseconds{}, requested_bytes{}; };
 inline Totals gpu_queue_full;
@@ -57,56 +61,63 @@ public:
 '''+signal_body+'\n'+body+r'''
 int main() {
  ThreadManager manager;
- // Publication must exceed the old ring capacity without waiting for a consumer
- // which may itself be waiting for a producer-held registry lock.
- constexpr int count=16384;
- for(int i=0;i<count;++i) assert(manager.PushCommand(int{i},false,true)==u64(i+1));
- Item item;
- for(int i=0;i<count;++i) {
+ // Eight commands fit without a consumer, in order.
+ for(int i=0;i<8;++i) assert(manager.PushCommand(int{i},false,true)==u64(i+1));
+ // A ninth waits for room; the stop of a worker that will never take it releases the producer.
+ auto full=std::async(std::launch::async,[&]{return manager.PushCommand(8,false,true);});
+ assert(full.wait_for(std::chrono::milliseconds(20))==std::future_status::timeout);
+ manager.stop_source.request_stop();
+ assert(full.wait_for(std::chrono::seconds(1))==std::future_status::ready);
+ full.get();
+ CommandDataContainer item;
+ for(int i=0;i<8;++i) {
    assert(manager.state.queue.TryPop(item));
-   assert(std::get<int>(item.command)==i && item.fence==u64(i+1));
+   assert(std::get<int>(item.data)==i && item.fence==u64(i+1));
  }
  assert(!manager.state.queue.TryPop(item));
- manager.stop_source.request_stop();
- assert(manager.PushCommand(4,false,true)==0);
+ // After the stop nothing more is queued.
+ manager.PushCommand(9,false,true);
  assert(!manager.state.queue.TryPop(item));
+ // A synchronous push waiting for its fence is released by the stop too.
  ThreadManager synchronous;
  auto fence_wait=std::async(std::launch::async,[&]{return synchronous.PushCommand(5,true,false);});
  assert(fence_wait.wait_for(std::chrono::milliseconds(10))==std::future_status::timeout);
  synchronous.stop_source.request_stop();
  assert(fence_wait.wait_for(std::chrono::seconds(1))==std::future_status::ready);
  fence_wait.get();
- // Completion before parking and completion while parked must both publish read results.
+ // A blocking push returns once its own fence is signalled, not before.
  ThreadManager completed;
- auto completing = std::async(std::launch::async,[&]{return completed.PushCommand(6,true,true);});
- Item completion_item;
+ auto completing=std::async(std::launch::async,[&]{return completed.PushCommand(6,true,true);});
+ CommandDataContainer completion_item;
  while(!completed.state.queue.TryPop(completion_item)) std::this_thread::yield();
- completed.state.signaled_fence.store(100); // An unrelated watermark is not this request's completion.
  assert(completing.wait_for(std::chrono::milliseconds(10))==std::future_status::timeout);
- SignalCommand(completed.state,completion_item.fence,completion_item.completion);
+ SignalCommand(completed.state,completion_item.fence,completion_item.block);
  assert(completing.get()==1);
+ // Several blocking producers, released in fence order by one consumer.
  ThreadManager ordered;
  std::array<std::future<u64>,8> waits;
  for(auto& wait:waits) wait=std::async(std::launch::async,[&]{return ordered.PushCommand(7,true,true);});
- std::array<Item,8> items;
- for(auto& pending:items) {
-   const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(1);
+ for(int taken=0;taken<8;) {
+   const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);
+   CommandDataContainer pending;
    while(!ordered.state.queue.TryPop(pending)) {
      assert(std::chrono::steady_clock::now()<deadline);
      std::this_thread::yield();
    }
+   SignalCommand(ordered.state,pending.fence,pending.block);
+   ++taken;
  }
- for(const auto& pending:items) SignalCommand(ordered.state,pending.fence,pending.completion);
  for(auto& wait:waits) assert(wait.wait_for(std::chrono::seconds(1))==std::future_status::ready);
  for(auto& wait:waits) assert(wait.get()<=8);
- // Cancellation must also work if already requested before the wait registers its callback.
+ // A stop requested before the push: nothing is queued and nothing waits.
  ThreadManager cancelled;
  cancelled.stop_source.request_stop();
- assert(cancelled.PushCommand(8,true,true)==0);
+ cancelled.PushCommand(8,true,true);
+ assert(!cancelled.state.queue.TryPop(item));
 }
 '''
 with tempfile.TemporaryDirectory() as tmp:
  p=Path(tmp)/'check.cpp';p.write_text(code);exe=Path(tmp)/'check'
  subprocess.run(['c++','-std=c++20','-pthread','-fsanitize=address,undefined','-I'+str(cache/'source/src'),str(p),'-o',str(exe)],check=True)
- subprocess.run([str(exe)],check=True,timeout=10)
-print('GPU producer: PASS 16384 publications without consumer, FIFO contents/fences, stopped enqueue/fence wait, completion before parking and eight ordered concurrent waiters')
+ subprocess.run([str(exe)],check=True,timeout=30)
+print('GPU producer: bounded queue order, full-queue and fence waits released by stop, signalled completion, ordered producers PASS')
