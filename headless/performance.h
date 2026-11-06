@@ -435,12 +435,18 @@ struct IdleCounters {
     std::atomic<unsigned long long> wakes{0}, wake_ns{0}, wake_max_ns{0};
 };
 inline std::array<IdleCounters, 6> guest_idle{};
+// Frame pacing (backported from ProsperoEden; see also guest_clock.h).
 // PAUSE iterations a guest core spins on its interrupt flag before sleeping (~20 ns each on the
-// console). Guest job systems hand work between cores ~150 times a frame; sleeping on each
-// handoff put the host's thread wake-up latency on the critical path. 100 us (the default) took
-// a racing game's heavy phase from ~55 to ~59.6 FPS; dev-settings
-// idle_spin_us=N overrides it (0 sleeps at once).
-inline std::atomic<unsigned> idle_spin_iterations{5000};
+// console). Guest job systems hand work between cores thousands of times a second; sleeping on a
+// handoff puts the host's thread wake-up latency on the critical path. 100 us took a racing game's
+// heavy phase from ~55 to ~59.6 FPS; 500 us (the default) cut a tested game's requests for
+// 30 FPS from 23% to 15% of frames (sleeps per core 800 -> 330 a second). 2 ms cut them to 12% but
+// made some effects flicker. dev-settings idle_spin_us=N overrides it (0 sleeps at once).
+inline std::atomic<unsigned> idle_spin_iterations{25000};
+// Signal the guest vsync first and compose 1.5 ms later, so a frame the game queues in response
+// to the vsync is latched at that same vsync (headless/CMakeLists.txt, VI conductor; multicore
+// only). dev-settings compose_delay_us=N overrides it (0 = upstream order).
+inline std::atomic<int> compose_delay_us{1500};
 // Draws between the Vulkan rasterizer's hand-offs to its worker, minus one (a power of two minus
 // one; tools/prepare-vulkan-port.py). Upstream hands off every 8 draws; dev-settings
 // dispatch_draws=N (8 to 512) overrides the 64 used here.

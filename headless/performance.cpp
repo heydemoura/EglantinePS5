@@ -154,11 +154,59 @@ void PcSignal(int, siginfo_t*, void* context) {
 }
 #endif
 #ifdef PS5_NATIVE
+// Whether logical CPUs 0 and 1 are one physical core, by timing. Four multiply chains on each of
+// two CPUs at once: siblings take the core's one multiplier in turns and need about twice as long
+// as two CPUs of different cores. The shortest of three runs of each pair, for whatever else runs
+// meanwhile. (CheckWorkerTopology asks this where CPUID does not tell the cores apart.)
+// (Backported from ProsperoEden.)
+long long PairLoopNs(unsigned cpu_a, unsigned cpu_b) {
+    std::atomic<int> ready{0};
+    std::atomic<bool> go{false};
+    std::array<long long, 2> elapsed{-1, -1};
+    const auto body = [&](unsigned cpu, unsigned slot) {
+        cpuset_t one{};
+        CPU_SET(cpu, &one);
+        const bool placed = cpuset_setaffinity(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, 8, &one) == 0;
+        sched_yield();
+        ready.fetch_add(1, std::memory_order_release);
+        if (!placed) return;
+        // Bounded: threads of one priority are not time-sliced here.
+        for (unsigned spins = 0; !go.load(std::memory_order_acquire) && spins < 200'000'000; ++spins) {}
+        const long long begin = NowNs();
+        unsigned long long a = cpu + 1, b = 3, c = 5, d = 7;
+        for (unsigned i = 0; i < 1'500'000; ++i) {
+            a = a * 6364136223846793005ULL + 1;
+            b = b * 2862933555777941757ULL + 3;
+            c = c * 3202034522624059733ULL + 5;
+            d = d * 1442695040888963407ULL + 7;
+        }
+        volatile unsigned long long sink = a ^ b ^ c ^ d;
+        (void)sink;
+        elapsed[slot] = NowNs() - begin;
+    };
+    std::thread first(body, cpu_a, 0u), second(body, cpu_b, 1u);
+    while (ready.load(std::memory_order_acquire) < 2) std::this_thread::yield();
+    go.store(true, std::memory_order_release);
+    first.join();
+    second.join();
+    return elapsed[0] < 0 || elapsed[1] < 0 ? -1 : std::max(elapsed[0], elapsed[1]);
+}
+bool AdjacentCpusShareCore() {
+    long long together = -1, apart = -1;
+    for (int run = 0; run < 3; ++run) {
+        const long long pair = PairLoopNs(0, 1), others = PairLoopNs(0, 2);
+        if (pair > 0 && (together < 0 || pair < together)) together = pair;
+        if (others > 0 && (apart < 0 || others < apart)) apart = others;
+    }
+    const bool share = together > 0 && apart > 0 && together * 4 >= apart * 5;
+    std::printf("EDEN_WORKER_SMT cpus_0_1_ns=%lld cpus_0_2_ns=%lld share=%d\n", together, apart, share);
+    return share;
+}
 std::array<unsigned, 5> worker_cpus{};
 bool worker_topology_ready = false;
 // Physical core (x2APIC above the SMT shift) of each allowed CPU, -1 if unknown.
 std::array<int, 64> cpu_core = [] { std::array<int, 64> c{}; c.fill(-1); return c; }();
-// CPUs outside guest cores 0-2 and their SMT siblings, and not the GPU thread CPU.
+// CPUs that are neither pinned nor the GPU thread's SMT sibling.
 unsigned long long secondary_cpus = 0;
 // The process CPU set seen by the topology probe (threads may inherit narrower sets).
 cpuset_t topology_allowed{};
@@ -166,17 +214,27 @@ bool topology_allowed_valid = false;
 std::atomic<bool> placement_secondary{false};
 std::atomic<unsigned> secondary_reports{};
 void CheckWorkerTopology() {
+    // Probe once per process. Later games start from a launcher thread that the first game's
+    // placement left on the secondary CPUs, where the probe finds too few cores.
+    if (worker_topology_ready) {
+        std::printf("EDEN_WORKER_TOPOLOGY ready=1 cached=1 cpus=%u,%u,%u,%u,%u\n",
+            worker_cpus[0], worker_cpus[1], worker_cpus[2], worker_cpus[3], worker_cpus[4]);
+        return;
+    }
     cpuset_t original{};
     if (__get_cpuid_max(0, nullptr) < 0xb ||
         cpuset_getaffinity(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, 8, &original)) return;
     std::array<unsigned, 5> cores{};
     unsigned count = 0;
-    bool changed = false;
+    bool changed = false, refused = false, measured = false;
     for (unsigned cpu = 0; cpu < 64; ++cpu) {
         if (!CPU_ISSET(cpu, &original)) continue;
         cpuset_t one{};
         CPU_SET(cpu, &one);
-        if (cpuset_setaffinity(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, 8, &one)) break;
+        if (cpuset_setaffinity(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, 8, &one)) {
+            refused = true;
+            break;
+        }
         changed = true;
         unsigned a, b, c, d;
         __cpuid_count(0xb, 0, a, b, c, d);
@@ -197,20 +255,48 @@ void CheckWorkerTopology() {
             std::memcmp(&original, &restored, 8))
             throw std::runtime_error("Cannot restore topology-probe thread affinity");
     }
+    // CPUID did not tell five physical cores apart: newer system software gives one answer for
+    // every CPU (a console with it ran every thread unpinned: a large open-world game at 20
+    // frames a second where a console with pinned threads made 26 to 29). Where CPUID does
+    // answer, logical CPUs 2n and 2n+1 are one core; a timing of two pairs says whether that
+    // holds here (AdjacentCpusShareCore), and then the same five CPUs are used.
+    if (!refused && count != cores.size()) {
+        unsigned even = 0;
+        for (unsigned cpu = 0; cpu < 64; cpu += 2) even += CPU_ISSET(cpu, &original) ? 1 : 0;
+        if (even >= cores.size() && CPU_ISSET(1, &original) && AdjacentCpusShareCore()) {
+            count = 0;
+            cpu_core.fill(-1);
+            for (unsigned cpu = 0; cpu < 64; ++cpu) {
+                if (!CPU_ISSET(cpu, &original)) continue;
+                cpu_core[cpu] = static_cast<int>(cpu / 2);
+                if ((cpu & 1) == 0 && count < cores.size()) {
+                    cores[count] = cpu / 2;
+                    worker_cpus[count++] = cpu;
+                }
+            }
+            measured = true;
+        }
+    }
     worker_topology_ready = count == cores.size();
     topology_allowed = original;
     topology_allowed_valid = true;
     if (worker_topology_ready) {
+        // Secondary threads share every CPU but the pinned ones and the GPU thread's whole core:
+        // its SMT sibling left idle made the GPU thread ~19% cheaper per draw in a race, +30% fps
+        // (ProsperoEden runs/place-*, 2026-11-02; secondary mask 1caa against 1e80, which kept the
+        // guest cores' siblings idle instead). The guest threads are ~45% busy, so sharing their
+        // siblings costs nothing measurable.
+        secondary_cpus = 0;
         for (unsigned cpu = 0; cpu < 64; ++cpu) {
             if (!CPU_ISSET(cpu, &original) || cpu_core[cpu] < 0) continue;
-            const bool guest_core = cpu_core[cpu] == static_cast<int>(cores[0]) ||
-                cpu_core[cpu] == static_cast<int>(cores[1]) || cpu_core[cpu] == static_cast<int>(cores[2]);
-            if (!guest_core && cpu != worker_cpus[3] && cpu != worker_cpus[4]) secondary_cpus |= 1ULL << cpu;
+            const bool pinned = std::find(worker_cpus.begin(), worker_cpus.end(), cpu) != worker_cpus.end();
+            if (!pinned && cpu_core[cpu] != static_cast<int>(cores[4])) secondary_cpus |= 1ULL << cpu;
         }
         std::printf("EDEN_WORKER_SECONDARY mask=%llx\n", secondary_cpus);
     }
-    std::printf("EDEN_WORKER_TOPOLOGY ready=%d distinct_cores=%u cpus=%u,%u,%u,%u,%u\n",
-        worker_topology_ready, count, worker_cpus[0], worker_cpus[1], worker_cpus[2], worker_cpus[3], worker_cpus[4]);
+    std::printf("EDEN_WORKER_TOPOLOGY ready=%d distinct_cores=%u cpus=%u,%u,%u,%u,%u measured=%d\n",
+        worker_topology_ready, count, worker_cpus[0], worker_cpus[1], worker_cpus[2], worker_cpus[3], worker_cpus[4],
+        static_cast<int>(measured));
 }
 // EDEN_PS5_PLACE="CPUCore_4=1/GPUBack=10/VulkanWorker=12,13" (layout experiments; ; or / between entries): the CPUs a
 // thread of that name runs on, replacing its pin or the secondary mask. Read on each placement:
@@ -247,7 +333,33 @@ void PlaceSecondary(const char* name) {
     unsigned long long cpus = PlacementOverride(name);
     if (cpus == 0) {
         if (!placement_secondary.load(std::memory_order_relaxed) || !secondary_cpus) return;
-        cpus = secondary_cpus;
+        // With the split GPU thread on, its back gets a core of its own (the last one both of whose
+        // CPUs are secondary), the SMT sibling idle: races drew 83k draws/s against 73k with the
+        // back among the secondary threads (ProsperoEden runs/rp-*, rc-*, 2026-11-02).
+        // dev-settings back_cpu=<n> picks the CPU. (EDEN_NX2_SPLIT=0 leaves the core shared.)
+        static const int back_core = [] {
+            if (const char* split = std::getenv("EDEN_NX2_SPLIT"); split != nullptr && split[0] == '0') return -1;
+            for (int cpu = 62; cpu >= 0; cpu -= 2)
+                if (((secondary_cpus >> cpu) & 3) == 3) return cpu;
+            return -1;
+        }();
+        // dev-settings secondary_mask=<hex> (EDEN_SECONDARY_MASK): the CPUs the secondary threads
+        // share instead. Read at the first placement, after the dev settings.
+        static const unsigned long long shared = [] {
+            if (const char* value = std::getenv("EDEN_SECONDARY_MASK"); value != nullptr)
+                return std::strtoull(value, nullptr, 16);
+            return back_core >= 0 ? secondary_cpus & ~(3ULL << back_core) : secondary_cpus;
+        }();
+        static const long back_cpu = [] {
+            const char* value = std::getenv("EDEN_BACK_CPU");
+            return value != nullptr ? static_cast<long>(std::strtoul(value, nullptr, 10)) : long{back_core};
+        }();
+        // dev-settings pin=<thread name>:<cpu> (EDEN_PIN_<name>): that secondary thread on one CPU.
+        const char* const pin = std::getenv((std::string("EDEN_PIN_") + name).c_str());
+        const long own_cpu = pin != nullptr ? static_cast<long>(std::strtoul(pin, nullptr, 10))
+                             : std::strcmp(name, "GPUBack") == 0 ? back_cpu
+                                                                  : -1;
+        cpus = own_cpu >= 0 && own_cpu < 64 ? 1ULL << own_cpu : shared;
     }
     cpuset_t mask{};
     for (unsigned cpu = 0; cpu < 64; ++cpu)
