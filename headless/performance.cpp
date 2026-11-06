@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+#include <atomic>
 #include "performance.h"
 #include "crash_report.h"
 #include "stall_watchdog.h"
@@ -345,11 +346,19 @@ void PlaceSecondary(const char* name) {
         }();
         // dev-settings secondary_mask=<hex> (EDEN_SECONDARY_MASK): the CPUs the secondary threads
         // share instead. Read at the first placement, after the dev settings.
-        static const unsigned long long shared = [] {
-            if (const char* value = std::getenv("EDEN_SECONDARY_MASK"); value != nullptr)
-                return std::strtoull(value, nullptr, 16);
-            return back_core >= 0 ? secondary_cpus & ~(3ULL << back_core) : secondary_cpus;
+        // The back's core is kept from the other secondary threads only once the back exists:
+        // Eglantine starts the split only below High GPU accuracy, and threads placed before it
+        // keep the whole set (they may share the core with it).
+        static std::atomic<bool> back_started{false};
+        if (std::strcmp(name, "GPUBack") == 0) back_started.store(true, std::memory_order_relaxed);
+        static const unsigned long long forced_shared = [] {
+            const char* value = std::getenv("EDEN_SECONDARY_MASK");
+            return value != nullptr ? std::strtoull(value, nullptr, 16) : 0ULL;
         }();
+        const unsigned long long shared =
+            forced_shared != 0 ? forced_shared
+            : back_core >= 0 && back_started.load(std::memory_order_relaxed) ? secondary_cpus & ~(3ULL << back_core)
+                                                                             : secondary_cpus;
         static const long back_cpu = [] {
             const char* value = std::getenv("EDEN_BACK_CPU");
             return value != nullptr ? static_cast<long>(std::strtoul(value, nullptr, 10)) : long{back_core};
