@@ -364,6 +364,14 @@ void RecordHle(const char* service, unsigned command, long long ns);
 // direct memory (what the next allocation needs) is under kShortMemory.
 // dev-settings gc_dirty=upstream restores Eden's rule.
 inline std::atomic<bool> gc_keep_dirty{true};
+// The collector's per-run budget counts evictions, not visits (tools/
+// prepare-vulkan-port.py): skipped images used to burn it and stop the scan,
+// so kept images shielded everything behind them. dev-settings gc_scan=upstream
+// restores Eden's visit counting.
+inline std::atomic<bool> gc_count_visits{false};
+// GPU thread only: the collector's pass over costly images long unused while the pool is short
+// (tools/prepare-vulkan-port.py), which may take them.
+inline bool gc_old_costly = false;
 inline std::atomic<bool> graphics_memory_short{false};
 // 1 GiB: the pool is the CPU's too, and the largest thing a game asked of it at once was a block of
 // 486 MiB (a texture array of 121 layers, decoded before it is uploaded). With less here the collector
@@ -408,6 +416,25 @@ inline std::atomic<unsigned long long (*)()> guest_kernel_memory{nullptr};
 // the driver's count.
 inline std::atomic<unsigned long long (*)()> graphics_memory_free{nullptr};
 inline std::atomic<bool> graphics_usage_from_pool{true};
+// The pool is short now (the probe above): the texture collector then collects as if past its
+// first mark. Switch 2 titles set the marks near the driver's device memory, which on the console
+// is the pool the guest's memory also takes, so use stayed under them while the pool ran out
+// (Mario Kart World: 5.4 GB of textures against a 5.5 GB mark, then no block for 42 MiB).
+inline bool GraphicsMemoryIsShort() {
+    const auto probe = graphics_memory_probe.load(std::memory_order_relaxed);
+    return probe && probe();
+}
+// Under this much free memory (graphics_memory_free: the largest free block less the guest's
+// headroom; 1 while a guest write waits for a block) the pool is critical: the collector then
+// takes what 10 frames left unused, costly images included only past its own critical mark.
+// Short but not critical, it takes what 600 frames left unused (EDEN_NX2_TC_SHORT_AGE): taking
+// everything 10 frames left unused recreated 1,000-2,400 images per 600 frames in Mario Kart
+// World's races. Half of kShortMemory, as ProsperoEden's 1 GiB is half of its 2 GiB short mark.
+inline constexpr std::size_t kCriticalMemory = kShortMemory / 2;
+inline bool GraphicsMemoryIsCritical() {
+    const auto free = graphics_memory_free.load(std::memory_order_relaxed);
+    return free && free() < kCriticalMemory;
+}
 // GPU thread only (the collector).
 inline bool KeepDirtyTextures() {
     if (!gc_keep_dirty.load(std::memory_order_relaxed)) return false;
