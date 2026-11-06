@@ -696,12 +696,15 @@ void ReportGpuThread(unsigned frame) {
     // Cumulative totals; the analyzer takes deltas between consecutive reports.
     std::printf("EDEN_DEV_GPU frame=%u mono_ns=%lld cpu_ns=%lld idle_ns=%llu dispatch_calls=%llu "
                 "dispatch_ns=%llu drain_calls=%llu drain_ns=%llu present_calls=%llu present_ns=%llu "
-                "full_calls=%llu full_ns=%llu draws=%llu\n", frame, ClockNs(CLOCK_MONOTONIC),
+                "full_calls=%llu full_ns=%llu draws=%llu dma_runs=%llu dma_run_words=%llu dma_words=%llu\n",
+                frame, ClockNs(CLOCK_MONOTONIC),
                 owner_cpu_clock_valid ? ClockNs(CLOCK_THREAD_CPUTIME_ID) : -static_cast<long long>(ENOTSUP),
                 load(gpu_queue_wait, false), load(gpu_dispatch, true), load(gpu_dispatch, false),
                 load(gpu_fence_drain, true), load(gpu_fence_drain, false),
                 load(gpu_present_wait, true), load(gpu_present_wait, false),
-                load(gpu_queue_full, true), load(gpu_queue_full, false), load(rasterizer_draw, true));
+                load(gpu_queue_full, true), load(gpu_queue_full, false), load(rasterizer_draw, true),
+                dma_batch_runs.load(std::memory_order_relaxed), dma_batch_words.load(std::memory_order_relaxed),
+                dma_single_words.load(std::memory_order_relaxed));
     // What the dispatch is made of: the draw path itself (RasterizerVulkan::PrepareDraw - both
     // cache locks, pipeline configure, dynamic state, the record) against the guest method
     // decoding that surrounds it, plus the dispatch's own three phases. A draw whose
@@ -797,6 +800,9 @@ void ReportGpuThread(unsigned frame) {
     std::printf(" ipc_calls=%llu ipc_ns=%llu", load(guest_ipc_wait, true), load(guest_ipc_wait, false));
     std::printf(" cache_lock_contended=%llu cache_lock_blocked=%llu",
                 cache_lock_contended.load(std::memory_order_relaxed), cache_lock_blocked.load(std::memory_order_relaxed));
+    std::printf(" write_deferred=%llu dirty_replays=%llu read_skipped=%llu",
+                cpu_write_deferred.load(std::memory_order_relaxed), gpu_dirty_replays.load(std::memory_order_relaxed),
+                cpu_read_skipped.load(std::memory_order_relaxed));
     std::printf(" fs_file_calls=%llu fs_file_ns=%llu fs_file_bytes=%llu fs_storage_calls=%llu fs_storage_ns=%llu "
                 "fs_storage_bytes=%llu",
                 load(guest_fs_file, true), load(guest_fs_file, false),
