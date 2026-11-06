@@ -1,0 +1,48 @@
+Switch 2 GPU-only regions: EDEN_NX2_DENSE_LAZY_MIB=<n> backs dense regions of n MiB or more as the
+GPU writes them, like sparse ones (nx2:gpu 214). (ProsperoEden eglantine-a42b4d4-ps5.d 0029
+dense-lazy-regions and 0031 dense-lazy-default.)
+
+ProsperoEden made it the default at 16 MiB after four races (GPU-only memory peak 2.5-3.2 GB
+against 5.7 GB, ~18% fewer texture evictions, fps unchanged). Opt-in here (default off): such a
+region also counts as a sparse region for EglantinePS5's texture cache, which binds large
+single-layer color images there only where data was written (UsesSparseTiles); render targets in
+those regions were not covered by ProsperoEden's measurements. EDEN_NX2_DENSE_LAZY_MIB=16 matches
+ProsperoEden's default.
+
+diff --git a/src/core/hle/service/nx2_gsv.h b/src/core/hle/service/nx2_gsv.h
+index 650c092..ad2972b 100644
+--- a/src/core/hle/service/nx2_gsv.h
++++ b/src/core/hle/service/nx2_gsv.h
+@@ -617,7 +617,7 @@ private:
+             if (last > start && ((last + 1 - start) % Core::Memory::YUZU_PAGESIZE) == 0) {
+                 const u64 size = last + 1 - start;
+                 std::scoped_lock lk{m_region_mutex};
+-                if ((w[7] & SparseRegionFlag) != 0 && LazySparseRegions()) {
++                if (((w[7] & SparseRegionFlag) != 0 || size >= LazyDenseBytes()) && LazySparseRegions()) {
+                     // Title 1's terrain texture arrays and layer pools (170 MB-5.8 GB, mostly empty):
+                     // backed whole, they ran the pool dry and the later ones got no memory at all.
+                     // The region gets a device range of its own, unbacked pages read zero, and
+@@ -1119,6 +1119,23 @@ private:
+         return lazy;
+     }
+ 
++    // EDEN_NX2_DENSE_LAZY_MIB=<n>: GPU-only regions of n MiB or more are backed as the GPU writes
++    // them too, like sparse ones. What the GPU renders or computes into them lives in Vulkan's
++    // images and buffers; the backing only takes what is flushed back, and pages never written
++    // read zero. Backed whole, they doubled ~3 GB of GPU memory in the pool the CPU shares
++    // (ProsperoEden: races peaked at 2.5-3.2 GB of GPU-only memory instead of 5.7, with ~18% fewer
++    // texture evictions, at 16 MiB). Opt-in here: the texture cache treats large single-layer
++    // color images in such regions as sparse tiles bound where data was written
++    // (UsesSparseTiles), which ProsperoEden's measurements did not cover for render targets.
++    static u64 LazyDenseBytes() {
++        static const u64 bytes = [] {
++            const char* value = std::getenv("EDEN_NX2_DENSE_LAZY_MIB");
++            const u64 mib = value != nullptr ? std::strtoull(value, nullptr, 10) : 0;
++            return mib != 0 ? mib << 20 : ~0ULL;
++        }();
++        return bytes;
++    }
++
+     static constexpr u32 SparseRegionFlag = 0x200; ///< Word 7 of 214 (0x60c arrays, 0xa0c pools)
+     using SparseRegion = Nx2SparseRegion;
+     static constexpr u64 SparseBlockSize = SparseRegion::BlockSize;

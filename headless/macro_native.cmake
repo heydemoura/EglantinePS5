@@ -30,7 +30,7 @@ string(REPLACE "${native_macro_anchor}" [=[        ::Eden::MacroNative::Bench na
                 [&](u32 address, u32 value) {
                     ::Eden::MacroNative::EmitBench emit_bench{native_bench};
                     VideoCommon::Nx2Profile::Scope method_scope{VideoCommon::Nx2Profile::Zone::Method};
-                    maxwell3d.CallMethod(system, address, value, true);
+                    maxwell3d.MacroWrite(system, address, value);
                 }, "back")) return;
         // Reused between calls (a macro never calls another: methods >= 0xe00 are refused below);
 ]=] native_macro_source "${native_macro_source}")
