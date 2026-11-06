@@ -242,6 +242,101 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func) {'''),
     ('    ComputePipeline* const pipeline{pipeline_cache.CurrentComputePipeline()};\n    if (!pipeline) {\n        if (kepler_compute->IsNativeMode()) throw Shader::RuntimeError("Native compute pipeline unavailable");\n        return;\n    }',
      '    ComputePipeline* const pipeline{pipeline_cache.CurrentComputePipeline()};\n    if (!pipeline) {\n        if (kepler_compute->IsNativeMode()) throw Shader::RuntimeError("Native compute pipeline unavailable");\n        return;\n    }\n'
      '    SCOPE_EXIT { SyncProbe(scheduler, "dispatch", pipeline); };'),
+    # The pages any texture cache image was ever registered in (headless/image_pages.h).
+    ('#include "performance.h"\n#include "dev_vulkan.h"', '#include "performance.h"\n#include "image_pages.h"\n#include "dev_vulkan.h"'),
+    # A read of memory no image was ever registered in: the texture cache would find none and
+    # change nothing, so its lock (held by the GPU thread through every draw) is not taken
+    # (headless/image_pages.h). Only the texture cache's part: the buffer cache's read note and
+    # flush area before and after it stay as they were. With cpu_read_skip (performance.h, off by
+    # default) a read whose texture cache lock is held answers "no download" instead of waiting.
+    ('''    {
+        ::Eden::Performance::GuestCacheLock(texture_cache.mutex);
+        std::lock_guard lock{texture_cache.mutex, std::adopt_lock};
+        auto area = texture_cache.GetFlushArea(addr, size);''',
+     '''    if (!::Eden::ImagePages::NeverHeld(addr, size)) {
+        if (::Eden::Performance::cpu_read_skip.load(std::memory_order_relaxed)) {
+            if (!texture_cache.mutex.try_lock()) {
+                ::Eden::Performance::cpu_read_skipped.fetch_add(1, std::memory_order_relaxed);
+                // Empty: the read does not remember it, so the next read checks again.
+                return VideoCore::RasterizerDownloadArea{.start_address = addr, .end_address = addr, .preemtive = true};
+            }
+        } else {
+            ::Eden::Performance::GuestCacheLock(texture_cache.mutex);
+        }
+        std::lock_guard lock{texture_cache.mutex, std::adopt_lock};
+        auto area = texture_cache.GetFlushArea(addr, size);'''),
+    # Guest writes while the GPU thread holds a cache lock are queued instead of waiting
+    # (performance.h cpu_write_defer); the GPU thread runs them before its next draw, clear,
+    # dispatch or engine copy (MemoryManager::FlushCaching, headless/CMakeLists.txt). A write to
+    # the page this core's last queued write covers joins it. Under the buffer cache lock the
+    # buffer pages after the write are marked CPU-modified as their own first writes would
+    # (performance.h cpu_write_ahead), up to a page no buffer covers or one the GPU modified.
+    ('''    {
+        ::Eden::Performance::GuestCacheLock(buffer_cache.mutex);
+        std::lock_guard lock{buffer_cache.mutex, std::adopt_lock};
+        if (buffer_cache.OnCPUWrite(addr, size)) {
+            return true;
+        }
+    }
+    {
+        ::Eden::Performance::GuestCacheLock(texture_cache.mutex);
+        std::lock_guard lock{texture_cache.mutex, std::adopt_lock};
+        texture_cache.WriteMemory(addr, size);
+    }
+    pipeline_cache.InvalidateRegion(addr, size);
+    return false;
+''',
+     '''    if (::Eden::Performance::cpu_write_defer.load(std::memory_order_relaxed) &&
+        !::Eden::Performance::deferred_replay &&
+        ::Eden::Performance::ExtendDeferredWrite(addr, size, ::Eden::Performance::cpu_write_core)) {
+        return false;
+    }
+    {
+        if (!::Eden::Performance::GuestCacheLockOrDefer(buffer_cache.mutex)) {
+            ::Eden::Performance::DeferWrite(addr, size, ::Eden::Performance::cpu_write_core);
+            return false;
+        }
+        std::lock_guard lock{buffer_cache.mutex, std::adopt_lock};
+        if (buffer_cache.OnCPUWrite(addr, size)) {
+            return true;
+        }
+        const unsigned ahead = ::Eden::Performance::cpu_write_ahead.load(std::memory_order_relaxed);
+        DAddr page = Common::AlignDown(addr + size - 1, Core::DEVICE_PAGESIZE) + Core::DEVICE_PAGESIZE;
+        for (unsigned marked = 0; marked < ahead; ++marked, page += Core::DEVICE_PAGESIZE) {
+            if (!buffer_cache.IsRegionRegistered(page, Core::DEVICE_PAGESIZE) ||
+                buffer_cache.OnCPUWrite(page, Core::DEVICE_PAGESIZE)) {
+                break;
+            }
+        }
+    }
+    {
+        if (!::Eden::Performance::GuestCacheLockOrDefer(texture_cache.mutex)) {
+            ::Eden::Performance::DeferWrite(addr, size, ::Eden::Performance::cpu_write_core);
+            return false;
+        }
+        std::lock_guard lock{texture_cache.mutex, std::adopt_lock};
+        texture_cache.WriteMemory(addr, size);
+    }
+    pipeline_cache.InvalidateRegion(addr, size);
+    return false;
+'''),
+    # The GPU thread, before it takes both cache locks for a draw: a guest thread asleep on one
+    # goes first (performance.h YieldToGuests).
+    ('    std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};\n    buffer_cache_runtime.BeginReadbackWriteBatch();\n    SCOPE_EXIT { buffer_cache_runtime.AbortReadbackWriteBatch(); };\n    prepared_pipeline = pipeline;\n',
+     '    ::Eden::Performance::YieldToGuests();  // a guest thread asleep on a cache lock goes first\n'
+     '    std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};\n    buffer_cache_runtime.BeginReadbackWriteBatch();\n    SCOPE_EXIT { buffer_cache_runtime.AbortReadbackWriteBatch(); };\n    prepared_pipeline = pipeline;\n'),
+    # FlushCommands submits only when nothing has been submitted since the last draw, clear or
+    # dispatch was recorded (FlushWork notes the scheduler's tick at each). It asked only whether
+    # a draw was counted since the counter was last cleared, and a submission by anything else (a
+    # fence's own Flush, a download) does not clear it: the second submission held nothing, a
+    # quarter of a millisecond of the worker thread in the driver each (a large open-world game
+    # made seven of them a frame on ProsperoEden).
+    ('void RasterizerVulkan::FlushCommands() {\n    if (draw_counter == 0) {\n        return;\n    }\n    draw_counter = 0;\n    scheduler.Flush();\n}',
+     'namespace {\n// The scheduler\'s tick when the last draw, clear or dispatch was recorded (GPU thread).\nu64 recorded_tick = 0;\n} // namespace\n\n'
+     'void RasterizerVulkan::FlushCommands() {\n    if (draw_counter == 0) {\n        return;\n    }\n    draw_counter = 0;\n'
+     '    if (scheduler.CurrentTick() != recorded_tick) {\n        return; // a submission has taken every draw already\n    }\n    scheduler.Flush();\n}'),
+    ('    const u32 CHECK_MASK = ::Eden::Performance::dispatch_mask.load(std::memory_order_relaxed);\n',
+     '    const u32 CHECK_MASK = ::Eden::Performance::dispatch_mask.load(std::memory_order_relaxed);\n    recorded_tick = scheduler.CurrentTick();\n'),
 ])
 # Host conditional rendering (VK_EXT_conditional_rendering, dev_vulkan.h hcr_mode): count each
 # decision (EDEN_DEV_GUEST cond= slots 13-19); hcr=exact sends the conditions Eden would draw
@@ -1164,6 +1259,16 @@ for signature, index in (
 adapt('src/video_core/texture_cache/texture_cache.h',
       'vulkan-cache/video_core/texture_cache/texture_cache.h', [
     ('namespace VideoCommon {', '#include "performance.h"\n#include "common/scope_exit.h"\nnamespace Vulkan { class TextureCacheRuntime; }\n\nnamespace VideoCommon {'),
+    # Every place an image is registered at is marked before the texture cache can find the
+    # image there (headless/image_pages.h): the two inserts below are the only ones.
+    ('#include "common/scope_exit.h"\nnamespace Vulkan { class TextureCacheRuntime; }',
+     '#include "image_pages.h"\n#include "common/scope_exit.h"\nnamespace Vulkan { class TextureCacheRuntime; }'),
+    ('        auto map_id =\n            slot_map_views.insert(image.gpu_addr, image.cpu_addr, image.guest_size_bytes, image_id);',
+     '        ::Eden::ImagePages::Mark(image.cpu_addr, image.guest_size_bytes);\n'
+     '        auto map_id =\n            slot_map_views.insert(image.gpu_addr, image.cpu_addr, image.guest_size_bytes, image_id);'),
+    ('            auto map_id = slot_map_views.insert(gpu_addr, cpu_addr, size, image_id);',
+     '            ::Eden::ImagePages::Mark(cpu_addr, size);\n'
+     '            auto map_id = slot_map_views.insert(gpu_addr, cpu_addr, size, image_id);'),
     (download_prefix, download_prefix + (port / 'vulkan_download_batch.inc').read_text() + '\n'),
     (gc_original, gc),
     # RADV reports all Vulkan allocations, not just cached textures. A game's
