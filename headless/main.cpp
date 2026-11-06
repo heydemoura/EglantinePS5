@@ -866,6 +866,8 @@ int main(int argc, char** argv) {
         Settings::values.memory_layout_mode = Settings::MemoryLayout::Memory_4Gb;
         // A development run that names jit_list in dev-settings decides the block list by itself.
         [[maybe_unused]] bool dev_block_list = false;  // read where a session applies its settings
+        [[maybe_unused]] bool dev_astc_cpu = false;   // dev-settings astc=cpu
+        [[maybe_unused]] bool dev_astc_full = false;  // dev-settings astc_textures=full
 #ifdef EDEN_DEV_PROFILE
         // One-run A/B switches written by the development runner; absent = defaults.
         {
@@ -977,6 +979,8 @@ int main(int argc, char** argv) {
                     Eden::DevVulkan::robustness2 = true;
                 } else if (entry == "vertex_input_dynamic=off") {
                     Settings::values.vertex_input_dynamic_state.SetValue(false);
+                } else if (entry == "static_vi=off") {
+                    Eden::DevVulkan::static_vertex_input = false;
                 } else if (entry == "pipeline_trace=on") {
                     Eden::DevVulkan::trace_pipelines = true;
                 } else if (entry.starts_with("radv_debug=")) {
@@ -1007,8 +1011,21 @@ int main(int argc, char** argv) {
                     Eden::DevVulkan::gpu_time = true;
                 } else if (entry == "submit_sync=on") {
                     Eden::DevVulkan::sync_submissions = true;
+                } else if (entry == "astc=gpu") {
+                    // The default (ASTC decoded on the GPU); kept so older run settings still parse.
                 } else if (entry == "astc=cpu") {
-                    Settings::values.accelerate_astc.SetValue(Settings::AstcDecodeMode::Cpu);
+                    // ASTC decoded on the CPU in the draw that uploads it (to compare with the GPU path).
+                    dev_astc_cpu = true;
+                } else if (entry == "astc_textures=full") {
+                    // ASTC decoded at full quality instead of kept as BC3 (see the video settings below).
+                    dev_astc_full = true;
+                } else if (entry == "tex_partial=off") {
+                    // The core's own partial texture refresh bound (16 MiB) instead of 1 MiB (texture_partial.h).
+                    Eden::Performance::tex_partial = false;
+                } else if (entry == "tex_partial_check=on") {
+                    Eden::Performance::tex_partial_check = true;
+                } else if (entry.starts_with("tex_partial_kb=")) {
+                    Eden::Performance::tex_partial_min = std::strtoull(entry.c_str() + 15, nullptr, 10) << 10;
                 } else if (entry == "log=render") {
                     // Renderer debug logging for crash probes (fetched every few seconds).
                     Common::Log::Filter filter;
@@ -1099,6 +1116,25 @@ int main(int argc, char** argv) {
             Settings::values.resolution_setup.SetValue(resolutions[resolution]);
             Settings::values.scaling_filter.SetValue(filters[filter]);
             Settings::UpdateRescalingInfo();
+            // ASTC textures are kept as BC3 (ProsperoEden). The console's GPU has no ASTC, so Eden
+            // holds such a texture decoded, at four bytes a pixel; BC3 takes one. A large open-world
+            // game has two texture arrays of 121 layers in that format: 816 MiB decoded, 204 MiB as
+            // BC3. At 2x, where every render target also has a copy four times its size, that was the
+            // memory a session ran out of within a minute of play, and with BC3 it did not; the GPU
+            // thread's time for a frame was the same either way. At 1x it took longer and ended the
+            // same way. So at every resolution, and for Switch 1 titles too (the core already picks BC3
+            // for a Switch 2 title on a GPU with less than a 12 GiB budget). dev-settings
+            // astc_textures=full keeps them decoded.
+            Settings::values.astc_recompression.SetValue(dev_astc_full ? Settings::AstcRecompression::Uncompressed
+                                                                       : Settings::AstcRecompression::Bc3);
+            // Kept as BC3, a texture decoded on the CPU is decoded inside the draw that first uses it,
+            // with both GPU caches locked: 130 to 290 ms for a draw, three seconds for a texture array
+            // of 121 layers. On another thread (CpuAsynchronous) no frame waits, but the texture is
+            // black or missing until it lands. So the GPU decodes it (and compresses it to BC1/BC3 on
+            // Vulkan) in the frame that uploads it: no such waits, the same frame rate and worst
+            // frames (ProsperoEden runs/astc-*, 2026-11-02). dev-settings astc=cpu decodes on the CPU.
+            Settings::values.accelerate_astc.SetValue(dev_astc_cpu ? Settings::AstcDecodeMode::Cpu
+                                                                   : Settings::AstcDecodeMode::Gpu);
 #ifdef EDEN_PS5_FRAMEGEN
             // Lossless Scaling frame generation (EDEN_PS5_FRAMEGEN, headless/vulkan.cmake).
             // Settings > Video's switch, or the game's own in Library > Triangle > Video, asks

@@ -2616,6 +2616,47 @@ write_derived("${PORT_BUILD_DIR}/shader_environment.cpp"
     "${shader_environment_head}#include \"${EDEN_PORT_DIR}/shader_cache_reader.inc\"\n\n${shader_environment_tail}")
 set_property(SOURCE "${PORT_BUILD_DIR}/shader_environment.cpp" APPEND PROPERTY OBJECT_DEPENDS
     "${EDEN_PORT_DIR}/shader_cache_reader.inc")
+# Eden recompresses an ASTC texture to BC1 or BC3 a mip level at a time: every layer of the level
+# is decoded into one buffer, four bytes a pixel, and then compressed. For a texture array of 121
+# layers that buffer is 484 MiB, asked of the pool the CPU shares with the GPU at the moment a game
+# loads new textures (a ProsperoEden session ended there with the pool at 620 MiB in one piece),
+# and the heap keeps what it grew by. A layer at a time needs 4 MiB and writes the same bytes: both
+# steps already work layer by layer, each layer at its own offset.
+file(READ "${PROJECT_SOURCE_DIR}/src/video_core/texture_cache/util.cpp" texture_util_source)
+set(recompress_old [=[            decode_scratch.resize_destructive(level_size);
+
+            Tegra::Texture::ASTC::Decompress(
+                input_offset, copy.image_extent.width, copy.image_extent.height,
+                copy.image_subresource.num_layers * copy.image_extent.depth, tile_size.width,
+                tile_size.height, decode_scratch);
+
+            compress(decode_scratch, copy.image_extent.width, copy.image_extent.height,
+                     copy.image_subresource.num_layers * copy.image_extent.depth,
+                     output.subspan(output_offset));
+]=])
+string(FIND "${texture_util_source}" "${recompress_old}" recompress_at)
+if(recompress_at LESS 0)
+    message(FATAL_ERROR "Pinned ASTC recompression changed (texture_cache/util.cpp, ConvertImage)")
+endif()
+string(REPLACE "${recompress_old}" [=[            // A layer at a time (headless/CMakeLists.txt): ASTC blocks are 16 bytes, BC blocks
+            // cover 4x4 pixels.
+            const u32 layers = copy.image_subresource.num_layers * copy.image_extent.depth;
+            const u32 layer_input = Common::DivideUp(copy.image_extent.width, tile_size.width) *
+                                    Common::DivideUp(copy.image_extent.height, tile_size.height) * 16;
+            const u32 layer_output = Common::AlignUp(copy.image_extent.width, 4) *
+                                     Common::AlignUp(copy.image_extent.height, 4) / bpp_div;
+            decode_scratch.resize_destructive(level_size / (std::max)(layers, 1u));
+            for (u32 layer = 0; layer < layers; ++layer) {
+                Tegra::Texture::ASTC::Decompress(
+                    input_offset.subspan(layer * layer_input), copy.image_extent.width,
+                    copy.image_extent.height, 1, tile_size.width, tile_size.height, decode_scratch);
+                compress(decode_scratch, copy.image_extent.width, copy.image_extent.height, 1,
+                         output.subspan(output_offset + layer * layer_output));
+            }
+]=] texture_util_source "${texture_util_source}")
+write_derived("${PORT_BUILD_DIR}/texture_cache_util.cpp" "${texture_util_source}")
+list(REMOVE_ITEM video_sources texture_cache/util.cpp)
+list(APPEND video_sources "${PORT_BUILD_DIR}/texture_cache_util.cpp")
 list(REMOVE_ITEM video_sources shader_environment.cpp)
 list(APPEND video_sources "${PORT_BUILD_DIR}/shader_environment.cpp")
 include("${EDEN_PORT_DIR}/macro_native.cmake")

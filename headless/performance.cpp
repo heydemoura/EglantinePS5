@@ -798,6 +798,10 @@ void ReportGpuThread(unsigned frame) {
                 load(guest_sync_wait, true), load(guest_sync_wait, false),
                 load(guest_dequeue_wait, true), load(guest_dequeue_wait, false));
     std::printf(" ipc_calls=%llu ipc_ns=%llu", load(guest_ipc_wait, true), load(guest_ipc_wait, false));
+    std::printf(" tex_partial=%llu tex_partial_bytes=%llu tex_partial_checks=%llu tex_partial_mismatches=%llu",
+                tex_partial_uploads.load(std::memory_order_relaxed), tex_partial_bytes.load(std::memory_order_relaxed),
+                tex_partial_checks.load(std::memory_order_relaxed),
+                tex_partial_mismatches.load(std::memory_order_relaxed));
     std::printf(" cache_lock_contended=%llu cache_lock_blocked=%llu",
                 cache_lock_contended.load(std::memory_order_relaxed), cache_lock_blocked.load(std::memory_order_relaxed));
     std::printf(" write_deferred=%llu dirty_replays=%llu read_skipped=%llu",
