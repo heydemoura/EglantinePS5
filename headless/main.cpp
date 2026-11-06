@@ -63,6 +63,7 @@ extern "C" size_t eden_heap_last_failure(unsigned*, size_t*);
 #include "native_directory.h"
 #include "extracted_game.h"
 #include "cache_budget.h"
+#include "guest_clock.h"
 #include "performance.h"
 #include "crash_site.h"
 #include "core/memory.h"
@@ -822,8 +823,8 @@ int main(int argc, char** argv) {
         #ifdef EDEN_PS5_OPENGL
         Settings::values.renderer_backend = backend == Eden::GraphicsBackend::Vulkan ?
             Settings::RendererBackend::Vulkan : Settings::RendererBackend::OpenGL_GLSL;
-        // Keep emulator threads off guest cores 0-2 and their SMT siblings (Vulkan):
-        // +17% in the heaviest measured window of a racing game.
+        // Keep emulator threads off the pinned guest-core and GPU CPUs and the GPU thread's SMT
+        // sibling (Vulkan; performance.cpp CheckWorkerTopology).
         Eden::Performance::SetSecondaryPlacement(backend == Eden::GraphicsBackend::Vulkan);
         // A32 fastmem window (direct JIT accesses to aliased guest memory): opt-in with dev-settings
         // fastmem=on; on the console it is slower than the page-table path.
@@ -884,6 +885,26 @@ int main(int argc, char** argv) {
                 } else if (entry.starts_with("idle_spin_us=")) {
                     // Guest cores spin this long on their interrupt flag before sleeping (W1).
                     Eden::Performance::idle_spin_iterations = static_cast<unsigned>(std::stoul(entry.substr(13)) * 50);
+                } else if (entry == "guest_clock=off") {
+                    // The guest tick counter keeps the clock's rate when frames are late (guest_clock.h).
+                    Eden::GuestClock::enabled = false;
+                } else if (entry.starts_with("compose_delay_us=")) {
+                    // Guest vsync signalled first, composition N us later (VI conductor; 0 = upstream).
+                    Eden::Performance::compose_delay_us = std::stoi(entry.substr(17));
+                } else if (entry.starts_with("kspin=")) {
+                    // PAUSEs a contended guest kernel spin lock spins before it sleeps (Eglantine's
+                    // KSpinLock, EDEN_PS5_KSPIN; 2048 by default). Read at the first contended lock.
+                    setenv("EDEN_PS5_KSPIN", entry.substr(6).c_str(), 1);
+                } else if (entry.starts_with("pin=") && entry.find(':') != std::string::npos) {
+                    // A secondary thread on one CPU: pin=GPUBack:12 (performance.cpp PlaceSecondary).
+                    const auto colon = entry.find(':');
+                    setenv(("EDEN_PIN_" + entry.substr(4, colon - 4)).c_str(), entry.substr(colon + 1).c_str(), 1);
+                } else if (entry.starts_with("back_cpu=")) {
+                    // The split GPU thread's back pinned to this CPU (performance.cpp PlaceSecondary).
+                    setenv("EDEN_BACK_CPU", entry.substr(9).c_str(), 1);
+                } else if (entry.starts_with("secondary_mask=")) {
+                    // The CPUs secondary threads share, in hex (performance.cpp PlaceSecondary).
+                    setenv("EDEN_SECONDARY_MASK", entry.substr(15).c_str(), 1);
                 } else if (entry.starts_with("pc_core=") && entry.size() == 9 && entry[8] >= '0' && entry[8] <= '3') {
                     // Host PC samples from this guest core instead of core 0 (with --pc-sample).
                     Eden::Performance::pc_sample_core = static_cast<unsigned>(entry[8] - '0');

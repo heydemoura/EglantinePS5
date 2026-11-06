@@ -934,6 +934,35 @@ write_derived("${PORT_BUILD_DIR}/physical_core.cpp"
     "#include \"${EDEN_PORT_DIR}/guest_fault.h\"\n#include \"${EDEN_PORT_DIR}/performance.h\"\n#include \"core/arm/debug.h\"\n${physical_core_source}")
 list(REMOVE_ITEM core_sources "hle/kernel/physical_core.cpp")
 list(APPEND core_sources "${PORT_BUILD_DIR}/physical_core.cpp")
+# Frame pacing (backported from ProsperoEden): the guest's tick counter gives when a frame is a
+# little late (headless/guest_clock.h, dev-settings guest_clock=off). Its rate is applied where
+# Eden applies its own clock settings (CoreTiming::GetClockTicks), and it follows the frames the
+# game hands in (BufferQueueProducer::QueueBuffer, below).
+file(READ "${PROJECT_SOURCE_DIR}/src/core/core_timing.cpp" core_timing_source)
+set(guest_clock_old "    if (::Settings::values.sync_core_speed.GetValue()) {")
+string(FIND "${core_timing_source}" "${guest_clock_old}" guest_clock_at)
+if(guest_clock_at LESS 0)
+    message(FATAL_ERROR "Pinned CoreTiming::GetClockTicks changed")
+endif()
+string(REPLACE "${guest_clock_old}"
+    "    fres = ::Eden::GuestClock::Scale(fres);\n${guest_clock_old}"
+    core_timing_source "${core_timing_source}")
+write_derived("${PORT_BUILD_DIR}/core_timing.cpp" "#include \"${EDEN_PORT_DIR}/guest_clock.h\"\n${core_timing_source}")
+list(REMOVE_ITEM core_sources "core_timing.cpp")
+list(APPEND core_sources "${PORT_BUILD_DIR}/core_timing.cpp")
+file(READ "${PROJECT_SOURCE_DIR}/src/core/hle/service/nvnflinger/buffer_queue_producer.cpp" producer_source)
+set(queue_old "    input.Deflate(&timestamp, &is_auto_timestamp, &crop, &scaling_mode, &transform, &sticky_transform_, &async, &swap_interval, &fence);")
+string(FIND "${producer_source}" "${queue_old}" queue_at)
+if(queue_at LESS 0)
+    message(FATAL_ERROR "Pinned buffer queue hand-off changed")
+endif()
+string(REPLACE "${queue_old}" "${queue_old}\n    ::Eden::GuestClock::FrameQueued(swap_interval);" producer_source "${producer_source}")
+# (A development build adds its counters to the same source and writes it below.)
+if(NOT EDEN_DEV_PROFILE)
+    write_derived("${PORT_BUILD_DIR}/buffer_queue_producer.cpp" "#include \"${EDEN_PORT_DIR}/guest_clock.h\"\n${producer_source}")
+    list(REMOVE_ITEM core_sources "hle/service/nvnflinger/buffer_queue_producer.cpp")
+    list(APPEND core_sources "${PORT_BUILD_DIR}/buffer_queue_producer.cpp")
+endif()
 if(EDEN_DEV_PROFILE)
     # Guest-visible waits: syncpoint event registration to signal (GPU-pipeline latency
     # the game waits on) and buffer-queue dequeue waits (presentation back-pressure).
@@ -947,14 +976,13 @@ if(EDEN_DEV_PROFILE)
     write_derived("${PORT_BUILD_DIR}/nvhost_ctrl.cpp" "#include \"${EDEN_PORT_DIR}/performance.h\"\n${ctrl_source}")
     list(REMOVE_ITEM core_sources "hle/service/nvdrv/devices/nvhost_ctrl.cpp")
     list(APPEND core_sources "${PORT_BUILD_DIR}/nvhost_ctrl.cpp")
-    file(READ "${PROJECT_SOURCE_DIR}/src/core/hle/service/nvnflinger/buffer_queue_producer.cpp" producer_source)
     set(producer_old "        Status status = WaitForFreeSlotThenRelock(async, &found, &return_flags, lock);")
     string(FIND "${producer_source}" "${producer_old}" producer_at)
     if(producer_at LESS 0)
         message(FATAL_ERROR "Pinned buffer queue dequeue changed")
     endif()
     string(REPLACE "${producer_old}" "        const auto dequeue_start = ::Eden::Performance::NowNs();\n${producer_old}\n        ::Eden::Performance::AddSince(::Eden::Performance::guest_dequeue_wait, dequeue_start);" producer_source "${producer_source}")
-    write_derived("${PORT_BUILD_DIR}/buffer_queue_producer.cpp" "#include \"${EDEN_PORT_DIR}/performance.h\"\n${producer_source}")
+    write_derived("${PORT_BUILD_DIR}/buffer_queue_producer.cpp" "#include \"${EDEN_PORT_DIR}/guest_clock.h\"\n#include \"${EDEN_PORT_DIR}/performance.h\"\n${producer_source}")
     list(REMOVE_ITEM core_sources "hle/service/nvnflinger/buffer_queue_producer.cpp")
     list(APPEND core_sources "${PORT_BUILD_DIR}/buffer_queue_producer.cpp")
     # Guest asset streaming: time and bytes of fsp-srv IFile/IStorage backend reads.
@@ -1416,7 +1444,30 @@ set_property(TARGET core PROPERTY SOURCES "${core_sources}")
 # published for the renderer: frames a display has no refresh for are not presented
 # (headless/display_refresh.h).
 file(READ "${PROJECT_SOURCE_DIR}/src/core/hle/service/vi/conductor.cpp" conductor_source)
-string(PREPEND conductor_source "#include \"${EDEN_PORT_DIR}/display_refresh.h\"\n")
+# Vsync composition delay (every build, multicore; performance.h compose_delay_us; backported
+# from ProsperoEden): signal the guest vsync first and compose later, so a frame the game queues
+# in response to the vsync is latched at that same vsync.
+set(compose_old "    for (auto& [display_id, manager] : m_vsync_managers) {
+        m_container.ComposeOnDisplay(&m_swap_interval, &m_compose_speed_scale, display_id);
+        manager.SignalVsync(m_system.Kernel());
+    }")
+string(FIND "${conductor_source}" "${compose_old}" compose_at)
+if(compose_at LESS 0)
+    message(FATAL_ERROR "Pinned VI conductor composition loop changed")
+endif()
+string(REPLACE "${compose_old}" "    if (const int compose_delay = ::Eden::Performance::compose_delay_us.load(std::memory_order_relaxed);
+        compose_delay > 0 && m_system.IsMulticore()) {
+        for (auto& [display_id, manager] : m_vsync_managers) {
+            manager.SignalVsync(m_system.Kernel());
+        }
+        std::this_thread::sleep_for(std::chrono::microseconds(compose_delay));
+        for (auto& [display_id, manager] : m_vsync_managers) {
+            m_container.ComposeOnDisplay(&m_swap_interval, &m_compose_speed_scale, display_id);
+        }
+        return;
+    }
+${compose_old}" conductor_source "${conductor_source}")
+string(PREPEND conductor_source "#include \"${EDEN_PORT_DIR}/display_refresh.h\"\n#include <thread>\n#include \"${EDEN_PORT_DIR}/performance.h\"\n")
 eden_patch(conductor_source
     "    const f32 effective_fps = 60.f / static_cast<f32>(m_swap_interval);\n    return static_cast<s64>(speed_scale * (1000000000.f / effective_fps));"
     "    const f32 effective_fps = 60.f / static_cast<f32>(m_swap_interval);\n    ::Eden::Display::game_millihertz.store(static_cast<int>(effective_fps * 1000.f / speed_scale),\n                                           std::memory_order_relaxed);\n    return static_cast<s64>(speed_scale * (1000000000.f / effective_fps));")
