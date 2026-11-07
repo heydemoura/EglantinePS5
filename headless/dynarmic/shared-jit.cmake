@@ -121,6 +121,8 @@ macro(eden_shared_jit_interface)
     string(SUBSTRING "${jit_source}" ${eden_impl_stop} -1 eden_impl_suffix)
     file(READ "${EDEN_SHARED_JIT_DIR}/jit_group_support.inc" eden_group_support)
     file(READ "${EDEN_SHARED_JIT_DIR}/jit_impl.inc" eden_impl)
+    # Which Impl runs on this thread, for the fastmem fault callback (fastmem-callback.cmake).
+    eden_fastmem_callback_jit_impl()
     set(jit_source "${eden_impl_prefix}${eden_group_support}\n${eden_impl}\n${eden_impl_suffix}")
     string(PREPEND jit_source "#include <algorithm>\n#include <atomic>\n#include <chrono>\n#include <cstddef>\n#include <cstdio>\n#include <memory>\n#include <thread>\n#include <vector>\n#include \"dynarmic/backend/x64/exclusive_monitor_friend.h\"\n#include \"dynarmic/backend/x64/jit_group.h\"\nextern \"C\" void eden_jit_phases(unsigned core, unsigned long long translate, unsigned long long optimize, unsigned long long emit, unsigned long long location) __attribute__((weak));\nextern \"C\" unsigned long long eden_jit_clock_ns() __attribute__((weak));\n")
 endmacro()

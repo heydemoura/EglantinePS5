@@ -46,6 +46,42 @@ struct Counters {
     std::atomic<std::uint64_t> fined{0}, unfined{0}, fine_failures{0};
 };
 Counters counters;
+
+// ---- The 64-bit fastmem window's aliases (src/host_memory.cpp, Window64; backported from ProsperoEden) ----
+// A window region (2 MiB) shows a slot's block from a JIT fault until the slot's block changes. Every
+// change of a slot's block or protection (a promotion, a return, a scan's fence) first drops its
+// aliases, under the slot's lock: a stale alias would reach memory the slot gave up. An entry is the
+// window address, plus AliasReadOnly when it shows the block read-only, or AliasSmall when it shows
+// 16 KiB pieces of it rather than the whole block.
+constexpr unsigned AliasesPerSlot = 4;
+constexpr std::uintptr_t AliasReadOnly = 1, AliasSmall = 2, AliasFlags = AliasReadOnly | AliasSmall;
+std::atomic<std::uint64_t> aliases_made{0}, aliases_dropped{0}, aliases_refused{0};
+// The window region at `at` shows nothing again: a reservation straight over the mapping.
+void VoidWindowRegion([[maybe_unused]] std::uintptr_t at) noexcept {
+#ifdef PS5_NATIVE
+    void* address = reinterpret_cast<void*>(at);
+    if (sceKernelReserveVirtualRange(&address, SparseSlot, MAP_FIXED, SparseSlot) == 0 && address == reinterpret_cast<void*>(at))
+        return;
+    address = reinterpret_cast<void*>(at);
+    if (munmap(address, SparseSlot) != 0 || sceKernelReserveVirtualRange(&address, SparseSlot, MAP_FIXED, SparseSlot) != 0 ||
+        address != reinterpret_cast<void*>(at))
+        std::abort(); // a window region left mapped would expose memory the slot gives up
+#else
+    if (mmap(reinterpret_cast<void*>(at), SparseSlot, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED | MAP_NORESERVE, -1, 0) ==
+        MAP_FAILED)
+        std::abort();
+#endif
+}
+// Slot locked.
+void DropSlotAliases(SparseRange& range, std::size_t slot) noexcept {
+    if (!range.guest || !range.aliases) return;
+    for (unsigned i = 0; i < AliasesPerSlot; ++i)
+        if (auto& alias = range.aliases[slot * AliasesPerSlot + i]) {
+            VoidWindowRegion(alias & ~AliasFlags);
+            alias = 0;
+            aliases_dropped.fetch_add(1, std::memory_order_relaxed);
+        }
+}
 void ResetCounters() noexcept {
     for (auto* counter : {&counters.faults, &counters.promotions, &counters.copies, &counters.waits,
                           &counters.returns_clear, &counters.returns_free, &counters.returns_scan, &counters.dedup,
@@ -190,6 +226,7 @@ int UnshareBlock(std::int64_t physical) noexcept {
 
 // Zero -> Own: a zeroed block of its own, read-write.
 bool PromoteZero(SparseRange& range, std::size_t slot) noexcept {
+    DropSlotAliases(range, slot);
     const std::uintptr_t at = SlotAddress(range, slot);
 #ifdef PS5_NATIVE
     std::int64_t physical = -1;
@@ -209,6 +246,7 @@ bool PromoteZero(SparseRange& range, std::size_t slot) noexcept {
 
 // Shared -> Own: the last slot to show a block takes it back read-write; the others copy it.
 bool PromoteShared(SparseRange& range, std::size_t slot) noexcept {
+    DropSlotAliases(range, slot);
     const std::uintptr_t at = SlotAddress(range, slot);
 #ifdef PS5_NATIVE
     const std::int64_t shared = range.physical[slot];
@@ -250,6 +288,7 @@ bool PromoteShared(SparseRange& range, std::size_t slot) noexcept {
 
 // Own, Shared or Fine -> Zero: the slot shows the zero block again and its memory goes back.
 void ReturnSlot(SparseRange& range, std::size_t slot) noexcept {
+    DropSlotAliases(range, slot);
     const std::uintptr_t at = SlotAddress(range, slot);
     const std::uint8_t state = SlotState(range, slot);
     if (state == SlotFine) {
@@ -306,6 +345,7 @@ bool PageZero(std::uintptr_t at) noexcept {
 // Fine -> Own: a written Fine slot becomes one block of 2 MiB again (a copy of what it shows), and
 // stays whole for the rest of the session.
 bool PromoteFine(SparseRange& range, std::size_t slot) noexcept {
+    DropSlotAliases(range, slot);
     const std::uintptr_t at = SlotAddress(range, slot);
     const std::size_t kept = FineKept(range, slot);
 #ifdef PS5_NATIVE
@@ -682,13 +722,16 @@ bool AddStates(SparseRange& range) noexcept {
     auto* state = new (std::nothrow) std::atomic<std::uint8_t>[slots];
     auto* fine = state ? new (std::nothrow) std::uint16_t[slots]() : nullptr;
     auto* fine_after = fine ? new (std::nothrow) std::uint32_t[slots]() : nullptr;
-    if (fine_after == nullptr) {
+    auto* aliases = fine_after && range.guest ? new (std::nothrow) std::uintptr_t[slots * AliasesPerSlot]() : nullptr;
+    if (fine_after == nullptr || (range.guest && aliases == nullptr)) {
         delete[] state;
         delete[] fine;
+        delete[] fine_after;
         return false;
     }
     range.fine = fine;
     range.fine_after = fine_after;
+    range.aliases = aliases;
     for (std::size_t slot = 0; slot < slots; ++slot)
         state[slot].store(range.owned[slot].load(std::memory_order_relaxed) ? SlotOwn : SlotZero, std::memory_order_relaxed);
     range.state = state;
@@ -735,6 +778,10 @@ std::uint64_t FullHash(std::uintptr_t at, std::size_t bytes) noexcept {
 }
 
 void Fence(std::uintptr_t at) noexcept {
+    // A window alias would write past the fence.
+    if (SparseRange* range = guest_range.load(std::memory_order_acquire); range && range->aliases &&
+        at >= range->begin.load(std::memory_order_relaxed) && at < range->end)
+        DropSlotAliases(*range, (at - range->begin.load(std::memory_order_relaxed)) / SparseSlot);
     if (mprotect(reinterpret_cast<void*>(at), SparseSlot, PROT_READ) != 0) std::abort();
 }
 void Unfence(std::uintptr_t at) noexcept {
@@ -1150,6 +1197,7 @@ void ReleaseServiceBlocks(SparseRange& range) noexcept {
 #ifdef PS5_NATIVE
     const std::size_t slots = (range.end - range.begin.load(std::memory_order_relaxed)) / SparseSlot;
     for (std::size_t slot = 0; slot < slots; ++slot) {
+        DropSlotAliases(range, slot);
         const auto state = SlotState(range, slot);
         if (state == SlotFine) {
             const std::size_t kept = FineKept(range, slot);
@@ -1265,4 +1313,140 @@ int GuestMemorySlotState(std::uint64_t offset) noexcept {
     SparseRange* const range = guest_range.load(std::memory_order_acquire);
     if (range == nullptr || range->state == nullptr) return -1;
     return SlotState(*range, static_cast<std::size_t>(offset / SparseSlot));
+}
+
+// ---- The 64-bit fastmem window (src/host_memory.cpp, Window64; backported from ProsperoEden) ----
+
+// From a JIT fault in the window: shows the slot at `backing` (2 MiB aligned) at `window_at`. An Own
+// slot shows its block, read-write when `writable`; a Zero or Shared slot shows its block read-only
+// for a read. A write to a slot without a block of its own sets `promote` and shows nothing: the
+// caller promotes it as a write to the backing would and asks again. False otherwise (the access
+// then takes the page-table path).
+bool AliasGuestSlot(std::uintptr_t backing, std::uintptr_t window_at, bool writable, bool write, bool* promote) noexcept {
+#ifdef PS5_NATIVE
+    auto* range = guest_range.load(std::memory_order_acquire);
+    if (!range || !range->state || !range->aliases) return false;
+    const std::uintptr_t begin = range->begin.load(std::memory_order_relaxed);
+    if (backing < begin || backing >= range->end || (backing - begin) % SparseSlot || window_at % SparseSlot) return false;
+    const std::size_t slot = (backing - begin) / SparseSlot;
+    LockSlot(*range, slot);
+    const std::uint8_t state = SlotState(*range, slot);
+    std::int64_t physical = -1;
+    if (state == SlotOwn) {
+        physical = range->physical[slot];
+    } else if (write) {
+        *promote = true;
+    } else if (state == SlotZero) {
+        physical = zero_block, writable = false;
+    } else if (state == SlotShared) {
+        physical = range->physical[slot], writable = false;
+    }
+    bool shown = false;
+    if (physical >= 0) {
+        const int protection = writable ? PROT_READ | PROT_WRITE : PROT_READ;
+        const std::uintptr_t entry = window_at | (writable ? 0 : AliasReadOnly);
+        std::uintptr_t* free_entry = nullptr;
+        bool known = false;
+        for (unsigned i = 0; i < AliasesPerSlot; ++i) {
+            auto& alias = range->aliases[slot * AliasesPerSlot + i];
+            if ((alias & ~AliasFlags) == window_at) {
+                // Another core showed it first, or it shows it read-only or in pieces.
+                known = true;
+                shown = alias == entry || (MapSlot(window_at, protection, physical) && ((alias = entry), true));
+                break;
+            }
+            if (!alias && !free_entry) free_entry = &alias;
+        }
+        if (!known && free_entry && MapSlot(window_at, protection, physical)) {
+            *free_entry = entry;
+            shown = true;
+            aliases_made.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    if (!shown) aliases_refused.fetch_add(1, std::memory_order_relaxed);
+    UnlockSlot(*range, slot, state);
+    return shown;
+#else
+    (void)backing, (void)window_at, (void)writable, (void)write, (void)promote;
+    return false; // the host's guest memory is private: nothing to alias
+#endif
+}
+
+// From a JIT fault in a window region that cannot show a whole block (not on a 2 MiB boundary of the
+// backing, or partly protected): shows the 16 KiB at `backing` of an Own slot at `at`, inside the
+// window region `region_at`. The slot's entry names the whole region, so any change of the slot voids
+// it. A write to a slot that is not Own sets `promote`, as for AliasGuestSlot.
+bool AliasGuestPage(std::uintptr_t backing, std::uintptr_t at, std::uintptr_t region_at, bool writable, bool write,
+                    bool* promote) noexcept {
+#ifdef PS5_NATIVE
+    auto* range = guest_range.load(std::memory_order_acquire);
+    if (!range || !range->state || !range->aliases) return false;
+    const std::uintptr_t begin = range->begin.load(std::memory_order_relaxed);
+    if (backing < begin || backing >= range->end || (backing - begin) % FinePage || at % FinePage) return false;
+    const std::size_t slot = (backing - begin) / SparseSlot;
+    LockSlot(*range, slot);
+    const std::uint8_t state = SlotState(*range, slot);
+    bool shown = false;
+    // A Zero slot shows the zero block and a Shared one its shared block, read-only; a write there
+    // promotes the slot first (the caller). A Fine slot keeps its pages apart: not shown.
+    const std::size_t offset = backing - SlotAddress(*range, slot);
+    std::int64_t physical = -1;
+    if (state == SlotOwn || (!write && state == SlotShared)) {
+        physical = range->physical[slot] >= 0 ? range->physical[slot] + std::int64_t(offset) : -1;
+    } else if (!write && state == SlotZero) {
+        physical = zero_block + std::int64_t(offset);
+    } else if (write) {
+        *promote = true;
+    }
+    if (state != SlotOwn) writable = false;
+    if (physical >= 0) {
+        std::uintptr_t* entry = nullptr;
+        bool known = false;
+        for (unsigned i = 0; i < AliasesPerSlot && !known; ++i) {
+            auto& alias = range->aliases[slot * AliasesPerSlot + i];
+            if ((alias & ~AliasFlags) == region_at) entry = &alias, known = true;
+            else if (!alias && !entry) entry = &alias;
+        }
+        void* address = reinterpret_cast<void*>(at);
+        if (entry && sceKernelMapDirectMemory(&address, FinePage, writable ? PROT_READ | PROT_WRITE : PROT_READ, MAP_FIXED,
+                                              physical, FinePage) == 0 && address == reinterpret_cast<void*>(at)) {
+            if (!known) aliases_made.fetch_add(1, std::memory_order_relaxed);
+            *entry = region_at | AliasSmall;
+            shown = true;
+        }
+    }
+    if (!shown) aliases_refused.fetch_add(1, std::memory_order_relaxed);
+    UnlockSlot(*range, slot, state);
+    return shown;
+#else
+    (void)backing, (void)at, (void)region_at, (void)writable, (void)write, (void)promote;
+    return false;
+#endif
+}
+
+// The window region at `window_at` no longer shows the slot at `backing` (guest unmap, protection).
+// True when it did.
+bool DropGuestAlias(std::uintptr_t backing, std::uintptr_t window_at) noexcept {
+    auto* range = guest_range.load(std::memory_order_acquire);
+    if (!range || !range->state || !range->aliases) return false;
+    const std::uintptr_t begin = range->begin.load(std::memory_order_relaxed);
+    if (backing < begin || backing >= range->end) return false;
+    const std::size_t slot = (backing - begin) / SparseSlot;
+    bool dropped = false;
+    LockSlot(*range, slot);
+    for (unsigned i = 0; i < AliasesPerSlot; ++i)
+        if (auto& alias = range->aliases[slot * AliasesPerSlot + i]; alias && (alias & ~AliasFlags) == window_at) {
+            VoidWindowRegion(window_at);
+            alias = 0;
+            dropped = true;
+            aliases_dropped.fetch_add(1, std::memory_order_relaxed);
+        }
+    UnlockSlot(*range, slot, SlotState(*range, slot));
+    return dropped;
+}
+
+void GuestAliasCounts(std::uint64_t* made, std::uint64_t* dropped, std::uint64_t* refused) noexcept {
+    *made = aliases_made.load(std::memory_order_relaxed);
+    *dropped = aliases_dropped.load(std::memory_order_relaxed);
+    *refused = aliases_refused.load(std::memory_order_relaxed);
 }

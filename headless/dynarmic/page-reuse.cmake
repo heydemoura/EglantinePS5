@@ -6,8 +6,8 @@
 # such group one A64EdenPageLookup of its lowest address and its span: the direct value when the
 # whole span is in one page, 0 otherwise. The group's accesses take that value in place of their
 # location argument and emit test, jz and the access; on 0 they run the full lookup out of line,
-# and the callback only when that fails, as before. Opt-in: EDEN_JIT_PAGE_REUSE=1 (env.txt), with
-# the direct table (EDEN_JIT_TABLE=1); otherwise the pass leaves blocks unchanged. Backported from
+# and the callback only when that fails, as before. On by default with the direct table;
+# EDEN_JIT_PAGE_REUSE=0 (env.txt) leaves blocks unchanged. Backported from
 # ProsperoEden (GPL-3.0-or-later).
 
 # Every dynarmic object sees the added opcode (a definition on the target recompiles them all).

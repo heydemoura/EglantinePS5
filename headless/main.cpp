@@ -73,6 +73,10 @@ extern "C" size_t eden_heap_last_failure(unsigned*, size_t*);
 #include "stall_watchdog.h"
 #include "dev_vulkan.h"
 #include "../src/fastmem.h"
+// The 64-bit fastmem window's demoted sites, kept per title (headless/dynarmic/fastmem-callback.cmake).
+extern "C" std::size_t eden_fastmem64_load_sites(const char*, unsigned long long, const unsigned char*) __attribute__((weak));
+extern "C" std::size_t eden_fastmem64_save_sites(const char*, unsigned long long, unsigned long long,
+                                                 const unsigned char*) __attribute__((weak));
 #include "crash_report.h"
 #include "eglantineps5/frontend.h"
 #include "eglantineps5/version.h"
@@ -542,6 +546,9 @@ int main(int argc, char** argv) {
                                           std::pair{"EDEN_PS5_WORKER_SPIN_US", "300"}}) {
             setenv(name, value, 0);
         }
+        // The 64-bit fastmem window (src/host_memory.cpp, Window64): opt-in while it is qualified,
+        // EDEN_FASTMEM64=1. Chosen here, before Core::System (and so HostMemory) is made.
+        if (const char* window64 = std::getenv("EDEN_FASTMEM64")) Eden::Fastmem::RequestA64(window64[0] == '1');
 #ifdef EDEN_MKW_DIAGNOSTICS
         // Temporary capture for the Mario Kart World loading-screen investigation.
         const auto diagnostic_capture_dir = Eden::LogFile("mkw-gpfifo-" + std::to_string(getpid()));
@@ -1594,6 +1601,9 @@ int main(int argc, char** argv) {
                 // The blocks this game compiled in earlier sessions, compiled ahead on a spare CPU.
                 if (std::filesystem::exists(Eden::AppFile("block-list.txt"))) Eden::JitList::enabled = true;
                 Eden::JitList::Session jit_list;
+                [[maybe_unused]] std::string fastmem64_sites;  // the title's demoted 64-bit fastmem sites (cache/jit)
+                [[maybe_unused]] u64 fastmem64_code_start = 0, fastmem64_code_size = 0;
+                [[maybe_unused]] unsigned char fastmem64_build[32]{};
                 if (auto* process = system.ApplicationProcess()) {
                     Eden::JitList::BuildId build{};
                     const auto& id = system.GetApplicationProcessBuildID();
@@ -1610,6 +1620,22 @@ int main(int argc, char** argv) {
                         code_end = info.m_address + info.m_size;
                     }
                     jit_list.Start(system.GetApplicationProcessProgramID(), build, code_start, code_end - code_start);
+#ifdef PS5_NATIVE
+                    // The 64-bit fastmem window's demoted sites from earlier sessions (fastmem-callback.cmake).
+                    if (Eden::Fastmem::Window64Base() != 0 && eden_fastmem64_load_sites) {
+                        char name[64];
+                        std::snprintf(name, sizeof(name), "/cache/jit/%016llX.fastmem64-sites",
+                                      static_cast<unsigned long long>(system.GetApplicationProcessProgramID()));
+                        (void)mkdir((Eden::UserDir() + "/cache").c_str(), 0777);
+                        (void)mkdir((Eden::UserDir() + "/cache/jit").c_str(), 0777);
+                        fastmem64_sites = Eden::UserDir() + name;
+                        fastmem64_code_start = code_start;
+                        fastmem64_code_size = code_end - code_start;
+                        std::memcpy(fastmem64_build, build.data(), std::min(sizeof(fastmem64_build), build.size()));
+                        std::printf("EDEN_FASTMEM64 sites_loaded=%zu\n",
+                                    eden_fastmem64_load_sites(fastmem64_sites.c_str(), fastmem64_code_start, fastmem64_build));
+                    }
+#endif
                 }
                 Eden::TakeGuestFault(); // Nothing from an earlier session belongs to this one.
                 Eden::Loading::Set(Eden::Loading::Step::starting);
@@ -1978,6 +2004,12 @@ int main(int argc, char** argv) {
                 // A game that ended itself or failed is being stopped too (stop_limit.h).
                 Eden::StopLimit::Begin();
                 jit_list.Finish();  // while the JITs still exist: their block list is saved
+#ifdef PS5_NATIVE
+                if (!fastmem64_sites.empty() && eden_fastmem64_save_sites)
+                    std::printf("EDEN_FASTMEM64 sites_saved=%zu\n",
+                                eden_fastmem64_save_sites(fastmem64_sites.c_str(), fastmem64_code_start,
+                                                          fastmem64_code_size, fastmem64_build));
+#endif
                 // Shutdown requests cancellation before suspending cores; Pause can
                 // block while a CPU producer is waiting on a full GPU queue.
                 Eden::ReportStep("shutdown", "Stopping the game");

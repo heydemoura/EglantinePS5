@@ -12,8 +12,7 @@
 # never more permissive than it was with the entry alone. Committing a part of the entries
 # commits its mirror (sparse_large_vector.h, mirror_index). The tables are only direct when
 # Eden's tables are sparse here; dense tables would hold the mirror's 1 GiB in memory.
-# Opt-in while it is qualified: EDEN_JIT_TABLE=1 (env.txt) enables it; otherwise the JIT keeps the
-# packed table. Backported from ProsperoEden (GPL-3.0-or-later).
+# On by default; EDEN_JIT_TABLE=0 (env.txt) keeps the packed table (A/B runs, regressions). Backported from ProsperoEden (GPL-3.0-or-later).
 
 file(READ "${PROJECT_SOURCE_DIR}/src/common/page_table.h" page_table_header)
 function(eden_page_table_replace old new)
@@ -32,8 +31,8 @@ eden_page_table_replace("    /// Specifies sign bit for page table entries.\n" [
     /// Whether process page tables keep a direct table: -1 until the first table is sized, then
     /// fixed for the session (every PageEntryData write relies on it).
     static inline std::atomic<int> direct_tables{-1};
-    /// EDEN_JIT_TABLE=1 (env.txt), read when the first table is sized.
-    static inline std::atomic<bool> direct_tables_requested{false};
+    /// On unless EDEN_JIT_TABLE=0 (env.txt), read when the first table is sized.
+    static inline std::atomic<bool> direct_tables_requested{true};
     static bool DirectTables() noexcept;
 
     /// Specifies sign bit for page table entries.
@@ -111,7 +110,7 @@ bool PageTable::DirectTables() noexcept {
         static std::once_flag once;
         std::call_once(once, [] {
             const char* option = std::getenv("EDEN_JIT_TABLE");
-            if (option != nullptr) direct_tables_requested.store(option[0] == '1');
+            if (option != nullptr && option[0] == '0') direct_tables_requested.store(false);
             const bool direct = direct_tables_requested.load() && SparseTablesAvailable();
             direct_tables.store(direct ? 1 : 0, std::memory_order_release);
             std::printf("EDEN_JIT_TABLE direct=%d\n", direct ? 1 : 0);

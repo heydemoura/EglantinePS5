@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+#include "../src/fastmem.h"
 #include "performance.h"
 #include "ordered_read_trace.h"
 #include "assets_dir.h"
@@ -701,6 +702,11 @@ void GraphicsWindow::OnFrameDisplayed() {
 #endif
                 Eden::Performance::ReportVulkan();
                 Eden::Performance::ReportGuestRun();
+                if (Eden::Fastmem::Window64Base() != 0) {
+                    char window64[768];
+                    Eden::Fastmem::Window64Report(window64, sizeof(window64));
+                    std::printf("%s\n", window64);
+                }
 #ifdef EDEN_DEV_PROFILE
                 // Composite runs on the GPU thread, so its owner CPU clock is valid here.
                 Eden::Performance::ReportGpuThread(frame_total);

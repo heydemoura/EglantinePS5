@@ -16,7 +16,7 @@ The pass only runs with the direct table (no pointer mask, marked bit or sign ex
 entries, a range-checked address space), without a fastmem window, and without halt-on-memory
 checks.
 
-**Opt-in:** `EDEN_JIT_PAGE_REUSE=1` together with `EDEN_JIT_TABLE=1` (`env.txt`).
+**On by default** with the direct table (since Phase 3d). `EDEN_JIT_PAGE_REUSE=0` (`env.txt`) turns it off.
 
 ## Validation
 

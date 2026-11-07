@@ -14,7 +14,7 @@ the mirror. A page that becomes slow is cleared before its entry changes, and a 
 becomes fast is set after, so the JIT is never more permissive than the packed entry. Committing
 a table page also commits its mirror.
 
-**Opt-in:** `EDEN_JIT_TABLE=1` in `env.txt`. The log prints `EDEN_JIT_TABLE direct=0|1` once.
+**On by default** (since Phase 3d). `EDEN_JIT_TABLE=0` in `env.txt` turns it off. The log prints `EDEN_JIT_TABLE direct=0|1` once.
 The direct table needs Eden's sparse tables.
 
 **Cost:** about as much table memory again as the entries in use (~0.24 GB on Mario Kart World,

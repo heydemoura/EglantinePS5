@@ -5,10 +5,10 @@
 // page must take the callback path. The lookup replaces each access's location argument (only
 // read with check_halt_on_memory_access, which keeps this pass off).
 extern "C" {
-// Opt-in while it is qualified: EDEN_JIT_PAGE_REUSE=1 (env.txt, read at the first compiled block,
-// after the app applies env.txt), or set directly by tests. Backported from ProsperoEden
+// On by default (with the direct table); EDEN_JIT_PAGE_REUSE=0 (env.txt, read at the first compiled
+// block, after the app applies env.txt) turns it off. Tests set eden_page_reuse directly. Backported from ProsperoEden
 // (GPL-3.0-or-later).
-bool eden_page_reuse = false;
+bool eden_page_reuse = true;
 int eden_page_reuse_env = -1;
 // Groups formed and the accesses they hold, counted while blocks are compiled.
 unsigned long long eden_page_reuse_groups = 0;
@@ -110,9 +110,9 @@ static void EdenPageReusePass(IR::Block& block, const A64::UserConfig& conf) {
     }
     if (eden_page_reuse_env < 0) {
         const char* option = std::getenv("EDEN_JIT_PAGE_REUSE");
-        eden_page_reuse_env = option != nullptr && option[0] == '1';
+        eden_page_reuse_env = option != nullptr && option[0] == '0' ? 0 : 1;
     }
-    if (!(eden_page_reuse || eden_page_reuse_env == 1) || !conf.page_table || conf.check_halt_on_memory_access ||
+    if (!eden_page_reuse || eden_page_reuse_env == 0 || !conf.page_table || conf.check_halt_on_memory_access ||
         !conf.absolute_offset_page_table || conf.page_table_pointer_mask != 0 || conf.page_table_marked_bit ||
         conf.page_table_sign_extension || conf.silently_mirror_page_table || conf.page_table_log2_stride != 3 ||
         conf.page_table_address_space_bits <= 12 || conf.page_table_address_space_bits > 42 ||
