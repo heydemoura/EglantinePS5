@@ -51,6 +51,32 @@ A VMA dump at 80 s shows 3.79 GB of blocks holding 3.26 GB of allocations:
 - **ProsperoEden's guest-memory states (Zero/Shown).** They save CPU page tables, not memory.
   Eglantine's guest service is already newer here: it keeps a 512 MiB reserve.
 
+## Dense GPU-only regions backed lazily (ProsperoEden 0029/0031)
+
+Core patch `0022-dense-lazy-gpu-regions.patch`. nx2:gpu 214 GPU-only regions of 16 MiB or more
+get memory as the GPU writes them, like sparse regions already did.
+`EDEN_NX2_DENSE_LAZY_MIB=<n>` moves the threshold, and `0` backs them whole again.
+
+Measured on 2026-11-07 (MKW 1.8.0, title, 1x, interleaved, `Service:Info` log in a separate run):
+
+| | Lazy (default) | Whole (`=0`) |
+|---|---|---|
+| Regions backed whole | 75 small ones, 31 MiB | 82, **8,830 MiB** |
+| Guest kernel allocation failures | none | one 1,453 MiB region got no backing and stayed unmapped |
+| FPS (2 runs of 240 s) | 20.5 / 23.4 | 26.2 / 18.6 |
+| Out of device memory at | 163 / 173 s | 171 / 113 s |
+| Pool free at 150 s | ~550 MiB | ~470 MiB |
+
+**It does not fix the crash on this core.** Unlike ProsperoEden, Eglantine never clears a
+GPU-only backing ("touching 300 MB would commit it on the host"), and guest memory takes host
+memory only when written. A dense region backed whole already costs the console little more
+than the lazy one. What the patch does change is the guest kernel side. Backed whole, the
+regions used 8.8 GB of the guest kernel's system pool, and the largest one could not be
+allocated: the GPU's writes to that region had nowhere to go. Backed lazily, every region
+gets a mapping.
+
+The crash's cause is therefore still the host-side growth listed below, not the GPU-only regions.
+
 ## The driver's own heap figure counts memory twice
 
 The PS5 winsys reports its whole allocation total for both of its heaps. On MKW, VMA's
