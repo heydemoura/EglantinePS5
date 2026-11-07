@@ -27,6 +27,7 @@ add_executable(nx2-core-check ${ampere_tests}
     "${EDEN_SOURCE}/src/tests/video_core/nx2_gpu_mappings.cpp"
     "${EDEN_SOURCE}/src/tests/video_core/nx2_command_ranges.cpp"
     "${EDEN_SOURCE}/src/tests/video_core/nx2_command_sync.cpp"
+    "${EDEN_SOURCE}/src/tests/video_core/nx2_image_written_pages.cpp"
     "${EDEN_SOURCE}/src/tests/video_core/nx2_sparse_region.cpp"
     "${EDEN_SOURCE}/src/tests/video_core/nx2_sparse_tiles.cpp"
     "${EDEN_SOURCE}/src/tests/video_core/nx2_sparse_images.cpp"
