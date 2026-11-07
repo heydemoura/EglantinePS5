@@ -107,6 +107,12 @@ std::set<std::pair<u64, u32>>& EdenFastmemDemoted() {
 }
 }  // namespace
 
+// For the page-reuse pass (headless/dynarmic/page_reuse_pass.inc): whether a site is off the window.
+extern "C" bool eden_fastmem64_site_demoted(unsigned long long location, unsigned inst) {
+    std::lock_guard lock{EdenFastmemSiteMutex()};
+    return EdenFastmemDemoted().count({location, static_cast<u32>(inst)}) > 0;
+}
+
 // The demoted sites of a title, kept across sessions (headless/main.cpp): a later session compiles
 // them off the window from the start instead of learning them again through faults. Saved relative
 // to the game's code, which loads elsewhere each session, with the game's build ID; another build's

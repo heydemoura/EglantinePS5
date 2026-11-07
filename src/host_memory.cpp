@@ -474,6 +474,10 @@ struct Window64Counts {
     // Why a piece was not shown: a page of it unmapped, read-blocked (or write-blocked for a write),
     // its pages not in line in the backing, the backing off 16 KiB, or the slot refused it.
     std::atomic<std::uint64_t> piece_unmapped, piece_blocked, piece_scattered, piece_misaligned, piece_slot;
+    // Misaligned pieces by the guest's 4 GiB area (address >> 32), and how far off 16 KiB their
+    // backing is (in 4 KiB pages: 1, 2 or 3): which memory keeps sites off the window.
+    std::array<std::atomic<std::uint64_t>, 64> misaligned_area;
+    std::array<std::atomic<std::uint64_t>, 4> misaligned_phase;
     std::atomic<std::uint64_t> drop_map, drop_unmap, drop_protect;
 } window64_counts;
 
@@ -559,7 +563,11 @@ struct Window64 {
                 backing = at;
             }
         }
-        if ((backing - backing_base) % Piece) return counts.piece_misaligned.fetch_add(1, std::memory_order_relaxed), false;
+        if (const std::size_t phase = (backing - backing_base) % Piece) {
+            counts.misaligned_area[((address - reinterpret_cast<std::uintptr_t>(base)) >> 32) % 64].fetch_add(1, std::memory_order_relaxed);
+            counts.misaligned_phase[phase / GuestPage % 4].fetch_add(1, std::memory_order_relaxed);
+            return counts.piece_misaligned.fetch_add(1, std::memory_order_relaxed), false;
+        }
         if (!state.small && !PageTablesLeft(window64_counts.small_regions.load(std::memory_order_relaxed)))
             return window64_counts.piece_cap.fetch_add(1, std::memory_order_relaxed), false;
         bool promote = false;
@@ -747,6 +755,8 @@ bool Requested() noexcept { return window_requested; }
 void RequestA64(bool enabled) noexcept { window64_requested = enabled; }
 bool RequestedA64() noexcept { return window64_requested; }
 std::uint64_t Window64Base() noexcept { return window64_base; }
+// Page-reuse groups formed while blocks compile (headless/dynarmic/page_reuse_pass.inc).
+extern "C" unsigned long long eden_page_reuse_groups __attribute__((weak));
 void Window64Report(char* out, std::size_t size) noexcept {
     auto& c = window64_counts;
     std::uint64_t made = 0, dropped = 0, refused = 0;
@@ -762,6 +772,15 @@ void Window64Report(char* out, std::size_t size) noexcept {
                   v(c.piece_slot), v(c.drop_map), v(c.drop_unmap), v(c.drop_protect),
                   static_cast<unsigned long long>(made), static_cast<unsigned long long>(dropped),
                   static_cast<unsigned long long>(refused));
+    std::size_t used = std::strlen(out);
+    if (&eden_page_reuse_groups != nullptr && used < size)
+        used += std::snprintf(out + used, size - used, " reuse_groups=%llu", __atomic_load_n(&eden_page_reuse_groups, __ATOMIC_RELAXED));
+    if (used < size)
+        used += std::snprintf(out + used, size - used, " misaligned_phase=%llu/%llu/%llu areas=", v(c.misaligned_phase[1]),
+                              v(c.misaligned_phase[2]), v(c.misaligned_phase[3]));
+    for (std::size_t area = 0; area < c.misaligned_area.size() && used < size; ++area)
+        if (const auto n = v(c.misaligned_area[area]))
+            used += std::snprintf(out + used, size - used, "%zx:%llu,", area, n);
 }
 Stats WindowStats() noexcept {
     std::uint64_t direct_reads = 0, direct_writes = 0;

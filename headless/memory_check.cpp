@@ -1803,7 +1803,7 @@ static void CheckWindow64() {
                 }
             }
         }
-        char report[768];
+        char report[1024];
         Eden::Fastmem::Window64Report(report, sizeof(report));
         std::printf("%s\n", report);
         require(invalidations >= 2);  // the first read and the first write faulted

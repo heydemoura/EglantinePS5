@@ -9,6 +9,9 @@ extern "C" {
 // block, after the app applies env.txt) turns it off. Tests set eden_page_reuse directly. Backported from ProsperoEden
 // (GPL-3.0-or-later).
 bool eden_page_reuse = true;
+// A site the 64-bit fastmem window's fault took off fastmem (headless/dynarmic/fastmem-callback.cmake):
+// keyed by the block's location and the access's IR name. Null without that unit.
+bool eden_fastmem64_site_demoted(unsigned long long location, unsigned inst) __attribute__((weak));
 int eden_page_reuse_env = -1;
 // Groups formed and the accesses they hold, counted while blocks are compiled.
 unsigned long long eden_page_reuse_groups = 0;
@@ -104,8 +107,11 @@ bool EdenEndsGroups(IR::Opcode op) {
 static void EdenPageReusePass(IR::Block& block, const A64::UserConfig& conf) {
     // The emitted lookup reads the direct table: absolute offsets, no attributes, 8-byte
     // entries, an address space that is range-checked (not mirrored) and fits 32 index bits.
-    // Not with a fastmem window: its accesses do not read the page table.
-    if (conf.fastmem_pointer.has_value()) {
+    // With a fastmem window only the accesses that stay on the page table are grouped: the sites a
+    // window fault demoted (the saved list makes most of them known from the start). Keeping the
+    // pass off there left every such access its full lookup.
+    const bool window = conf.fastmem_pointer.has_value();
+    if (window && !eden_fastmem64_site_demoted) {
         return;
     }
     if (eden_page_reuse_env < 0) {
@@ -152,6 +158,9 @@ static void EdenPageReusePass(IR::Block& block, const A64::UserConfig& conf) {
         }
         const auto address = EdenDecomposeAddress(inst.GetArg(1));
         if (!address) {
+            continue;
+        }
+        if (window && !eden_fastmem64_site_demoted(block.Location().Value(), inst.GetName())) {
             continue;
         }
         const s64 end = address->offset + static_cast<s64>(bytes);

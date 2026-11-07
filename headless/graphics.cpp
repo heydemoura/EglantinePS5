@@ -703,7 +703,7 @@ void GraphicsWindow::OnFrameDisplayed() {
                 Eden::Performance::ReportVulkan();
                 Eden::Performance::ReportGuestRun();
                 if (Eden::Fastmem::Window64Base() != 0) {
-                    char window64[768];
+                    char window64[1024];
                     Eden::Fastmem::Window64Report(window64, sizeof(window64));
                     std::printf("%s\n", window64);
                 }
