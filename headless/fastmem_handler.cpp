@@ -49,6 +49,11 @@ void Handle(int signal, siginfo_t* info, void* context) {
     if (const auto guest = Eden::Fastmem::guest_write_fault.load(std::memory_order_acquire);
         guest && guest(info ? info->si_addr : nullptr))
         return;
+    // A fault in the 64-bit window (src/host_memory.cpp, Window64) that it can serve by showing the
+    // guest's memory there: the access repeats.
+    if (const auto window = Eden::Fastmem::window64_fault.load(std::memory_order_acquire);
+        window && info && window(info->si_addr, Eden::Fastmem::ContextFaultWrite(context)))
+        return;
     const std::uint64_t pc = Eden::Fastmem::ContextRip(context);
     for (auto& range : ranges) {
         const auto begin = range.begin.load(std::memory_order_acquire);

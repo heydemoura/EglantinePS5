@@ -2,7 +2,9 @@
 #include "common/host_memory.h"
 #include "fastmem.h"
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <bitset>
 #include <cerrno>
 #include <chrono>
 #include <csignal>
@@ -15,6 +17,7 @@
 #include <new>
 #include <stdexcept>
 #include <system_error>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 #include <signal.h>
@@ -29,6 +32,7 @@ std::int32_t sceKernelReleaseDirectMemory(std::int64_t, std::size_t);
 std::int32_t sceKernelMapDirectMemory(void**, std::size_t, int, int, std::int64_t, std::size_t);
 std::int32_t sceKernelReserveVirtualRange(void**, std::size_t, int, std::size_t);
 std::int32_t sceKernelEnableDmemAliasing();
+int sceKernelGetPageTableStats(int*, int*, int*, int*);
 }
 #endif
 
@@ -65,6 +69,12 @@ void* AllocateGuestMemory(size_t size) noexcept;
 void* AllocateGuestMemoryWhereUsed(size_t size) noexcept;
 void ClearGuestMemory(std::uint8_t* at, std::uint64_t offset, std::size_t bytes, int fill) noexcept;
 void FreeGuestMemory(void* base, size_t size) noexcept;
+// The 64-bit window's aliases of the guest's slots (guest_memory_service.inc).
+bool AliasGuestSlot(std::uintptr_t backing, std::uintptr_t window_at, bool writable, bool write, bool* promote) noexcept;
+bool AliasGuestPage(std::uintptr_t backing, std::uintptr_t at, std::uintptr_t region_at, bool writable, bool write,
+                    bool* promote) noexcept;
+bool DropGuestAlias(std::uintptr_t backing, std::uintptr_t window_at) noexcept;
+void GuestAliasCounts(std::uint64_t* made, std::uint64_t* dropped, std::uint64_t* refused) noexcept;
 #ifdef PS5_NATIVE
 std::int64_t DirectMemoryStart(const void* pointer) noexcept;
 #endif
@@ -446,9 +456,313 @@ private:
 };
 } // namespace
 
+namespace {
+// ---- The 64-bit window (EDEN_FASTMEM64=1; backported from ProsperoEden, GPL-3.0-or-later) ----
+// The page table's fastmem arena for 64-bit games, shown lazily. A JIT access faults on a 2 MiB
+// region that shows nothing. If all 512 pages of that guest region map one 2 MiB-aligned stretch of
+// the guest's memory with the same access, the slot there is shown as one large page
+// (guest_memory_service.inc, AliasGuestSlot) and the access repeats. A region that cannot be shown
+// whole shows the 16 KiB piece around the access when its four pages are mapped in line. Otherwise
+// the JIT's fallback runs and dynarmic moves that access site onto the page-table path. 2^38 bytes
+// cover every guest address a 64-bit title uses; the JIT range-checks to that (Window64Bits).
+std::atomic<bool> window64_requested{false};
+std::atomic<std::uint64_t> window64_base{0};
+struct Window64Counts {
+    std::atomic<std::uint64_t> whole, pieces, read_only, promoted;
+    std::atomic<std::uint64_t> no_region, partial, inconsistent, blocked, blocked_write, unaligned, slot_refused;
+    std::atomic<std::uint64_t> piece_refused, piece_cap, small_regions;
+    // Why a piece was not shown: a page of it unmapped, read-blocked (or write-blocked for a write),
+    // its pages not in line in the backing, the backing off 16 KiB, or the slot refused it.
+    std::atomic<std::uint64_t> piece_unmapped, piece_blocked, piece_scattered, piece_misaligned, piece_slot;
+    std::atomic<std::uint64_t> drop_map, drop_unmap, drop_protect;
+} window64_counts;
+
+constexpr std::size_t Window64Bytes = std::size_t{1} << Eden::Fastmem::Window64Bits;
+struct Window64 {
+    static constexpr std::size_t Region = 0x200000, RegionPages = Region / GuestPage;
+    static constexpr std::size_t Piece = 0x4000, PiecePages = Piece / GuestPage, Pieces = Region / Piece;
+    struct State {
+        std::uintptr_t start = 0;          // the backing address the region's first page maps to
+        bool consistent = true;            // every mapped page agrees with `start`
+        // When not: each page's backing page (from backing_base) + 1, 0 = none.
+        std::unique_ptr<std::uint32_t[]> backing_pages;
+        std::vector<std::uintptr_t> piece_backings; // one backing address per 2 MiB slot that pieces show
+        bool small = false;                // shows 16 KiB pieces (AliasGuestPage)
+        std::bitset<Pieces> pieces;        // which pieces are shown
+        std::array<std::uint8_t, Pieces> piece_protection{}; // each shown piece's PROT_* bits
+        std::bitset<RegionPages> mapped, read_blocked, write_blocked; // Eden's access, page by page
+    };
+    std::uint8_t* base{};
+    std::uintptr_t backing_base{};
+    std::mutex mutex;
+    std::unordered_map<std::uint32_t, State> regions;
+
+    // Each region shown in pieces costs one of the title's 16,384 CPU page tables, which the game,
+    // the GPU driver and the window share: a new one is refused once fewer than PageTablesKept are
+    // free (a fixed cap where the count is unavailable).
+    static constexpr std::uint64_t SmallRegionCap = 768;
+    static constexpr int PageTablesKept = 1024;
+    static bool PageTablesLeft(std::uint64_t small_regions) {
+#ifdef PS5_NATIVE
+        int cpu_tables = 0, cpu_free = 0, gpu_tables = 0, gpu_free = 0;
+        if (sceKernelGetPageTableStats(&cpu_tables, &cpu_free, &gpu_tables, &gpu_free) == 0)
+            return cpu_free > PageTablesKept;
+#endif
+        return small_regions < SmallRegionCap;
+    }
+    std::uintptr_t RegionAt(std::uint32_t region) const {
+        return reinterpret_cast<std::uintptr_t>(base) + std::uintptr_t(region) * Region;
+    }
+    void Drop(std::uint32_t region, State& state, std::atomic<std::uint64_t>& why) {
+        const auto window_at = RegionAt(region);
+        bool dropped = state.start && Common::DropGuestAlias(state.start, window_at);
+        if (state.small) {
+            // Pieces may come from other slots: a region off a 2 MiB boundary spans two.
+            for (const std::uintptr_t backing : state.piece_backings)
+                dropped |= Common::DropGuestAlias(backing, window_at);
+            state.piece_backings.clear();
+            state.small = false;
+            state.pieces.reset();
+            window64_counts.small_regions.fetch_sub(1, std::memory_order_relaxed);
+        }
+        if (dropped) why.fetch_add(1, std::memory_order_relaxed);
+    }
+    // A slot without a block of its own, written through the window: take one as a write to the
+    // backing would (guest_memory_service.inc).
+    static bool Promote(std::uintptr_t backing) {
+        const auto take = Eden::Fastmem::guest_write_fault.load(std::memory_order_acquire);
+        if (!take || !take(reinterpret_cast<void*>(backing))) return false;
+        window64_counts.promoted.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
+    // The 16 KiB holding `address` on its own, when its four guest pages are mapped, in line in the
+    // backing and readable (and writable, for a write; else it is shown read-only).
+    bool ShowPiece(std::uint32_t region, State& state, std::uintptr_t address, bool write) {
+        const auto region_at = RegionAt(region);
+        const std::size_t first = (address - region_at) / Piece * PiecePages;
+        bool writable = true;
+        auto& counts = window64_counts;
+        for (std::size_t i = first; i < first + PiecePages; ++i) {
+            if (!state.mapped[i]) return counts.piece_unmapped.fetch_add(1, std::memory_order_relaxed), false;
+            if (state.read_blocked[i]) return counts.piece_blocked.fetch_add(1, std::memory_order_relaxed), false;
+            writable &= !state.write_blocked[i];
+        }
+        if (write && !writable) return counts.piece_blocked.fetch_add(1, std::memory_order_relaxed), false;
+        std::uintptr_t backing = state.start + first * GuestPage;
+        if (!state.consistent) {
+            backing = 0;
+            for (std::size_t i = first; i < first + PiecePages; ++i) {
+                const std::uintptr_t at = backing_base + std::uintptr_t(state.backing_pages[i] - 1) * GuestPage -
+                                          (i - first) * GuestPage;
+                if (!state.backing_pages[i] || (backing && at != backing))
+                    return counts.piece_scattered.fetch_add(1, std::memory_order_relaxed), false;
+                backing = at;
+            }
+        }
+        if ((backing - backing_base) % Piece) return counts.piece_misaligned.fetch_add(1, std::memory_order_relaxed), false;
+        if (!state.small && !PageTablesLeft(window64_counts.small_regions.load(std::memory_order_relaxed)))
+            return window64_counts.piece_cap.fetch_add(1, std::memory_order_relaxed), false;
+        bool promote = false;
+        const std::uintptr_t at = region_at + first * GuestPage;
+        if (!Common::AliasGuestPage(backing, at, region_at, writable, write, &promote)) {
+            if (!promote || !Promote(backing) || (promote = false, !Common::AliasGuestPage(backing, at, region_at, writable, write, &promote)))
+                return counts.piece_slot.fetch_add(1, std::memory_order_relaxed), false;
+            // The promotion voided the region's other pieces (DropSlotAliases).
+            state.pieces.reset();
+        }
+        if (!state.small) {
+            state.small = true;
+            window64_counts.small_regions.fetch_add(1, std::memory_order_relaxed);
+        }
+        state.pieces.set(first / PiecePages);
+        state.piece_protection[first / PiecePages] = static_cast<std::uint8_t>(writable ? PROT_READ | PROT_WRITE : PROT_READ);
+        if (std::find_if(state.piece_backings.begin(), state.piece_backings.end(),
+                         [backing](std::uintptr_t b) { return (b >> 21) == (backing >> 21); }) == state.piece_backings.end())
+            state.piece_backings.push_back(backing);
+        window64_counts.pieces.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
+    template <class Each>
+    void ForRegions(std::size_t offset, std::size_t length, Each&& each) {
+        if (offset >= Window64Bytes || !length) return;
+        const std::size_t end = std::min(offset + length, Window64Bytes);
+        for (std::size_t region = offset / Region; region * Region < end; ++region) {
+            const std::size_t first = std::max(offset, region * Region), last = std::min(end, (region + 1) * Region);
+            each(static_cast<std::uint32_t>(region), (first - region * Region) / GuestPage, (last - first) / GuestPage, first);
+        }
+    }
+    void Map(std::size_t offset, std::size_t host_offset, std::size_t length, std::uint8_t access) {
+        std::lock_guard lock{mutex};
+        ForRegions(offset, length, [&](std::uint32_t region, std::size_t page, std::size_t pages, std::size_t first) {
+            auto& state = regions[region];
+            Drop(region, state, window64_counts.drop_map);
+            const std::uintptr_t start = backing_base + host_offset + (first - offset) - (first - region * Region);
+            if (state.mapped.none()) {
+                state.start = start;
+                state.consistent = true;
+                state.backing_pages.reset();
+            } else if (state.start != start && state.consistent) {
+                state.consistent = false;
+                state.backing_pages = std::make_unique<std::uint32_t[]>(RegionPages);
+                for (std::size_t i = 0; i < RegionPages; ++i)
+                    if (state.mapped[i])
+                        state.backing_pages[i] = std::uint32_t((state.start + i * GuestPage - backing_base) / GuestPage + 1);
+            }
+            for (std::size_t i = page; i < page + pages; ++i) {
+                if (!state.consistent)
+                    state.backing_pages[i] = std::uint32_t((start + i * GuestPage - backing_base) / GuestPage + 1);
+                state.mapped.set(i);
+                state.read_blocked.set(i, !(access & Readable));
+                state.write_blocked.set(i, !(access & Writable));
+            }
+        });
+    }
+    void Unmap(std::size_t offset, std::size_t length) {
+        std::lock_guard lock{mutex};
+        ForRegions(offset, length, [&](std::uint32_t region, std::size_t page, std::size_t pages, std::size_t) {
+            const auto it = regions.find(region);
+            if (it == regions.end()) return;
+            Drop(region, it->second, window64_counts.drop_unmap);
+            for (std::size_t i = page; i < page + pages; ++i) {
+                it->second.mapped.reset(i);
+                if (it->second.backing_pages) it->second.backing_pages[i] = 0;
+            }
+            if (it->second.mapped.none()) regions.erase(it);
+        });
+    }
+    void Protect(std::size_t offset, std::size_t length, std::uint8_t access) {
+        std::lock_guard lock{mutex};
+        ForRegions(offset, length, [&](std::uint32_t region, std::size_t page, std::size_t pages, std::size_t) {
+            const auto it = regions.find(region);
+            if (it == regions.end()) return;
+            State& state = it->second;
+            // A region shown in pieces changes only the pieces the pages are in: GPU write tracking
+            // protects pages hundreds of times a second.
+            if (!state.small && access != (Readable | Writable)) Drop(region, state, window64_counts.drop_protect);
+            for (std::size_t i = page; i < page + pages; ++i) {
+                state.read_blocked.set(i, !(access & Readable));
+                state.write_blocked.set(i, !(access & Writable));
+            }
+            if (!state.small) return;
+            const auto region_at = RegionAt(region);
+            for (std::size_t piece = page / PiecePages; piece * PiecePages < page + pages; ++piece) {
+                if (!state.pieces[piece]) continue;
+                bool readable = true, writable = true;
+                for (std::size_t i = piece * PiecePages; i < (piece + 1) * PiecePages; ++i) {
+                    readable &= !state.read_blocked[i];
+                    writable &= !state.write_blocked[i];
+                }
+                // A piece only becomes more permissive through a fault (ShowPiece), never here.
+                const int shown = state.piece_protection[piece];
+                const int protection = !readable ? PROT_NONE : writable ? shown : PROT_READ;
+                if (protection == shown) continue;
+                state.piece_protection[piece] = static_cast<std::uint8_t>(protection);
+                if (mprotect(reinterpret_cast<void*>(region_at + piece * Piece), Piece, protection) != 0) {
+                    Drop(region, state, window64_counts.drop_protect);
+                    return;
+                }
+            }
+        });
+    }
+    // From the fault handler (a JIT thread, which never holds `mutex` while it runs guest code).
+    // A region whose only blocked pages are write-blocked (GPU write tracking) is shown read-only:
+    // reads go direct and a write faults again, to the page-table path that tracks it.
+    bool Fault(std::uintptr_t address, bool write) {
+        const auto at = reinterpret_cast<std::uintptr_t>(base);
+        if (address < at || address >= at + Window64Bytes) return false;
+        const auto region = static_cast<std::uint32_t>((address - at) / Region);
+        std::lock_guard lock{mutex};
+        auto& counts = window64_counts;
+        const auto it = regions.find(region);
+        if (it == regions.end()) return counts.no_region.fetch_add(1, std::memory_order_relaxed), false;
+        State& state = it->second;
+        const auto refuse = [&](std::atomic<std::uint64_t>& count) {
+            if (ShowPiece(region, state, address, write)) return true;
+            count.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        };
+        if (!state.mapped.all()) return refuse(counts.partial);
+        if (!state.consistent) return refuse(counts.inconsistent);
+        if (state.read_blocked.any()) return refuse(counts.blocked);
+        const bool writable = state.write_blocked.none();
+        if (write && !writable) return refuse(counts.blocked_write);
+        if ((state.start - backing_base) % Region) return refuse(counts.unaligned);
+        bool promote = false;
+        bool shown = Common::AliasGuestSlot(state.start, RegionAt(region), writable, write, &promote);
+        if (!shown && promote && Promote(state.start + (address - RegionAt(region)))) {
+            promote = false;
+            shown = Common::AliasGuestSlot(state.start, RegionAt(region), writable, write, &promote);
+        }
+        if (!shown) return refuse(counts.slot_refused);
+        if (state.small) {
+            state.small = false;
+            state.pieces.reset();
+            state.piece_backings.clear();
+            counts.small_regions.fetch_sub(1, std::memory_order_relaxed);
+        }
+        counts.whole.fetch_add(1, std::memory_order_relaxed);
+        if (!writable) counts.read_only.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
+    bool Create() {
+#ifdef PS5_NATIVE
+        (void)sceKernelEnableDmemAliasing();
+        // Above the guest's own memory (0x80_0000_0000) and never in RADV's device-memory range
+        // [0x40_0000_0000, 0x80_0000_0000), where it maps with fixed addresses.
+        void* address = reinterpret_cast<void*>(0xa000000000ull);
+        if (sceKernelReserveVirtualRange(&address, Window64Bytes, 0, Region) != 0) return false;
+        if (reinterpret_cast<std::uintptr_t>(address) < 0x8000000000ull) {
+            munmap(address, Window64Bytes);
+            return false;
+        }
+#else
+        void* address = mmap(nullptr, Window64Bytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+        if (address == MAP_FAILED) return false;
+#endif
+        base = static_cast<std::uint8_t*>(address);
+        window64_base = reinterpret_cast<std::uintptr_t>(base);
+        return true;
+    }
+    ~Window64() {
+        Eden::Fastmem::window64_fault.store(nullptr, std::memory_order_release);
+        {
+            std::lock_guard lock{mutex};
+            for (auto& [region, state] : regions) Drop(region, state, window64_counts.drop_unmap);
+            regions.clear();
+        }
+        if (base && munmap(base, Window64Bytes) != 0) std::abort();
+        window64_base = 0;
+    }
+};
+std::atomic<Window64*> window64_current{nullptr};
+bool Window64Fault(void* address, bool write) noexcept {
+    auto* window = window64_current.load(std::memory_order_acquire);
+    return window && window->Fault(reinterpret_cast<std::uintptr_t>(address), write);
+}
+} // namespace
+
 namespace Eden::Fastmem {
 void Request(bool enabled) noexcept { window_requested = enabled; }
 bool Requested() noexcept { return window_requested; }
+void RequestA64(bool enabled) noexcept { window64_requested = enabled; }
+bool RequestedA64() noexcept { return window64_requested; }
+std::uint64_t Window64Base() noexcept { return window64_base; }
+void Window64Report(char* out, std::size_t size) noexcept {
+    auto& c = window64_counts;
+    std::uint64_t made = 0, dropped = 0, refused = 0;
+    Common::GuestAliasCounts(&made, &dropped, &refused);
+    const auto v = [](const std::atomic<std::uint64_t>& a) { return static_cast<unsigned long long>(a.load(std::memory_order_relaxed)); };
+    std::snprintf(out, size,
+                  "EDEN_FASTMEM64 whole=%llu pieces=%llu read_only=%llu promoted=%llu refused: no_region=%llu partial=%llu "
+                  "inconsistent=%llu blocked=%llu blocked_write=%llu unaligned=%llu slot=%llu piece_cap=%llu "
+                  "small_regions=%llu piece_refused: unmapped=%llu blocked=%llu scattered=%llu misaligned=%llu slot=%llu drops: map=%llu unmap=%llu protect=%llu aliases: made=%llu dropped=%llu refused=%llu",
+                  v(c.whole), v(c.pieces), v(c.read_only), v(c.promoted), v(c.no_region), v(c.partial), v(c.inconsistent),
+                  v(c.blocked), v(c.blocked_write), v(c.unaligned), v(c.slot_refused), v(c.piece_cap),
+                  v(c.small_regions), v(c.piece_unmapped), v(c.piece_blocked), v(c.piece_scattered), v(c.piece_misaligned),
+                  v(c.piece_slot), v(c.drop_map), v(c.drop_unmap), v(c.drop_protect),
+                  static_cast<unsigned long long>(made), static_cast<unsigned long long>(dropped),
+                  static_cast<unsigned long long>(refused));
+}
 Stats WindowStats() noexcept {
     std::uint64_t direct_reads = 0, direct_writes = 0;
     if (const auto* map = current_map.load()) {
@@ -470,6 +784,7 @@ public:
     u8* base{};
     size_t size;
     std::unique_ptr<Window> window;
+    std::unique_ptr<Window64> window64;
 #ifndef PS5_NATIVE
     int fd = -1; // Host checks: a shared backing the window can alias.
 #endif
@@ -499,6 +814,9 @@ public:
     }
     ~Impl() {
         window.reset();
+        // Its aliases go before the guest's memory does.
+        window64_current.store(nullptr, std::memory_order_release);
+        window64.reset();
 #ifndef PS5_NATIVE
         if (fd >= 0) {
             if (munmap(base, size) != 0 || close(fd) != 0) std::abort();
@@ -520,6 +838,20 @@ HostMemory::HostMemory(size_t size, size_t virtual_size_)
     if (impl->window) {
         virtual_base = impl->window->base;
         virtual_size = WindowBytes;
+    }
+    if (virtual_size_ && !virtual_base && Eden::Fastmem::RequestedA64()) {
+        impl->window64 = std::make_unique<Window64>();
+        if (impl->window64->Create()) {
+            virtual_base = impl->window64->base;
+            virtual_size = Window64Bytes;
+            impl->window64->backing_base = reinterpret_cast<std::uintptr_t>(backing_base);
+            window64_current.store(impl->window64.get(), std::memory_order_release);
+            Eden::Fastmem::window64_fault.store(&Window64Fault, std::memory_order_release);
+        } else {
+            impl->window64.reset();
+        }
+        std::printf("EDEN_FASTMEM64 window=%p\n", static_cast<void*>(virtual_base));
+        std::fflush(stdout);
     }
 }
 HostMemory::~HostMemory() = default;
@@ -563,16 +895,19 @@ static void NoWindow(const char* what) noexcept {
     }
 }
 void HostMemory::Map(size_t virtual_offset, size_t host_offset, size_t length, MemoryPermission perms, bool) {
+    if (impl && impl->window64) return impl->window64->Map(virtual_offset, host_offset, length, Access(perms));
     if (!impl || !impl->window) return NoWindow("map");
     if (host_offset > backing_size || length > backing_size - host_offset)
         throw std::out_of_range("Backing map range");
     impl->window->Map(virtual_offset, host_offset, length, Access(perms));
 }
 void HostMemory::Unmap(size_t virtual_offset, size_t length, bool) {
+    if (impl && impl->window64) return impl->window64->Unmap(virtual_offset, length);
     if (!impl || !impl->window) return NoWindow("unmap");
     impl->window->Unmap(virtual_offset, length);
 }
 void HostMemory::Protect(size_t virtual_offset, size_t length, MemoryPermission perms) {
+    if (impl && impl->window64) return impl->window64->Protect(virtual_offset, length, Access(perms));
     if (!impl || !impl->window) return NoWindow("protect");
     impl->window->Protect(virtual_offset, length, Access(perms));
 }

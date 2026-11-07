@@ -1750,6 +1750,69 @@ static void CheckFastPaths() {
     std::printf("Fast paths PASS: %u cases (FCMP flags, DMB variants, CBZ/TBZ terminals)\n", cases);
 }
 
+// The 64-bit fastmem window (src/host_memory.cpp, Window64) on the host. The host's guest memory is
+// private, so the window never shows it: every access through the window faults, the window refuses
+// it (Window64Fault, asked by the fault handler) and dynarmic's fallback reaches the callbacks; the
+// site then moves onto the callback path. An address past 2^38 never touches the window. The window
+// tracks maps, protections and unmaps across region boundaries and ignores what lies past it.
+static void CheckWindow64() {
+    using Common::MemoryPermission;
+    Eden::Fastmem::RequestA64(true);
+    {
+        Common::HostMemory host{64u << 20, uint64_t{1} << 39};
+        Eden::Fastmem::RequestA64(false);
+        require(host.VirtualBasePointer() != nullptr &&
+                reinterpret_cast<uint64_t>(host.VirtualBasePointer()) == Eden::Fastmem::Window64Base());
+        host.Map(0x1ff000, 0x10000, 0x3000, MemoryPermission::ReadWrite, false);  // two regions
+        host.Protect(0x200000, 0x1000, MemoryPermission::Read);
+        host.Map(0x400000, 0x200000, 0x200000, MemoryPermission::ReadWrite, false); // a whole region
+        host.Unmap(0x1ff000, 0x1000, false);
+        host.Map(uint64_t{1} << 38, 0, 0x1000, MemoryPermission::ReadWrite, false); // past the window
+        unsigned cases = 0, invalidations = 0;
+        for (const uint64_t vaddr : {uint64_t{0x200000}, uint64_t{0x201008}, uint64_t{0x400010}, uint64_t{0x7000000},
+                                     (uint64_t{1} << 38) + 0x10}) {
+            for (const bool write : {false, true}) {
+                Memory<false> memory;
+                memory.instruction = write ? 0xf9000001u : 0xf9400001u; // str/ldr x1, [x0]
+                memory.address = vaddr;
+                A64::UserConfig config{};
+                config.callbacks = &memory;
+                config.enable_cycle_counting = false;
+                config.code_cache_size = 16 * 1024 * 1024;
+                config.fastmem_pointer = reinterpret_cast<uintptr_t>(host.VirtualBasePointer());
+                config.fastmem_address_space_bits = Eden::Fastmem::Window64Bits;
+                config.recompile_on_fastmem_failure = true;
+                A64::Jit jit{config};
+                memory.jit = &jit;
+                // Twice: the fault and fallback, then the site on the callback path.
+                for (unsigned run = 1; run <= 2; ++run) {
+                    jit.Reset();
+                    jit.ClearHalt(~HaltReason{});
+                    jit.SetPC(0x1000);
+                    jit.SetRegister(0, vaddr);
+                    jit.SetRegister(1, write ? memory.value[0] : 0);
+                    // A fault asks for the site's block to be invalidated (fastmem-callback.cmake), and the
+                    // run also stops for that. Demotions are process-wide: the same site in a later JIT
+                    // (the same code at 0x1000) is compiled onto the callback path at once.
+                    const HaltReason halt = jit.Run();
+                    require(Has(halt, HaltReason::UserDefined1));
+                    invalidations += Has(halt, HaltReason::CacheInvalidation);
+                    if (write) require(memory.writes == run && memory.reads == 0);
+                    else require(memory.reads == run && jit.GetRegister(1) == memory.value[0]);
+                    ++cases;
+                }
+            }
+        }
+        char report[768];
+        Eden::Fastmem::Window64Report(report, sizeof(report));
+        std::printf("%s\n", report);
+        require(invalidations >= 2);  // the first read and the first write faulted
+        std::printf("Fastmem window 64 PASS: %u cases, %u fault invalidations (host: every window access falls back)\n",
+                    cases, invalidations);
+    }
+    require(Eden::Fastmem::Window64Base() == 0 && Eden::Fastmem::window64_fault.load() == nullptr);
+}
+
 int main(int argc, char** argv) {
     // The checks run with the defaults: direct table, page reuse and fast paths on.
     CheckSparseTables();
@@ -1815,6 +1878,7 @@ int main(int argc, char** argv) {
     CheckDirectPageTable(backing);
     CheckPageReuse();
     CheckFastPaths();
+    CheckWindow64();
     CheckAtomicLoop(backing, false);
     CheckAtomicLoopA32(backing, false);
     CheckSharedJit(2, true, 2, true);

@@ -13,6 +13,7 @@ include("${CMAKE_CURRENT_LIST_DIR}/dynarmic/shared-jit.cmake")
 # Register-allocator bookkeeping visits only the host locations in use (compile time).
 include("${CMAKE_CURRENT_LIST_DIR}/dynarmic/reg_alloc.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/dynarmic/fast_paths.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/dynarmic/fastmem-callback.cmake")
 if(PS5_NATIVE OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set(EDEN_SHARED_JIT ON)
 endif()
@@ -564,6 +565,7 @@ string(REPLACE "${mark_test}" [=[        if (*ctx.conf.page_table_marked_bit == 
         endforeach()
     endif()
     eden_page_reuse_memory_inc()
+    eden_fastmem_callback_memory_inc()
     write_derived("${PORT_BUILD_DIR}/include/${memory_inc}" "${memory_source}")
 set(exclusive_lookup [=[template<typename EmitContext>
 Xbyak::RegExp EmitExclusiveVAddrLookup(BlockOfCode& code, EmitContext& ctx, size_t bitsize,
@@ -598,6 +600,7 @@ foreach(bits 32 64)
     if(bits EQUAL 64)
         eden_page_reuse_memory_unit()
     endif()
+    eden_fastmem_callback_memory_unit(${bits})
     write_derived("${PORT_BUILD_DIR}/${memory_unit}" "${memory_source}")
     list(FILTER jit_sources EXCLUDE REGEX "(^|/)a${bits}_emit_x64_memory\\.cpp$")
     list(APPEND jit_sources "${PORT_BUILD_DIR}/${memory_unit}")
@@ -763,6 +766,18 @@ foreach(bits 32 64)
           endif()
           string(REPLACE "std::uint32_t(16_MiB)" "std::uint32_t(${jit_cache_sizes})" wrapper "${wrapper}")
       endif()
+    if(bits EQUAL 64)
+        # The 64-bit fastmem window (src/host_memory.cpp, Window64) covers 2^38 bytes: an access
+        # past it must take the page-table path, whatever the accuracy mode asked (Auto sets 64,
+        # no check at all), or it would reach whatever is mapped after the window.
+        set(window64_anchor "    m_jit.emplace(config);\n")
+        string(FIND "${wrapper}" "${window64_anchor}" window64_at)
+        if(window64_at LESS 0)
+            message(FATAL_ERROR "Pinned A64 JIT creation changed (fastmem window range)")
+        endif()
+        string(REPLACE "${window64_anchor}" "    if (config.fastmem_pointer && ::Eden::Fastmem::Window64Base() != 0 &&\n        *config.fastmem_pointer == ::Eden::Fastmem::Window64Base())\n        config.fastmem_address_space_bits = std::min<std::uint32_t>(config.fastmem_address_space_bits, ::Eden::Fastmem::Window64Bits);\n${window64_anchor}" wrapper "${wrapper}")
+        string(PREPEND wrapper "#include <algorithm>\n#include \"${PORT_ROOT}/src/fastmem.h\"\n")
+    endif()
     set(derived "${PORT_BUILD_DIR}/arm_dynarmic_${bits}.cpp")
     # Temporary MKW dispatch-latency probe, without enabling the full DEV profile. Only in
     # EDEN_MKW_DIAGNOSTICS builds: it times every JIT run, which release builds must not
@@ -1048,8 +1063,10 @@ if(EDEN_A32_FASTMEM)
     if(arena_at LESS 0)
         message(FATAL_ERROR "Pinned fastmem arena selection changed")
     endif()
-    string(REPLACE "${arena_old}" "        if (process.IsApplication() && !process.Is64Bit() && Settings::IsFastmemEnabled()) {"
+    # A 64-bit application gets the 64-bit window instead when it was asked for (EDEN_FASTMEM64=1).
+    string(REPLACE "${arena_old}" "        if (process.IsApplication() && (!process.Is64Bit() || ::Eden::Fastmem::RequestedA64()) && Settings::IsFastmemEnabled()) {"
         arena_source "${arena_source}")
+    string(PREPEND arena_source "#include \"${PORT_ROOT}/src/fastmem.h\"\n")
 endif()
 write_derived("${PORT_BUILD_DIR}/memory.cpp" "${arena_source}")
 list(REMOVE_ITEM core_sources "memory.cpp")
