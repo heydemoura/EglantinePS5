@@ -626,7 +626,18 @@ adapt('src/video_core/renderer_vulkan/vk_staging_buffer_pool.cpp', 'vulkan_stagi
     }
 '''),
     ('#include "video_core/vulkan_common/vulkan_wrapper.h"\n',
-     '#include "video_core/vulkan_common/vulkan_wrapper.h"\n#include <atomic>\n#include <cstdio>\n#include "staging_buffers.h"\n'),
+     '#include "video_core/vulkan_common/vulkan_wrapper.h"\n#include <atomic>\n#include <cstdio>\n#include "performance.h"\n#include "staging_buffers.h"\n'),
+    # While the console's pool is short, every staging buffer the GPU is done with goes back at the
+    # frame's end. Eden frees them slowly - one size class a frame, 16 buffers at most, so a buffer
+    # can stay 64 frames after its last use - and a course loading in Mario Kart World stages its
+    # textures a layer at a time: the buffers it left behind held the pool its next request needed.
+    # (ProsperoEden's TickFrame release; ReleaseCompleted is the same walk the transcode path uses.)
+    ('    ReleaseCache(MemoryUsage::Download);\n}',
+     '    ReleaseCache(MemoryUsage::Download);\n'
+     '    if (::Eden::Performance::GraphicsMemoryIsShort()) {\n'
+     '        ReleaseCompleted();\n'
+     '    }\n'
+     '}'),
     ('void StagingBufferPool::TickFrame() {',
      'void StagingBufferPool::ReleaseCompleted() {\n'
      '    const auto idle = [this](const StagingBuffer& entry) {\n'
@@ -693,8 +704,48 @@ adapt('src/video_core/renderer_vulkan/vk_staging_buffer_pool.cpp', 'vulkan_stagi
      '        }\n'
      '    }\n'),
 ])
+# The software blitter keeps its scratch at the largest blit it has done: three 64 MiB buffers in
+# Mario Kart World, held for the session in the pool the guest and the GPU share. Past 16 MiB they
+# go back once the blit has written its result (the scoped guest write ends with its block; the
+# loading probe's writeback scope ends there too, after the write, as it did at the return).
+adapt('src/video_core/engines/sw_blitter/blitter.cpp', 'sw_blitter.cpp', [
+    ('    const size_t dst_size = get_surface_size(dst, dst_bytes_per_pixel);\n',
+     '    {\n    const size_t dst_size = get_surface_size(dst, dst_bytes_per_pixel);\n'),
+    ('    VideoCommon::LoadingProbe::writeback.Mark("scoped memory destructor", dst_size);\n    return true;\n}\n',
+     '    VideoCommon::LoadingProbe::writeback.Mark("scoped memory destructor", dst_size);\n    }\n'
+     '    constexpr size_t kKeepBytes = 16u << 20;\n'
+     '    if (impl->tmp_buffer.capacity() > kKeepBytes) impl->tmp_buffer = Common::ScratchBuffer<u8>{};\n'
+     '    if (impl->src_buffer.capacity() > kKeepBytes) impl->src_buffer = Common::ScratchBuffer<u8>{};\n'
+     '    if (impl->dst_buffer.capacity() > kKeepBytes) impl->dst_buffer = Common::ScratchBuffer<u8>{};\n'
+     '    if (impl->intermediate_src.capacity() * sizeof(f32) > kKeepBytes) impl->intermediate_src = Common::ScratchBuffer<f32>{};\n'
+     '    if (impl->intermediate_dst.capacity() * sizeof(f32) > kKeepBytes) impl->intermediate_dst = Common::ScratchBuffer<f32>{};\n'
+     '    return true;\n}\n'),
+])
 # Development A/B switches for device features (headless/dev_vulkan.h, dev-settings).
 adapt('src/video_core/vulkan_common/vulkan_device.cpp', 'vulkan_device.cpp', [
+    # 16 MiB blocks: the pool the console's GPU allocates from is the CPU's and the guest's too, and
+    # what a block holds goes back to it only when the block is empty. With 64 MiB blocks Mario Kart
+    # World's collector deleted 2,440 images and the allocator held 3,812 MiB before and after (the
+    # 584 left were spread over every block), and the pool ran out. Anything over 8 MiB is then an
+    # allocation of its own, given back when freed; the page tables are the same (one per 2 MiB).
+    # EDEN_PS5_VMA_BLOCK_MIB still overrides it.
+    ("std::strtoul(value, nullptr, 10) : 64;\n"
+     "                return static_cast<VkDeviceSize>(mib >= 4 && mib <= 256 ? mib : 64) * 1024u * 1024u;",
+     "std::strtoul(value, nullptr, 10) : 16;\n"
+     "                return static_cast<VkDeviceSize>(mib >= 4 && mib <= 256 ? mib : 16) * 1024u * 1024u;"),
+    # The allocator counts what it holds itself instead of asking the driver. The driver's figures
+    # are wrong on the console: it counts each allocation of graphics memory twice (as VRAM and as
+    # visible VRAM), so the allocator saw the budget of the 8 GiB heap used up at 4 GiB. From there
+    # it could make no more of its blocks and gave every image memory of its own: 926 allocations
+    # where 40 blocks had done, a third of what it held unused (1.3 of 3.9 GiB in a large open-world
+    # game at 2x), and the shared pool cut into hundreds of pieces. Without the driver's budget its
+    # own count stands against four fifths of the heap. Only VMA's view changes: the caches' usage
+    # and budget (GetDeviceMemoryUsage/GetDeviceMemoryBudget below) still read the extension or the
+    # pool, and vmaGetHeapBudgets' statistics are VMA's own either way. A request past VMA's
+    # four fifths is still asked for again outside the budget (ALLOCATOR_REFUSED above and Eglantine's
+    # relaxed retries); with the double count gone that retry is the rare path it was meant to be.
+    ('    if (extensions.memory_budget) {\n        flags |= VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT;\n    }\n',
+     '    // The driver\'s budget is not asked for: its count is double (tools/prepare-vulkan-port.py).\n'),
     ('#include <algorithm>', '#include <algorithm>\n#include <cstdio>\n#include "dev_vulkan.h"\n#include "performance.h"'),
     # "Memory in use" for the texture and buffer caches: on the console, the budget less what is
     # left of the pool the CPU shares with the GPU (performance.h, graphics_memory_free).
@@ -974,10 +1025,21 @@ gc_setup = '''    const auto ReclaimedBytes = [&](const Image& image) {
 cleanup_begin = gc.index('    const auto Cleanup = [')
 cleanup_end = gc.index('](ImageId image_id)', cleanup_begin) + 1
 cleanup_capture = gc[cleanup_begin:cleanup_end]
+# Eglantine's own block-order walk (tools/eglantine-patches/0012, Collect) gives way to
+# ForEachCandidate (vulkan_gc_downloads.inc): the same order, but over up to 1,024 candidates
+# instead of 8 per eviction allowed, then on oldest first, and the download lookahead walks it too.
+collect_begin = gc.index('    const auto Collect = [&] {')
+collect_begin = gc.rindex('    };\n', 0, collect_begin) + len('    };\n')  # with 0012's comment
+collect_end = gc.index('    Configure(false);', collect_begin)
+collect_original = gc[collect_begin:collect_end]
 for old, new in [
     (cleanup_capture,
      gc_setup + '\n    const auto Cleanup = [&, this]'),
-    ('        if (must_download) {', '        if (must_download && !TakePrefetched(image_id, image)) {'),
+    (collect_original,
+     '    const auto Collect = [&] { ForEachCandidate(frame_tick - ticks_to_destroy, Cleanup); };\n'),
+    ('        if (must_download) {',
+     '        if (must_download && KeepLargeDirty(image)) {\n            return false;\n        }\n'
+     '        if (must_download && !TakePrefetched(image_id, image)) {'),
     # Time the per-image drain Cleanup still takes for an image the prefetch could not batch.
     # One GPU pipeline wait per eviction, against one wait for a whole batch in the batched path:
     # this is the stall the prefetch exists to remove, so keep it visible.
@@ -993,6 +1055,80 @@ for old, new in [
     ('(!high_priority_mode && must_download)) {', '(!DirtyEvictions() && must_download)) {'),
     ('    Configure(false);', '    Configure(false);\n    PrefetchDownloads();'),
     ('        Configure(true);', '        Configure(true);\n        PrefetchDownloads();'),
+    # The eviction budget counts visits, not evictions: skipped images (decoding,
+    # costly, or dirty images kept below the critical mark) burn it and stop the
+    # scan, so kept images shield everything behind them. Count evictions; bound
+    # the scan separately. gc_scan=upstream restores visit counting.
+    ('    size_t num_iterations = 0;',
+     '    size_t num_iterations = 0;\n    size_t num_scanned = 0;\n    constexpr size_t max_scanned = 8192;'),
+    ('        if (num_iterations == 0) {\n            return true;\n        }\n        --num_iterations;',
+     '        if (num_iterations == 0 || num_scanned >= max_scanned) {\n            return true;\n        }\n        ++num_scanned;\n'
+     '        if (::Eden::Performance::gc_count_visits.load(std::memory_order_relaxed)) {\n            --num_iterations;\n        }'),
+    # A costly image (ASTC kept as BC3, converted on the CPU) goes only past Eden's own critical
+    # mark, not when the console's pool alone is critical: rebuilding it decodes it again on the
+    # CPU, in memory the pool did not have (Mario Kart World: 1,561 evicted in one window, 3.4 GB
+    # of conversions and uploads in the next, and the decoder's allocation ended the session).
+    ('        if ((!aggressive_mode && True(image.flags & ImageFlagBits::CostlyLoad)) || (!DirtyEvictions() && must_download)) {',
+     '        const bool costly_kept = !(aggressive_mode && total_used_memory >= critical_memory) &&\n'
+     '                                 !::Eden::Performance::gc_old_costly && True(image.flags & ImageFlagBits::CostlyLoad);\n'
+     '        if (costly_kept || (!DirtyEvictions() && must_download)) {'),
+    ('            probe_costly_skips += !aggressive_mode && True(image.flags & ImageFlagBits::CostlyLoad);\n',
+     '            probe_costly_skips += costly_kept;\n'),
+    ('            probe_dirty_skips += !high_priority_mode && must_download;\n            return false;\n        }\n',
+     '            probe_dirty_skips += !high_priority_mode && must_download;\n            return false;\n        }\n'
+     '        if (!::Eden::Performance::gc_count_visits.load(std::memory_order_relaxed)) {\n            --num_iterations;\n        }\n'),
+    # The aggressive pass gets its own scan allowance: Configure resets the
+    # eviction budget per pass, and the scan counter must reset with it, or a
+    # first pass spent on skips would stillborn the second one. Runs after the
+    # Configure(true) pair above, whose first line this matches.
+    ('        Configure(true);',
+     '        Configure(true);\n        num_scanned = 0;'),
+    # While the console's pool is short (performance.h, GraphicsMemoryIsShort) the collector
+    # works as if past its first mark, past both once the pool is critical (GraphicsMemoryIsCritical),
+    # and stays so for the whole run instead of easing off after one eviction under a mark the
+    # pool never reaches.
+    ('    u64 ticks_to_destroy = 0;\n',
+     '    u64 ticks_to_destroy = 0;\n    const bool memory_short = ::Eden::Performance::GraphicsMemoryIsShort();\n'),
+    ('        num_iterations = aggressive_mode ? 40 : (high_priority_mode ? 20 : 10);\n',
+     '        if (memory_short) {\n'
+     '            // Short but not critical, only what 600 frames left unused goes (EDEN_NX2_TC_SHORT_AGE):\n'
+     '            // at 60, and 10 whenever use passed the texture cache\'s own critical mark, a race\n'
+     '            // evicted and rebuilt 1,000-2,400 textures every 600 frames, many still in use, while\n'
+     '            // the pool stayed short throughout (an image freed inside a graphics block does not\n'
+     '            // give the pool a larger free block). On the console the pool decides: critical\n'
+     '            // (GraphicsMemoryIsCritical) collects as before.\n'
+     '            static const u64 short_age = [] {\n'
+     '                const char* value = std::getenv("EDEN_NX2_TC_SHORT_AGE");\n'
+     '                return value != nullptr ? std::strtoull(value, nullptr, 10) : 600ULL;\n'
+     '            }();\n'
+     '            high_priority_mode = true;\n'
+     '            aggressive_mode = allow_aggressive && ::Eden::Performance::GraphicsMemoryIsCritical();\n'
+     '            ticks_to_destroy = (std::max)(aggressive_mode ? u64{10} : short_age, min_age);\n'
+     '        }\n'
+     '        num_iterations = aggressive_mode ? 40 : (high_priority_mode ? 20 : 10);\n'),
+    ('        if (aggressive_mode && total_used_memory < critical_memory) {',
+     '        if (aggressive_mode && !memory_short && total_used_memory < critical_memory) {'),
+    ('        } else if (high_priority_mode && total_used_memory < expected_memory) {',
+     '        } else if (high_priority_mode && !memory_short && total_used_memory < expected_memory) {'),
+    ('    if (total_used_memory >= critical_memory) {\n        Configure(true);',
+     '    if (total_used_memory >= critical_memory || memory_short) {\n        Configure(true);'),
+    # While the pool is short, costly images 300 frames unused (a course left behind) go too, in a
+    # pass of their own: kept whenever only the pool was short, Mario Kart World's next course took
+    # 1.2 GB of graphics memory within five seconds with nothing the collector could give back, and
+    # waiting until the pool was critical left a course load too little room (pro27: 1.37 GB usable,
+    # then out of memory within one window). ProsperoEden takes 10 frames on a light frame (a
+    # loading screen, astc_policy.h InBackground); without that header here, 300 always.
+    ('        num_scanned = 0;\n        PrefetchDownloads();\n        Collect();\n    }\n',
+     '        num_scanned = 0;\n        PrefetchDownloads();\n        Collect();\n    }\n'
+     '    const u64 old_age = 300;\n'
+     '    if (memory_short && frame_tick > old_age) {\n'
+     '        Configure(true);\n'
+     '        num_scanned = 0;\n'
+     '        ::Eden::Performance::gc_old_costly = true;\n'
+     '        PrefetchDownloads();\n'
+     '        ForEachCandidate(frame_tick - old_age, Cleanup);\n'
+     '        ::Eden::Performance::gc_old_costly = false;\n'
+     '    }\n'),
 ]:
     if gc.count(old) != 1:
         raise RuntimeError(f'Pinned GC anchor changed: {old}')
@@ -1260,6 +1396,135 @@ for old, new in shader_costs:
         new = ('    if (is_new) {\n        pipeline = CreateComputePipeline(key, shader);\n    }\n' + trace)
     if shader_source.count(old) != 1:
         raise RuntimeError(f'Shader pipeline anchor changed: {old[:60]}')
+    shader_source = shader_source.replace(old, new)
+# The driver's pipeline cache file (vulkan_pipelines.bin). Eden rewrote it in place (the source
+# now writes a temporary file and renames it; this keeps a failed copy from removing the cache): opening it
+# emptied it, and a large game's cache takes seconds to write, so a session that ended during the
+# write (the ten-second limit on leaving a game, a crash, rest mode) left it empty or cut off, and
+# every pipeline was compiled again at the next start (ProsperoEden #170). It is now written beside the old
+# file and renamed over it once whole, and leaving a game rewrites it only when pipelines were
+# added since it was last written.
+# The anchors include the timer the cost patches above add to the function.
+pipeline_cache_writes = [
+    ('PipelineCache::~PipelineCache() {\n'
+     '    if (use_vulkan_pipeline_cache && !vulkan_pipeline_cache_filename.empty()) {\n'
+     '        SerializeVulkanPipelineCache(vulkan_pipeline_cache_filename, vulkan_pipeline_cache,\n'
+     '                                     CACHE_VERSION);\n'
+     '    }\n'
+     '}\n',
+     'PipelineCache::~PipelineCache() {\n'
+     '    if (use_vulkan_pipeline_cache && !vulkan_pipeline_cache_filename.empty()) {\n'
+     '        // A flush still being written would race this one for the same file.\n'
+     '        serialization_thread.WaitForRequests();\n'
+     '        // Written after the game loaded and at each flush: with no pipeline added since,\n'
+     '        // the file already holds everything, and writing it again only delays leaving.\n'
+     '        const bool written = last_flush.time_since_epoch().count() != 0;\n'
+     '        if (!written || pipelines_since_flush != 0) {\n'
+     '            SerializeVulkanPipelineCache(vulkan_pipeline_cache_filename, vulkan_pipeline_cache,\n'
+     '                                         CACHE_VERSION);\n'
+     '        }\n'
+     '    }\n'
+     '}\n'),
+    ('''void PipelineCache::SerializeVulkanPipelineCache(const std::filesystem::path& filename,
+                                                 const vk::PipelineCache& pipeline_cache,
+                                                 u32 cache_version) try {
+    auto timer = Eden::Performance::VulkanTimer(18);
+    // Written beside the cache and renamed over it: the emulator stopped mid-write left the cache
+    // empty, and every later boot failed to read it.
+    auto temporary = filename;
+    temporary += ".tmp";
+    std::ofstream file(temporary, std::ios::binary);
+    file.exceptions(std::ifstream::failbit);
+    if (!file.is_open()) {
+        LOG_ERROR(Common_Filesystem, "Failed to open Vulkan driver pipeline cache file {}",
+                  Common::FS::PathToUTF8String(filename));
+        return;
+    }
+    file.write(VULKAN_CACHE_MAGIC_NUMBER.data(), VULKAN_CACHE_MAGIC_NUMBER.size())
+        .write(reinterpret_cast<const char*>(&cache_version), sizeof(cache_version));
+
+    size_t cache_size = 0;
+    std::vector<char> cache_data;
+    if (pipeline_cache) {
+        pipeline_cache.Read(&cache_size, nullptr);
+        cache_data.resize(cache_size);
+        pipeline_cache.Read(&cache_size, cache_data.data());
+    }
+    file.write(cache_data.data(), cache_size);
+    file.close();
+    std::error_code error;
+    std::filesystem::rename(temporary, filename, error);
+    if (error) {
+        LOG_ERROR(Common_Filesystem, "Failed to replace Vulkan driver pipeline cache file {}: {}",
+                  Common::FS::PathToUTF8String(filename), error.message());
+        std::filesystem::remove(temporary, error);
+        return;
+    }
+
+    LOG_INFO(Render_Vulkan, "Vulkan driver pipelines cached at: {}",
+             Common::FS::PathToUTF8String(filename));
+
+} catch (const std::ios_base::failure& e) {
+    LOG_ERROR(Common_Filesystem, "{}", e.what());
+    if (!Common::FS::RemoveFile(filename)) {
+        LOG_ERROR(Common_Filesystem, "Failed to delete Vulkan driver pipeline cache file {}",
+                  Common::FS::PathToUTF8String(filename));
+    }
+}
+''',
+'''void PipelineCache::SerializeVulkanPipelineCache(const std::filesystem::path& filename,
+                                                 const vk::PipelineCache& pipeline_cache,
+                                                 u32 cache_version) {
+    auto timer = Eden::Performance::VulkanTimer(18);  // as the port times the write it replaces
+    // Written whole beside the cache, then renamed over it: until the rename the previous cache
+    // stays as it was, and a write that fails or is cut short leaves it alone.
+    auto partial = filename;
+    partial += ".part";
+    std::error_code error;
+    try {
+        size_t cache_size = 0;
+        std::vector<char> cache_data;
+        if (pipeline_cache) {
+            pipeline_cache.Read(&cache_size, nullptr);
+            cache_data.resize(cache_size);
+            pipeline_cache.Read(&cache_size, cache_data.data());
+        }
+        {
+            std::ofstream file(partial, std::ios::binary | std::ios::trunc);
+            if (!file.is_open()) {
+                LOG_ERROR(Common_Filesystem, "Failed to open Vulkan driver pipeline cache file {}",
+                          Common::FS::PathToUTF8String(partial));
+                return;
+            }
+            file.exceptions(std::ofstream::failbit | std::ofstream::badbit);
+            file.write(VULKAN_CACHE_MAGIC_NUMBER.data(), VULKAN_CACHE_MAGIC_NUMBER.size())
+                .write(reinterpret_cast<const char*>(&cache_version), sizeof(cache_version))
+                .write(cache_data.data(), static_cast<std::streamsize>(cache_size));
+            file.flush();
+        }
+        std::filesystem::rename(partial, filename, error);
+        if (error) {
+            LOG_ERROR(Common_Filesystem, "Failed to replace Vulkan driver pipeline cache file {}: {}",
+                      Common::FS::PathToUTF8String(filename), error.message());
+            std::filesystem::remove(partial, error);
+            return;
+        }
+        LOG_INFO(Render_Vulkan, "Vulkan driver pipelines cached at: {}",
+                 Common::FS::PathToUTF8String(filename));
+    } catch (const std::ios_base::failure& e) {
+        LOG_ERROR(Common_Filesystem, "{}", e.what());
+        std::filesystem::remove(partial, error);
+    } catch (const std::bad_alloc&) {
+        // A copy of a large cache did not fit in memory: keep the one on disk.
+        LOG_ERROR(Render_Vulkan, "No memory to copy the Vulkan driver pipeline cache; kept the previous file");
+        std::filesystem::remove(partial, error);
+    }
+}
+'''),
+]
+for old, new in pipeline_cache_writes:
+    if shader_source.count(old) != 1:
+        raise RuntimeError(f'Pipeline cache write anchor changed: {old[:60]}')
     shader_source = shader_source.replace(old, new)
 shader_output = output / 'vk_pipeline_cache_cost.cpp'
 if not shader_output.exists() or shader_output.read_text() != shader_source:
