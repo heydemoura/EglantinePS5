@@ -673,8 +673,14 @@ int main(int argc, char** argv) {
         launch_error.clear();
         if (!rooms.BeginGame()) throw std::runtime_error("Join a room successfully or leave it before starting a game.");
         SCOPE_EXIT { rooms.EndGame(); };
+#if defined(EDEN_DEV_PROFILE) || defined(EDEN_MKW_DIAGNOSTICS)
+        // The timers these builds' reports read (EDEN_DEV_ lines, EDEN_GUEST_RUN, the MKW timers);
+        // off elsewhere, where a Timer is one look at the flag (performance.h timers_on).
+        Eden::Performance::timers_on = true;
+#endif
 #ifdef EDEN_DEV_VULKAN
         Eden::Performance::vulkan_cost_enabled = std::filesystem::exists(Eden::AppFile("cost-run.txt"));
+        if (Eden::Performance::vulkan_cost_enabled) Eden::Performance::timers_on = true;  // a cost run
         const bool performance_run = std::filesystem::exists(Eden::AppFile("performance-run.txt"));
 #ifdef EDEN_DEV_PROFILE
         Eden::Performance::texture_budget_log = true;  // EDEN_VULKAN_TEXTURE_BUDGET every 300 frames
@@ -874,6 +880,22 @@ int main(int argc, char** argv) {
                 } else if (entry.starts_with("cache_spin=")) {
                     // try_lock retries before a guest core sleeps on a GPU cache lock (0 = upstream).
                     Eden::Performance::cache_lock_spins = static_cast<unsigned>(std::strtoul(entry.c_str() + 11, nullptr, 10));
+                } else if (entry.starts_with("cpu_write_ahead=")) {
+                    // Buffer pages after a tracked write marked CPU-modified with it (performance.h).
+                    Eden::Performance::cpu_write_ahead = static_cast<unsigned>(std::min(256UL, std::strtoul(entry.c_str() + 16, nullptr, 10)));
+                } else if (entry == "cpu_write_defer=off") {
+                    // Guest writes wait for a GPU cache lock the GPU thread holds, as upstream (performance.h).
+                    Eden::Performance::cpu_write_defer = false;
+                } else if (entry == "cpu_read_skip=on") {
+                    // Reads skip the download check while a guest write holds the texture cache lock.
+                    Eden::Performance::cpu_read_skip = true;
+                } else if (entry == "dma_batch=off") {
+                    // One engine call per GPU command word, as upstream (performance.h dma_batch).
+                    Eden::Performance::dma_batch = false;
+                    std::printf("EDEN_DEV_DMA_BATCH 0\n");
+                } else if (entry == "timers=off") {
+                    // No Timer counts (EDEN_DEV_ lines read 0): what the timers cost a development build.
+                    Eden::Performance::timers_on = false;
                 } else if (entry == "gc_dirty=upstream") {
                     // Eden's rule: evict GPU-written textures from the "expected" memory mark on.
                     Eden::Performance::gc_keep_dirty = false;
