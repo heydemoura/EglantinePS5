@@ -1241,10 +1241,19 @@ void FillGuestMemory(std::uint8_t* at, int fill, std::size_t bytes) noexcept {
     std::memset(at, fill, bytes);
 }
 
-// The guest's kernel freed pages: every slot they cover whole goes back.
+// The guest's kernel freed pages (a free block of 2 MiB or more in its page heap): every slot they
+// cover whole goes back. EDEN_GUEST_FREE_RETURN=0 keeps freed slots held until they are reused.
+bool ReturnFreedSlots() noexcept {
+    static const bool on = [] {
+        const char* value = std::getenv("EDEN_GUEST_FREE_RETURN");
+        return value == nullptr || value[0] != '0';
+    }();
+    return on;
+}
+
 void GuestMemoryFreed(std::uint64_t offset, std::size_t bytes) noexcept {
     SparseRange* const range = guest_range.load(std::memory_order_acquire);
-    if (range == nullptr || !range->promote || bytes < SparseSlot) return;
+    if (range == nullptr || !range->promote || bytes < SparseSlot || !ReturnFreedSlots()) return;
     const std::uint64_t first = (offset + SparseSlot - 1) / SparseSlot;
     const std::uint64_t last = (offset + bytes) / SparseSlot; // exclusive
     for (std::uint64_t slot = first; slot < last; ++slot) {

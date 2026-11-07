@@ -51,6 +51,31 @@ A VMA dump at 80 s shows 3.79 GB of blocks holding 3.26 GB of allocations:
 - **ProsperoEden's guest-memory states (Zero/Shown).** They save CPU page tables, not memory.
   Eglantine's guest service is already newer here: it keeps a 512 MiB reserve.
 
+## Freed guest pages give their memory back (2026-11-07)
+
+Two bugs kept guest pages the game had freed in host memory until the guest reused them:
+
+- **The derived kernel pool and page heap were never built.** `headless/CMakeLists.txt` set the
+  core's sources to a list with `k_memory_manager.cpp` and `k_page_heap.cpp` derived, and the next
+  line overwrote it with `kernel.cpp`'s list. The original files were built, so the free hook and the
+  optimized-allocation fill rule never ran (`returns_free=0` on every console run).
+- **The free hook only saw single frees of a whole 2 MiB slot.** Pages come back in pieces. The hook
+  now sits where the guest kernel's page heap merges free buddies: once a free block of 2 MiB or more
+  forms, its slots go back. `EDEN_GUEST_FREE_RETURN=0` turns this off.
+
+Measured on MKW 1x (2 interleaved runs of 240 s each). With returns on, `returns_free` was 384–481
+and `returns_clear` was 0. Before, the slots had come back later, when the guest cleared them on
+reallocation (`returns_clear` 264).
+
+| | Returns on | Off (`=0`) |
+|---|---|---|
+| Guest memory held at the end | 4.4–4.5 GB | 4.0 GB (at 130 s) |
+| FPS | 24.6 / 26.4 | 19.3 / 24.1 |
+| Crash at | 163 / 180 s | 130 / 180 s |
+
+The crash stays: the guest really writes ~4.5 GB that it keeps. Freed memory came back on
+reallocation before as well, just later.
+
 ## The driver's own heap figure counts memory twice
 
 The PS5 winsys reports its whole allocation total for both of its heaps. On MKW, VMA's

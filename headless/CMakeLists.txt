@@ -1935,20 +1935,25 @@ string(REPLACE "${optimized_fill_site}"
     pool_source "${pool_source}")
 write_derived("${PORT_BUILD_DIR}/k_memory_manager.cpp" "${pool_source}")
 file(READ "${PROJECT_SOURCE_DIR}/src/core/hle/kernel/k_page_heap.cpp" page_heap_source)
-set(page_heap_free_site "void KPageHeap::Free(KPhysicalAddress addr, size_t num_pages) {\n    // Freeing no pages is a no-op.\n    if (num_pages == 0) {\n        return;\n    }\n")
-string(FIND "${page_heap_source}" "${page_heap_free_site}" page_heap_free_at)
-if(page_heap_free_at LESS 0)
-    message(FATAL_ERROR "Pinned page heap free changed; review the guest memory service.")
+# Freed guest pages give their host memory back once a whole 2 MiB slot is free. Pages come back
+# to the heap in pieces (a region's tail, a page group's blocks), so a hook on Free saw almost no
+# whole slot (MKW: returns_free=0 while the guest held 4.7 GB). The heap merges free buddies into
+# larger blocks under its pool lock; once a block of 2 MiB or more is free, nothing in the guest
+# can use its pages, and the slots it covers go back (they read zero until written again).
+set(page_heap_free_block_site "void KPageHeap::FreeBlock(KPhysicalAddress block, s32 index) {\n    do {\n        block = m_blocks[index++].PushBlock(block);\n    } while (block != 0);\n}\n")
+string(FIND "${page_heap_source}" "${page_heap_free_block_site}" page_heap_free_block_at)
+if(page_heap_free_block_at LESS 0)
+    message(FATAL_ERROR "Pinned page heap FreeBlock changed; review the guest memory service.")
 endif()
-string(REPLACE "${page_heap_free_site}"
-    "${page_heap_free_site}    ::Common::GuestMemoryFreed(GetInteger(addr) - Core::DramMemoryMap::Base, num_pages * PageSize);\n"
+string(REPLACE "${page_heap_free_block_site}"
+    "void KPageHeap::FreeBlock(KPhysicalAddress block, s32 index) {\n    for (;;) {\n        const KPhysicalAddress merged = m_blocks[index].PushBlock(block);\n        if (merged == 0) {\n            if (const size_t size = m_blocks[index].GetSize(); size >= ::Common::GuestFreedSlotBytes) {\n                ::Common::GuestMemoryFreed(GetInteger(block) - Core::DramMemoryMap::Base, size);\n            }\n            return;\n        }\n        block = merged;\n        ++index;\n    }\n}\n"
     page_heap_source "${page_heap_source}")
-string(PREPEND page_heap_source "#include <cstddef>\n#include <cstdint>\n#include \"core/device_memory.h\"\nnamespace Common { void GuestMemoryFreed(std::uint64_t offset, std::size_t bytes) noexcept; }\n")
+string(PREPEND page_heap_source "#include <cstddef>\n#include <cstdint>\n#include \"core/device_memory.h\"\nnamespace Common { void GuestMemoryFreed(std::uint64_t offset, std::size_t bytes) noexcept; inline constexpr std::size_t GuestFreedSlotBytes = std::size_t{2} << 20; }\n")
 write_derived("${PORT_BUILD_DIR}/k_page_heap.cpp" "${page_heap_source}")
-get_target_property(pool_core_sources core SOURCES)
-list(REMOVE_ITEM pool_core_sources hle/kernel/k_memory_manager.cpp hle/kernel/k_page_heap.cpp)
-list(APPEND pool_core_sources "${PORT_BUILD_DIR}/k_memory_manager.cpp" "${PORT_BUILD_DIR}/k_page_heap.cpp")
-set_property(TARGET core PROPERTY SOURCES "${pool_core_sources}")
+# Into core_sources (kernel.cpp's list above), which is what the core is built from: a list of
+# their own here was overwritten by the line after it, and the original pool and heap were built.
+list(REMOVE_ITEM core_sources hle/kernel/k_memory_manager.cpp hle/kernel/k_page_heap.cpp)
+list(APPEND core_sources "${PORT_BUILD_DIR}/k_memory_manager.cpp" "${PORT_BUILD_DIR}/k_page_heap.cpp")
 set_property(TARGET core PROPERTY SOURCES "${core_sources}")
 
 # Replace SDL audio with the optional native sink; the renderer stays null.
