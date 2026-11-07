@@ -118,7 +118,8 @@ extern "C" bool eden_fastmem64_site_demoted(unsigned long long location, unsigne
 // to the game's code, which loads elsewhere each session, with the game's build ID; another build's
 // list is ignored, and so is an older format's list learned under other window rules (EF64: before
 // stacks were given pages that agree with the window, full of sites only their misalignment
-// demoted). File: "EF65", the build ID (32 bytes), then per site its location less the code
+// demoted; EF65: before pieces with an unmapped page were shown, full of sites only those
+// demoted). Bump the format whenever the window's rules change. File: "EF66", the build ID (32 bytes), then per site its location less the code
 // start (8 bytes) and its IR instruction index (4 bytes).
 extern "C" std::size_t eden_fastmem64_load_sites(const char* path, unsigned long long code_start,
                                                  const unsigned char* build) {
@@ -127,7 +128,7 @@ extern "C" std::size_t eden_fastmem64_load_sites(const char* path, unsigned long
     char magic[4];
     unsigned char saved[32];
     std::size_t loaded = 0;
-    if (std::fread(magic, 1, 4, file) == 4 && std::memcmp(magic, "EF65", 4) == 0 &&
+    if (std::fread(magic, 1, 4, file) == 4 && std::memcmp(magic, "EF66", 4) == 0 &&
         std::fread(saved, 1, 32, file) == 32 && std::memcmp(saved, build, 32) == 0) {
         std::lock_guard lock{EdenFastmemSiteMutex()};
         u64 offset;
@@ -144,7 +145,7 @@ extern "C" std::size_t eden_fastmem64_save_sites(const char* path, unsigned long
     std::FILE* file = std::fopen(fresh.c_str(), "wb");
     if (!file) return 0;
     std::size_t written = 0;
-    bool ok = std::fwrite("EF65", 1, 4, file) == 4 && std::fwrite(build, 1, 32, file) == 32;
+    bool ok = std::fwrite("EF66", 1, 4, file) == 4 && std::fwrite(build, 1, 32, file) == 32;
     {
         std::lock_guard lock{EdenFastmemSiteMutex()};
         for (const auto& [location, inst] : EdenFastmemDemoted()) {

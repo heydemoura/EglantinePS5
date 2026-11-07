@@ -69,8 +69,25 @@ slower than the defaults on this title:**
   path.
 - With a fastmem arena, the page-reuse pass (Phase 3b) is off, so those accesses lose its grouping.
 
-## Possible next steps
+## Follow-ups (stacked PRs)
 
-- Run the page-reuse pass on demoted sites while the window is on (ProsperoEden does this).
-- Align the guest's memory placement to 16 KiB so more pieces can be shown.
-- Qualify on another 64-bit title, where the layout may suit the window better.
+| Step | PR | Change | Effect on MKW (1x) |
+|---|---|---|---|
+| 1 | #61 | Page reuse for demoted sites; no-arena "unwritten page" read rule; diagnostics | ~95k reuse groups; window 18.8 vs 24.8 FPS |
+| 2 | #62 | Read-trap disarm without the global lock where none is armed (core patch 0020) | ~12% guest-core lock wait gone; 21.6 vs 26.6 FPS |
+| 3 | #63 | Stacks get pages that agree with the window (core patch 0021, ProsperoEden 0060); list format EF65 | misaligned refusals 119k–361k → 1–2k |
+| 4 | this | Pieces with an unmapped page are shown (`EDEN_FASTMEM64_STRICT_PIECES=1` restores the strict rule); list format EF66 | unmapped refusals ~450k → 0; saved list 500k → 40k sites |
+
+After step 4, with a list learned under the current rules, the window **matches the defaults**: 22.5 / 23.6 /
+23.9 FPS against 22.4 / 22.9 FPS (the third defaults run crashed before its measurement). The warm-up
+session reached 26.2 FPS. Remaining refusals per session are small: about 100–1,100 partial, ~2,000 slot
+(Fine slots) and a few hundred blocked by GPU write tracking.
+
+**Bump the saved list's format (`EF66` in `fastmem-callback.cmake`) whenever the window's rules change:**
+a list learned under older rules keeps sites off the window that would now work.
+
+## Still open
+
+- **Fine slots:** reads of Fine (partly zero) slots are refused, so their sites are demoted.
+- **More titles:** qualify the window on another 64-bit title.
+- **Default:** the window stays opt-in until it beats the defaults by more than run-to-run noise.

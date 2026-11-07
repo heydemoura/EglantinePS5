@@ -546,8 +546,22 @@ struct Window64 {
         const std::size_t first = (address - region_at) / Piece * PiecePages;
         bool writable = true;
         auto& counts = window64_counts;
+        // A piece may hold unmapped pages beside its mapped ones (a stack's guard page, a lone TLS
+        // page): they show the backing that lines up with the piece, which only an access the
+        // guest's own page table would refuse can reach. Refusing them kept ~450k accesses of an
+        // MKW session off the window. The accessed page itself must be mapped.
+        // EDEN_FASTMEM64_STRICT_PIECES=1 refuses such pieces (as ProsperoEden's switch of that name).
+        static const bool strict = [] {
+            const char* value = std::getenv("EDEN_FASTMEM64_STRICT_PIECES");
+            return value != nullptr && value[0] == '1';
+        }();
+        if (!state.mapped[(address - region_at) / GuestPage])
+            return counts.piece_unmapped.fetch_add(1, std::memory_order_relaxed), false;
         for (std::size_t i = first; i < first + PiecePages; ++i) {
-            if (!state.mapped[i]) return counts.piece_unmapped.fetch_add(1, std::memory_order_relaxed), false;
+            if (!state.mapped[i]) {
+                if (strict) return counts.piece_unmapped.fetch_add(1, std::memory_order_relaxed), false;
+                continue;
+            }
             if (state.read_blocked[i]) return counts.piece_blocked.fetch_add(1, std::memory_order_relaxed), false;
             writable &= !state.write_blocked[i];
         }
@@ -556,6 +570,7 @@ struct Window64 {
         if (!state.consistent) {
             backing = 0;
             for (std::size_t i = first; i < first + PiecePages; ++i) {
+                if (!state.mapped[i]) continue;  // shown in line with the mapped ones
                 const std::uintptr_t at = backing_base + std::uintptr_t(state.backing_pages[i] - 1) * GuestPage -
                                           (i - first) * GuestPage;
                 if (!state.backing_pages[i] || (backing && at != backing))
@@ -657,6 +672,7 @@ struct Window64 {
                 if (!state.pieces[piece]) continue;
                 bool readable = true, writable = true;
                 for (std::size_t i = piece * PiecePages; i < (piece + 1) * PiecePages; ++i) {
+                    if (!state.mapped[i]) continue;  // an unmapped page's bits are stale
                     readable &= !state.read_blocked[i];
                     writable &= !state.write_blocked[i];
                 }
