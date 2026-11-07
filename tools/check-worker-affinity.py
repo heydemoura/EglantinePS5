@@ -23,10 +23,11 @@ using cpuset_t=uint64_t;
 #define CPU_WHICH_TID 1
 static uint64_t current=0x1fff, fail_mask=0;
 static unsigned max_leaf=0xb, level_type=1, apics[64];
-static bool fail_restore=false;
+static bool fail_restore=false, x2apic_zero=false;
 static constexpr std::array names{"CPUCore_0","CPUCore_1","CPUCore_2","CPUCore_3","GPU"};
 static unsigned __get_cpuid_max(unsigned,void*) {return max_leaf;}
-#define __cpuid_count(l,s,a,b,c,d) do {a=1;b=2;c=level_type<<8;d=apics[__builtin_ctzll(current)];} while(0)
+#define __cpuid_count(l,s,a,b,c,d) do {const unsigned id=apics[__builtin_ctzll(current)]; \
+ if((l)==1){a=0;b=id<<24;c=0;d=0;} else {a=1;b=2;c=level_type<<8;d=x2apic_zero?0:id;}} while(0)
 static int cpuset_getaffinity(int,int,int,size_t n,cpuset_t* out){assert(n==8);*out=current;return 0;}
 static int cpuset_setaffinity(int,int,int,size_t n,const cpuset_t* in){
  assert(n==8 && *in && !(*in&~0x1fffULL));
@@ -46,6 +47,12 @@ int main(){
  for(unsigned i=0;i<7;++i) apics[i]=i*2;
  for(unsigned i=7;i<13;++i) apics[i]=(i-7)*2+1;
  CheckWorkerTopology();assert((worker_cpus==std::array<unsigned,5>{0,1,2,3,4}) && current==0x1fff);
+ // Console: leaf 0xB gives x2APIC 0 everywhere, leaf 1 gives APIC 15-n (siblings 2k, 2k+1).
+ for(unsigned i=0;i<13;++i) apics[i]=15-i;
+ x2apic_zero=true;CheckWorkerTopology();x2apic_zero=false;
+ assert(worker_topology_ready && (worker_cpus==std::array<unsigned,5>{0,2,4,6,8}) && current==0x1fff);
+ for(unsigned i=0;i<7;++i) apics[i]=i*2;
+ for(unsigned i=7;i<13;++i) apics[i]=(i-7)*2+1;
  current=3;CheckWorkerTopology();assert(!worker_topology_ready && current==3);
  current=0x1fff;fail_mask=4;CheckWorkerTopology();assert(!worker_topology_ready && current==0x1fff);
  fail_mask=0;level_type=0;CheckWorkerTopology();assert(!worker_topology_ready && current==0x1fff);

@@ -180,10 +180,15 @@ void CheckWorkerTopology() {
         changed = true;
         unsigned a, b, c, d;
         __cpuid_count(0xb, 0, a, b, c, d);
-        // Architectural SMT level: x2APIC ID above the SMT shift identifies
+        // Architectural SMT level: APIC ID above the SMT shift identifies
         // the physical core. Do not assume OS CPU numbering matches APIC IDs.
         if (!b || ((c >> 8) & 0xff) != 1 || (a & 31) >= 16) break;
-        const unsigned core = d >> (a & 31);
+        const unsigned shift = a & 31;
+        // The console's leaf 0xB reports x2APIC ID 0 on every CPU, so take the 8-bit initial
+        // APIC ID from leaf 1 (correct there: CPU n has APIC 15-n; probe run 2026-11-03).
+        __cpuid_count(1, 0, a, b, c, d);
+        (void)d;
+        const unsigned core = (b >> 24) >> shift;
         cpu_core[cpu] = static_cast<int>(core);
         if (count == cores.size() ||
             std::find(cores.begin(), cores.begin() + count, core) != cores.begin() + count) continue;
