@@ -1,7 +1,7 @@
 # Shorter x64 sequences for three guest patterns that were hot in a large game's moving-route
 # profile, and the A64 blocks' frame pointer set once per JIT entry. Backported from ProsperoEden
-# (GPL-3.0-or-later). Opt-in: EDEN_JIT_FAST_PATHS=1 (env.txt) turns all four on, or one at a time
-# EDEN_JIT_FCMP_ADC=1, EDEN_JIT_LIGHT_DMB=1, EDEN_JIT_CHECKBIT_FLAGS=1, EDEN_JIT_FRAME_ONCE=1. They are
+# (GPL-3.0-or-later). On by default: EDEN_JIT_FAST_PATHS=0 (env.txt) turns all four off, or one at a
+# time EDEN_JIT_FCMP_ADC=0, EDEN_JIT_LIGHT_DMB=0, EDEN_JIT_CHECKBIT_FLAGS=0, EDEN_JIT_FRAME_ONCE=0. They are
 # read once, when the first JIT is created (after the app applies env.txt), so the run-code prelude
 # and every block agree; the log prints EDEN_JIT_FAST_PATHS with the result.
 #
@@ -130,21 +130,21 @@ macro(eden_fast_paths_sources)
 #include <cstdlib>
 // The fast-path switches (fast_paths.cmake) and their one-time configuration from env.txt.
 extern "C" {
-bool eden_fcmp_adc = false, eden_light_dmb = false, eden_checkbit_flags = false, eden_jit_frame_once = false;
+bool eden_fcmp_adc = true, eden_light_dmb = true, eden_checkbit_flags = true, eden_jit_frame_once = true;
 unsigned long long eden_dmb_dropped = 0, eden_checkbit_fused = 0;
 void eden_fast_paths_configure() {
     static bool configured = false;
     if (__atomic_exchange_n(&configured, true, __ATOMIC_ACQ_REL)) return;
-    const auto on = [](const char* name) {
+    const auto off = [](const char* name) {
         const char* all = std::getenv("EDEN_JIT_FAST_PATHS");
         const char* one = std::getenv(name);
-        return (all != nullptr && all[0] == '1') || (one != nullptr && one[0] == '1');
+        return (all != nullptr && all[0] == '0') || (one != nullptr && one[0] == '0');
     };
-    // Only ever turns a switch on: tests set them directly.
-    if (on("EDEN_JIT_FCMP_ADC")) eden_fcmp_adc = true;
-    if (on("EDEN_JIT_LIGHT_DMB")) eden_light_dmb = true;
-    if (on("EDEN_JIT_CHECKBIT_FLAGS")) eden_checkbit_flags = true;
-    if (on("EDEN_JIT_FRAME_ONCE")) eden_jit_frame_once = true;
+    // Only ever turns a switch off: tests set them directly.
+    if (off("EDEN_JIT_FCMP_ADC")) eden_fcmp_adc = false;
+    if (off("EDEN_JIT_LIGHT_DMB")) eden_light_dmb = false;
+    if (off("EDEN_JIT_CHECKBIT_FLAGS")) eden_checkbit_flags = false;
+    if (off("EDEN_JIT_FRAME_ONCE")) eden_jit_frame_once = false;
     std::printf("EDEN_JIT_FAST_PATHS fcmp_adc=%d light_dmb=%d checkbit_flags=%d frame_once=%d\n", eden_fcmp_adc,
                 eden_light_dmb, eden_checkbit_flags, eden_jit_frame_once);
 }

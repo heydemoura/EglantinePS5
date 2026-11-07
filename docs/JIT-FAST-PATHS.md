@@ -6,12 +6,12 @@ were hot in a racing game's profile:
 
 | Switch (env.txt) | Change |
 |---|---|
-| `EDEN_JIT_FCMP_ADC=1` | FCMP/FCMPE flags: `adc cl, cl; shl cl, 4` instead of `rcl cl, 5`, which Zen 2 runs as microcode |
-| `EDEN_JIT_LIGHT_DMB=1` | DMB `*LD`/`*ST` emit no host fence (x86 ordering already holds). Full DMB uses `lock or [rsp], 0` instead of `mfence` |
-| `EDEN_JIT_CHECKBIT_FLAGS=1` | CBZ/CBNZ/TBZ/TBNZ terminals branch on the setter's flags instead of a stack store and reload, when the bytes in between are verified |
-| `EDEN_JIT_FRAME_ONCE=1` | A64 blocks' frame pointer set once per RunCode/StepCode entry instead of saved, set and restored in every block |
+| `EDEN_JIT_FCMP_ADC` | FCMP/FCMPE flags: `adc cl, cl; shl cl, 4` instead of `rcl cl, 5`, which Zen 2 runs as microcode |
+| `EDEN_JIT_LIGHT_DMB` | DMB `*LD`/`*ST` emit no host fence (x86 ordering already holds). Full DMB uses `lock or [rsp], 0` instead of `mfence` |
+| `EDEN_JIT_CHECKBIT_FLAGS` | CBZ/CBNZ/TBZ/TBNZ terminals branch on the setter's flags instead of a stack store and reload, when the bytes in between are verified |
+| `EDEN_JIT_FRAME_ONCE` | A64 blocks' frame pointer set once per RunCode/StepCode entry instead of saved, set and restored in every block |
 
-`EDEN_JIT_FAST_PATHS=1` turns all four on. The switches are read once, when the first JIT is
+**On by default** (since Phase 3d). `EDEN_JIT_FAST_PATHS=0` turns all four off, and `=0` on a single switch turns that one off. The switches are read once, when the first JIT is
 created (after `env.txt` is applied), so the run-code prelude and every block agree. The log
 prints `EDEN_JIT_FAST_PATHS fcmp_adc=… light_dmb=… checkbit_flags=… frame_once=…`.
 

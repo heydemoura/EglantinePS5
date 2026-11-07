@@ -1654,7 +1654,7 @@ static void CheckPageReuse() {
         cases += 3;
     }
     memory.program_override = nullptr;
-    eden_page_reuse = false;  // opt-in on the console (EDEN_JIT_PAGE_REUSE=1)
+    eden_page_reuse = true;
     require(eden_page_reuse_groups > groups_before);
     require(munmap(host, 16 * 4096) == 0);
     std::printf("Page reuse PASS: %u cases, %llu groups of %llu accesses\n", cases,
@@ -1751,11 +1751,7 @@ static void CheckFastPaths() {
 }
 
 int main(int argc, char** argv) {
-    // The direct page table is opt-in on the console; the checks run with it.
-    setenv("EDEN_JIT_TABLE", "1", 1);
-    // Every JIT check runs with the fast paths (frame pointer once included); CheckFastPaths
-    // also runs each of the other three off.
-    setenv("EDEN_JIT_FAST_PATHS", "1", 1);
+    // The checks run with the defaults: direct table, page reuse and fast paths on.
     CheckSparseTables();
     if (argc == 2 && std::strcmp(argv[1], "--link-check") == 0) {
         CheckLinks();
