@@ -127,8 +127,14 @@ extern "C" bool eden_jit_shared;  // headless/dynarmic/jit_group_support.inc
 #endif
 #include "profiles.h"
 #include "stop_limit.h"
+#include "core/device_memory.h"
+#include "core/hle/kernel/k_memory_layout.h"
+#include "core/hle/kernel/k_memory_manager.h"
+#include "core/hle/kernel/kernel.h"
 namespace Common {
 bool SparseTablesAvailable() noexcept; // src/memory_pages.cpp
+void GuestMemoryUsage(std::size_t* span, std::size_t* held) noexcept;
+std::size_t GuestMemoryHeldIn(std::uint64_t offset, std::size_t bytes) noexcept;
 }
 #if defined(EDEN_DEV_PROFILE) || defined(EDEN_DEV_ROM_ID)
 static bool dev_stop_hang = false; // dev-settings stop_hang=on
@@ -1621,6 +1627,40 @@ int main(int argc, char** argv) {
                     if (!running || !running->IsPoweredOn()) return 0;
                     auto* const process = running->ApplicationProcess();
                     return process ? process->GetUsedUserPhysicalMemorySize(running->Kernel()) : 0;
+                });
+                Eden::Performance::guest_pool_report.store([] {
+                    auto* const running = reporting_system;
+                    if (!running || !running->IsPoweredOn()) return;
+                    auto& kernel = running->Kernel();
+                    struct PoolRegion { const char* name; u32 type; };
+                    static constexpr PoolRegion pools[] = {
+                        {"application", static_cast<u32>(Kernel::KMemoryRegionType_DramApplicationPool.GetValue())},
+                        {"applet", static_cast<u32>(Kernel::KMemoryRegionType_DramAppletPool.GetValue())},
+                        {"system_nonsecure", static_cast<u32>(Kernel::KMemoryRegionType_DramSystemNonSecurePool.GetValue())},
+                        {"system", static_cast<u32>(Kernel::KMemoryRegionType_DramSystemPool.GetValue())},
+                    };
+                    char line[512];
+                    int length = std::snprintf(line, sizeof(line), "EDEN_GUEST_POOLS");
+                    std::size_t outside = 0;
+                    for (const auto& pool : pools) {
+                        std::size_t held = 0, span = 0;
+                        for (const auto& region : kernel.MemoryLayout().GetPhysicalMemoryRegionTree()) {
+                            if (!region.IsDerivedFrom(pool.type)) continue;
+                            span += region.GetSize();
+                            held += ::Common::GuestMemoryHeldIn(region.GetAddress() - Core::DramMemoryMap::Base, region.GetSize());
+                        }
+                        // (Not the kernel's free size: its pool lock needs a guest thread.)
+                        outside += held;
+                        if (length > 0 && static_cast<std::size_t>(length) < sizeof(line))
+                            length += std::snprintf(line + length, sizeof(line) - length, " %s=held:%zu/span:%zu",
+                                                    pool.name, held >> 20, span >> 20);
+                    }
+                    std::size_t guest_span = 0, guest_held = 0;
+                    ::Common::GuestMemoryUsage(&guest_span, &guest_held);
+                    if (length > 0 && static_cast<std::size_t>(length) < sizeof(line))
+                        std::snprintf(line + length, sizeof(line) - length, " other_held=%zu (MiB)\n",
+                                      (guest_held > outside ? guest_held - outside : 0) >> 20);
+                    std::fputs(line, stderr);
                 });
                 system.Run();
 #if defined(EDEN_DEV_PROFILE) && defined(PS5_NATIVE)

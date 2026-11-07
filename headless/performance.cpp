@@ -430,6 +430,7 @@ static void RefreshFreeMemory() {
                      largest >> 20, int(view.short_memory), guest_held >> 20,
                      kernel_memory ? kernel_memory() >> 20 : 0ULL);
         ReportHeap("every 20 s");
+        if (const auto pools = guest_pool_report.load(std::memory_order_relaxed)) pools();
     }
     // The heap's empty spaces go back to the pool while it is short (every 2 s at most).
     static std::atomic<long long> trimmed_ns{0};

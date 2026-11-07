@@ -396,6 +396,8 @@ inline std::atomic<bool (*)()> graphics_memory_probe{nullptr};
 // The kernel's count of the guest's mapped physical memory, installed while a game runs (main.cpp):
 // the memory report tells it from the slots the sparse backing committed.
 inline std::atomic<unsigned long long (*)()> guest_kernel_memory{nullptr};
+// Per guest-kernel pool: what the kernel hands out and the host memory behind the pool (main.cpp).
+inline std::atomic<void (*)()> guest_pool_report{nullptr};
 // Graphics memory still free: the largest block of the direct memory pool, which is what the
 // driver's next allocation can be given. Installed by the PS5 build (performance.cpp).
 //
