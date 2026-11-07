@@ -22,6 +22,7 @@
 #include "common/host_memory.h"
 #include "common/sparse_large_vector.h"
 #include "common/page_table.h"
+#include "core/memory/read_traps.h"
 #include "../src/fastmem.h"
 #include <csignal>
 #include <sys/wait.h>
@@ -1813,6 +1814,31 @@ static void CheckWindow64() {
     require(Eden::Fastmem::Window64Base() == 0 && Eden::Fastmem::window64_fault.load() == nullptr);
 }
 
+// Core read traps' per-area summary (tools/eglantine-patches/0020-read-trap-areas.patch): MayHold is
+// false only where no page is armed, through arms, disarms by generation, drops and clears.
+static void CheckReadTrapAreas() {
+    Core::Memory::ReadTraps traps;
+    unsigned cases = 0;
+    const auto expect = [&](bool value) { require(value); ++cases; };
+    expect(!traps.MayHold(0, 1 << 20));
+    const u64 g1 = traps.NewGeneration();
+    traps.Arm(0x1000, g1);          // area 8 (page 0x1000 >> 9)
+    traps.Arm(0x1001, g1);
+    expect(traps.MayHold(0x1000, 0x1001) && traps.MayHold(0x10ff, 0x1100));
+    expect(!traps.MayHold(0x1200, 0x1300));  // the next 2 MiB area
+    const u64 g2 = traps.NewGeneration();
+    traps.Arm(0x1200, g2);
+    traps.Disarm(0x1000, 0x2000, g1, [](u64) {});  // only g1's pages go
+    expect(!traps.MayHold(0x1000, 0x1200) && traps.MayHold(0x1200, 0x1201));
+    traps.Drop(0x1200, 0x1201);
+    expect(!traps.MayHold(0, 0x100000) && traps.Empty());
+    traps.Arm(0x5000, traps.NewGeneration());
+    expect(traps.MayHold(0, 0x100000));      // a wide range answers true whenever any is armed
+    traps.Clear();
+    expect(!traps.MayHold(0x5000, 0x5001));
+    std::printf("Read trap areas PASS: %u cases\n", cases);
+}
+
 int main(int argc, char** argv) {
     // The checks run with the defaults: direct table, page reuse and fast paths on.
     CheckSparseTables();
@@ -1879,6 +1905,7 @@ int main(int argc, char** argv) {
     CheckPageReuse();
     CheckFastPaths();
     CheckWindow64();
+    CheckReadTrapAreas();
     CheckAtomicLoop(backing, false);
     CheckAtomicLoopA32(backing, false);
     CheckSharedJit(2, true, 2, true);
