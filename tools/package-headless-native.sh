@@ -88,6 +88,11 @@ assert built == value['contentVersion'], f'the program says {built}, param.json 
 # The console gives a 120 Hz output (Settings > Video, headless/display_refresh.h) only to a title
 # that declares it. Declaring it changes nothing by itself: the output stays at 60 Hz until asked.
 assert int(value['attribute3']) & 0x80040 == 0x80040, 'param.json no longer declares the 120 Hz output'
+# On a PS5 Pro, bit 22 (0x400000) gives the title the Pro memory pool (+1.19 GiB direct memory) and
+# bit 27 (0x8000000) keeps the high CPU clock with it (kernel log: "[BAPM] CPU/GPU Frequency: High
+# CPU Frequency", 3200 MHz on every core). Without bit 22 the title runs as a base-PS5 game with the
+# smaller pool, and Mario Kart World at 1x runs out of device memory after 80-154 s.
+assert int(value['attribute3']) & 0x8400000 == 0x8400000, 'param.json lost the Pro memory/high CPU bits'
 runpy.run_path(str(root / 'tools/load_alignment.py'))['check_load_alignment']((app / 'eboot.bin').read_bytes())
 profile = (root / 'build/headless-native/CMakeCache.txt').read_text()
 assert sum(profile.count('EDEN_DEVICE_FRONTEND:BOOL=' + v) for v in ('ON', 'OFF')) == 1
