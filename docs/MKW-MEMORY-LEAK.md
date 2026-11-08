@@ -208,7 +208,7 @@ MKW 1x, early packing (`EDEN_CRAM_PACK=1 EDEN_CRAM_PACK_BELOW_MIB=4096 EDEN_CRAM
 |---|---|---|
 | b103 | GPU split off | 2/2 runs with the event |
 | b108 | MME read-ahead off (`EDEN_NX2_DMA_READ_AHEAD=0`) | 2/3 runs with the event |
-| b109 | native MME macros off (`EDEN_NX2_MME_NATIVE=0`) | prime with the event, device lost |
+| b109 | native MME macros off (`EDEN_NX2_MME_NATIVE=0`) | every run with the event; prime device lost |
 
 **Next:**
 - Find where the macro's parameters come from at that point: the command list words around the
