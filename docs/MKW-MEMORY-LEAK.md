@@ -173,3 +173,44 @@ Before: every 1x session that reached the race load ended within 131–211 s, by
   12–337 MiB, with 5.7–6.2 GB of game memory held. Making packing safe is the way to give that back.
 - Findings 2–4 above (scattered free memory, the collector's double count, heap growth) are
   unchanged.
+
+## Packing safety (branch diag/pack-safety)
+
+MKW 1x, early packing (`EDEN_CRAM_PACK=1 EDEN_CRAM_PACK_BELOW_MIB=4096 EDEN_CRAM_PACK_COLD_S=20`).
+
+**Packing itself is correct.**
+- `EDEN_CRAM_PACK_KEEP=1` keeps a copy of every packed slot and compares it on unpack: 1,627
+  unpacks compared, 0 differed.
+- The shared zero block was never written (`zero_block_dirty=0`).
+- Garbage persists with the GPU split off (`EDEN_NX2_SPLIT=0`).
+
+**GPU threads no longer unpack.**
+- `EDEN_CRAM_UNPACKERS` counts unpacks by thread name.
+- Before: draws past the index cap appeared only in runs where the command reader ("GPU") unpacked.
+- Skipping slots with pages in the GPU caches cut that down but did not stop it: a slot can be
+  reached before it is cached.
+- Core patch 0053 now reports every page DeviceMemoryManager maps for the GPU. Slots holding
+  any such page are never packed.
+- With 0053 (b107): no unpack by a GPU thread, no GPU hang, and 354–518 MiB packed (it was
+  0.4–1.9 GB when everything cold was packable).
+
+**The garbage draws are not packing's.**
+- Even with no GPU unpack, these runs still showed the race-load event:
+  - 16 indexed draws of ~1.1–1.4 billion indices, dropped by 0051.
+  - The draw macro at 0x1e6 failing with "instruction limit exceeded" every ~0.1 s.
+  - Then a slideshow (0.1–0.7 fps), corrupted textures, or a device lost.
+- One count was 1065353216 = 0x3F800000, the float 1.0: the macro is fed a float where the game
+  puts a count.
+- The same event appears with packing off, just less often: b94 1 of 3 runs, b93 1 of 2.
+- Ruled out as its cause:
+
+| Run | Change | Result |
+|---|---|---|
+| b103 | GPU split off | 2/2 runs with the event |
+| b108 | MME read-ahead off (`EDEN_NX2_DMA_READ_AHEAD=0`) | 2/3 runs with the event |
+| b109 | native MME macros off (`EDEN_NX2_MME_NATIVE=0`) | prime with the event, device lost |
+
+**Next:**
+- Find where the macro's parameters come from at that point: the command list words around the
+  0x1e6 calls, compared between a good run and a bad one.
+- Packing is safe to turn back on only after that.

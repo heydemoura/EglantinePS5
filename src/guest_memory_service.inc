@@ -165,6 +165,38 @@ struct PackedSlot {
     std::uint32_t size = 0;
 };
 std::atomic<PackedSlot*> packed_slots{nullptr}; // per slot of the guest's range, made by the scanner
+// Diagnostic (EDEN_CRAM_PACK_KEEP=1): a packed slot keeps its block, and the unpack compares what it
+// unpacked with it. A difference means the slot's data changed while it was packed (written through a
+// mapping other than the slot's own). Saves no memory: for finding what packing breaks.
+bool PackKeep() noexcept {
+    static const bool on = [] {
+        const char* value = std::getenv("EDEN_CRAM_PACK_KEEP");
+        return value != nullptr && value[0] == '1';
+    }();
+    return on;
+}
+std::int64_t* pack_kept = nullptr; // per slot: the block a packed slot kept, -1 none
+// Pages of each slot the GPU's caches hold (eden_guest_gpu_cached, from the core's device memory
+// manager): such a slot is not packed. With packing, Mario Kart World's emulated GPU read impossible
+// draw arguments (1.8-2.9 billion indices) and the GPU hung, only in sessions where the GPU thread
+// itself touched packed slots; the slots' data came back intact, so what the GPU reads through its
+// caches and their ordering must not meet a packed slot. EDEN_CRAM_PACK_GPU=1 packs them anyway.
+std::atomic<std::atomic<std::int32_t>*> gpu_cached_table{nullptr};
+std::size_t gpu_cached_slots = 0;
+std::atomic<std::uint64_t> pack_gpu_skips{0}, pack_gpu_marked{0};
+// Slots a GPU thread (the command reader "GPU", or "GPUBack") ever had to unpack: never packed again.
+// The caches' count misses what the command reader reads (command lists, draw arguments), and one
+// such unpack was enough for impossible draws.
+std::atomic<std::uint8_t>* gpu_touched = nullptr;
+// Diagnostic: which threads touched packed slots (unpacks by thread name, 16 names at most).
+struct Unpacker {
+    char name[24];
+    std::atomic<std::uint32_t> count;
+};
+Unpacker unpackers[16];
+std::atomic_flag unpackers_lock = ATOMIC_FLAG_INIT;
+void CountUnpacker(std::size_t slot) noexcept;
+std::atomic<std::uint64_t> pack_keep_compared{0}, pack_keep_differed{0};
 std::atomic<std::uint64_t> packed_count{0}, packed_bytes{0}, packs{0}, unpacks{0}, pack_skips{0};
 
 // The packed store: packed data lives in 2 MiB blocks of direct memory of its own, filled one after
@@ -507,6 +539,28 @@ bool UnpackSlot(SparseRange& range, std::size_t slot) noexcept {
     const int out = LZ4_decompress_safe(static_cast<const char*>(table[slot].data), static_cast<char*>(view),
                                         static_cast<int>(table[slot].size), static_cast<int>(SparseSlot));
     if (out != static_cast<int>(SparseSlot)) std::abort(); // the guest's data is gone: never carry on
+    if (pack_kept != nullptr && pack_kept[slot] >= 0) {
+        void* kept_view = reinterpret_cast<void*>(cpu_mapping_hint);
+        if (sceKernelMapDirectMemory(&kept_view, SparseSlot, PROT_READ, 0, pack_kept[slot], SparseSlot) == 0) {
+            pack_keep_compared.fetch_add(1, std::memory_order_relaxed);
+            const auto* a = static_cast<const std::uint64_t*>(view);
+            const auto* b = static_cast<const std::uint64_t*>(kept_view);
+            for (std::size_t i = 0; i < SparseSlot / 8; ++i)
+                if (a[i] != b[i]) {
+                    if (pack_keep_differed.fetch_add(1, std::memory_order_relaxed) < 8) {
+                        char line[200];
+                        const int n = std::snprintf(line, sizeof(line),
+                            "EDEN_CRAM_PACK_KEEP slot %zu changed while packed: word %zu unpacked %#llx kept %#llx\n",
+                            slot, i, (unsigned long long)a[i], (unsigned long long)b[i]);
+                        if (n > 0) Note(line);
+                    }
+                    break;
+                }
+            (void)munmap(kept_view, SparseSlot);
+        }
+        (void)sceKernelReleaseDirectMemory(pack_kept[slot], SparseSlot);
+        pack_kept[slot] = -1;
+    }
     if (munmap(view, SparseSlot) != 0) std::abort();
     if (!MapSlot(at, PROT_READ | PROT_WRITE, physical)) {
         (void)sceKernelReleaseDirectMemory(physical, SparseSlot);
@@ -750,6 +804,27 @@ bool WaitForBlock(Promote&& promote) noexcept {
 
 // How many writes of the guest's memory are waiting for a block now (headless/performance.cpp):
 // while any is, the graphics caches are told no memory is free.
+// A page of the guest's memory the GPU's caches now hold (+1) or no longer hold (-1), from the core's
+// device memory manager. Counted per slot; packing skips slots with any (PackSlot).
+extern "C" void eden_guest_gpu_cached(const void* host, int delta) noexcept {
+    SparseRange* const range = guest_range.load(std::memory_order_acquire);
+    if (range == nullptr) return;
+    const std::uintptr_t begin = range->begin.load(std::memory_order_relaxed);
+    const auto at = reinterpret_cast<std::uintptr_t>(host);
+    if (at < begin || at >= range->end) return;
+    auto* table = gpu_cached_table.load(std::memory_order_acquire);
+    if (table == nullptr) {
+        const std::size_t slots = (range->end - begin) / SparseSlot;
+        auto* made = new (std::nothrow) std::atomic<std::int32_t>[slots]();
+        if (made == nullptr) return;
+        gpu_cached_slots = slots;
+        if (gpu_cached_table.compare_exchange_strong(table, made, std::memory_order_acq_rel)) table = made;
+        else delete[] made;
+    }
+    const std::size_t slot = (at - begin) / SparseSlot;
+    if (slot < gpu_cached_slots) table[slot].fetch_add(delta, std::memory_order_acq_rel);
+}
+
 extern "C" unsigned eden_guest_memory_wanted(void) noexcept {
     return memory_waiters.load(std::memory_order_acquire);
 }
@@ -849,6 +924,7 @@ bool HandleGuestWriteFault(void* fault) noexcept {
             done = PromoteShared(*range, slot);
         } else if (state == SlotPacked) {
             done = UnpackSlot(*range, slot);
+            if (done) CountUnpacker(slot);
         }
         return done;
     };
@@ -1138,6 +1214,21 @@ bool PackSlot(SparseRange& range, std::size_t slot) noexcept {
 #ifdef PS5_NATIVE
     PackedSlot* const table = packed_slots.load(std::memory_order_acquire);
     if (table == nullptr) return false;
+    static const bool pack_gpu = [] {
+        const char* value = std::getenv("EDEN_CRAM_PACK_GPU");
+        return value != nullptr && value[0] == '1';
+    }();
+    if (auto* gpu_cached = gpu_cached_table.load(std::memory_order_acquire);
+        !pack_gpu && gpu_cached != nullptr && slot < gpu_cached_slots &&
+        gpu_cached[slot].load(std::memory_order_acquire) > 0) {
+        pack_gpu_skips.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+    if (!pack_gpu && gpu_touched != nullptr && slot < gpu_cached_slots &&
+        gpu_touched[slot].load(std::memory_order_acquire) != 0) {
+        pack_gpu_skips.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
     LockSlot(range, slot);
     if (SlotState(range, slot) != SlotOwn) {
         UnlockSlot(range, slot, SlotState(range, slot));
@@ -1166,7 +1257,7 @@ bool PackSlot(SparseRange& range, std::size_t slot) noexcept {
         return false;
     }
     // The slot's block, mapped nowhere now: the store may take it when the pool has no block.
-    std::int64_t donate = range.physical[slot];
+    std::int64_t donate = PackKeep() && pack_kept != nullptr ? -1 : range.physical[slot];
     void* const data = StoreAlloc(static_cast<std::size_t>(size), &donate);
     if (data == nullptr) {
         // No room anywhere (the store's address space is full): the block, untouched, comes back.
@@ -1176,8 +1267,11 @@ bool PackSlot(SparseRange& range, std::size_t slot) noexcept {
         return false;
     }
     std::memcpy(data, pack_scratch.data(), static_cast<std::size_t>(size));
-    if (donate >= 0 && !KeepForUnpack(donate) && sceKernelReleaseDirectMemory(donate, SparseSlot) != 0)
+    if (PackKeep() && pack_kept != nullptr) {
+        pack_kept[slot] = range.physical[slot];
+    } else if (donate >= 0 && !KeepForUnpack(donate) && sceKernelReleaseDirectMemory(donate, SparseSlot) != 0) {
         std::abort();
+    }
     range.physical[slot] = -1;
     guest_committed.fetch_sub(SparseSlot, std::memory_order_relaxed);
     table[slot] = {data, static_cast<std::uint32_t>(size)};
@@ -1237,7 +1331,71 @@ std::uint64_t ColdHash(std::uintptr_t at) noexcept {
 
 void PackPass(SparseRange& range, std::size_t slots, std::vector<std::size_t>& candidates) noexcept;
 
+// Diagnostic: the zero block (every untouched slot shows it, and the sparse tables' unused parts) must
+// stay zero. Written through a mapping that should not allow it, every untouched slot of the game
+// would read that garbage. Checked each pass through a read-only view of its own.
+std::atomic<std::uint64_t> zero_block_dirty{0};
+void CheckZeroBlock() noexcept {
+#ifdef PS5_NATIVE
+    static const volatile std::uint64_t* view = []() -> const volatile std::uint64_t* {
+        void* at = reinterpret_cast<void*>(cpu_mapping_hint);
+        if (zero_block < 0 || sceKernelMapDirectMemory(&at, SparseSlot, PROT_READ, 0, zero_block, SparseSlot) != 0)
+            return nullptr;
+        return static_cast<const volatile std::uint64_t*>(at);
+    }();
+    if (view == nullptr) return;
+    for (std::size_t i = 0; i < SparseSlot / 8; i += 8)
+        if (view[i] != 0) {
+            if (zero_block_dirty.fetch_add(1, std::memory_order_relaxed) < 4) {
+                char line[160];
+                const int n = std::snprintf(line, sizeof(line), "EDEN_CRAM_ZERO_BLOCK written: word %zu is %#llx\n", i,
+                                            (unsigned long long)view[i]);
+                if (n > 0) Report(line);
+            }
+            return;
+        }
+#endif
+}
+
+#ifdef PS5_NATIVE
+extern "C" int pthread_getname_np(pthread_t, char*, std::size_t);
+#endif
+void CountUnpacker(std::size_t slot) noexcept {
+    char name[24] = "?";
+#ifdef PS5_NATIVE
+    (void)pthread_getname_np(pthread_self(), name, sizeof(name));
+#endif
+    name[sizeof(name) - 1] = 0;
+    if ((std::strcmp(name, "GPU") == 0 || std::strcmp(name, "GPUBack") == 0) && gpu_touched != nullptr &&
+        slot < gpu_cached_slots && gpu_touched[slot].exchange(1, std::memory_order_acq_rel) == 0)
+        pack_gpu_marked.fetch_add(1, std::memory_order_relaxed);
+    while (unpackers_lock.test_and_set(std::memory_order_acquire)) {}
+    for (auto& entry : unpackers) {
+        if (entry.name[0] == 0) std::memcpy(entry.name, name, sizeof(name));
+        if (std::strcmp(entry.name, name) == 0) {
+            entry.count.fetch_add(1, std::memory_order_relaxed);
+            break;
+        }
+    }
+    unpackers_lock.clear(std::memory_order_release);
+}
+void ReportUnpackers() noexcept {
+    char line[512];
+    int length = std::snprintf(line, sizeof(line), "EDEN_CRAM_UNPACKERS");
+    for (auto& entry : unpackers) {
+        if (entry.name[0] == 0 || length <= 0 || length >= static_cast<int>(sizeof(line)) - 40) break;
+        length += std::snprintf(line + length, sizeof(line) - length, " %s=%u", entry.name,
+                                entry.count.load(std::memory_order_relaxed));
+    }
+    if (length > 0 && length < static_cast<int>(sizeof(line)) - 1) {
+        line[length] = '\n';
+        line[length + 1] = 0;
+        Report(line);
+    }
+}
+
 void ColdPass(SparseRange& range, std::size_t slots) noexcept {
+    CheckZeroBlock();
     const std::lock_guard pack_lock{pack_mutex};
     holding_pack = true;
     struct Held { ~Held() { holding_pack = false; } } held;
@@ -1318,6 +1476,15 @@ void PackPass(SparseRange& range, std::size_t slots, std::vector<std::size_t>& c
     if (packed_slots.load(std::memory_order_acquire) == nullptr) {
         auto* table = new (std::nothrow) PackedSlot[slots]();
         if (table == nullptr) return;
+        if (gpu_touched == nullptr) {
+            gpu_touched = new (std::nothrow) std::atomic<std::uint8_t>[slots]();
+            if (gpu_cached_slots == 0) gpu_cached_slots = slots;
+        }
+        if (PackKeep()) {
+            pack_kept = new (std::nothrow) std::int64_t[slots];
+            if (pack_kept != nullptr)
+                for (std::size_t i = 0; i < slots; ++i) pack_kept[i] = -1;
+        }
         packed_slots.store(table, std::memory_order_release);
         pack_times.assign(slots, 0);
         recover_order.reserve(slots);
@@ -1447,14 +1614,21 @@ void ServiceReport(SparseRange& range, const char* when) noexcept {
         }
     }
     if (PackEnabled()) {
-        char pack_line[256];
+        char pack_line[400];
         const int pack_length = std::snprintf(pack_line, sizeof(pack_line),
-            "EDEN_CRAM_PACK %s packed=%lluMiB stored=%lluMiB packs=%llu unpacks=%llu skips=%llu unpack_keep=%lluMiB\n", when,
+            "EDEN_CRAM_PACK %s packed=%lluMiB stored=%lluMiB packs=%llu unpacks=%llu skips=%llu unpack_keep=%lluMiB"
+            " kept_compared=%llu kept_differed=%llu zero_block_dirty=%llu gpu_skips=%llu gpu_marked=%llu\n", when,
             (unsigned long long)(packed_count.load(std::memory_order_relaxed) * (SparseSlot >> 20)),
             (unsigned long long)(packed_bytes.load(std::memory_order_relaxed) >> 20),
             (unsigned long long)packs.load(std::memory_order_relaxed), (unsigned long long)unpacks.load(std::memory_order_relaxed),
-            (unsigned long long)pack_skips.load(std::memory_order_relaxed), (unsigned long long)(unpack_keep_count.load(std::memory_order_relaxed) * 2));
+            (unsigned long long)pack_skips.load(std::memory_order_relaxed), (unsigned long long)(unpack_keep_count.load(std::memory_order_relaxed) * 2),
+            (unsigned long long)pack_keep_compared.load(std::memory_order_relaxed),
+            (unsigned long long)pack_keep_differed.load(std::memory_order_relaxed),
+            (unsigned long long)zero_block_dirty.load(std::memory_order_relaxed),
+            (unsigned long long)pack_gpu_skips.load(std::memory_order_relaxed),
+            (unsigned long long)pack_gpu_marked.load(std::memory_order_relaxed));
         if (pack_length > 0) Report(pack_line);
+        ReportUnpackers();
     }
 }
 
