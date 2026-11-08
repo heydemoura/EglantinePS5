@@ -1037,13 +1037,18 @@ static int eden_tcache_keep(void *address, size_t usable) {
  * asks for memory, as far as the first calls up say. Sampled blocks count EDEN_SITE_RATE times. */
 extern const char __eden_text_start[];
 extern const char __eden_text_end[];
-#define EDEN_SITE_BLOCKS 131072u
-#define EDEN_SITE_TABLE 4096u
+#define EDEN_SITE_BLOCKS 524288u
+#define EDEN_SITE_TABLE 16384u
+/* Chains are grouped by their first EDEN_SITE_KEY return addresses: stale words of the stack further
+ * up split one caller into many groups and filled the table. */
+#define EDEN_SITE_KEY 3u
 #define EDEN_SITE_PCS 10u
 #define EDEN_SITE_TOP 30u
 #define EDEN_SITE_RATE 128u
 #define EDEN_SITE_BIG ((size_t)1 << 20)
 
+/* Bytes of followed blocks that found no group (table full) or no block entry (probes full). */
+static _Atomic long eden_site_lost_big, eden_site_lost_sampled, eden_site_nobox_big, eden_site_nobox_sampled;
 static struct {
   _Atomic uintptr_t address; /* 0 free, 1 given back */
   unsigned site;
@@ -1061,7 +1066,12 @@ static int eden_site_sampled(const void *address) {
 }
 
 static unsigned eden_site_slot(const void *address) {
-  return (unsigned)((((uintptr_t)address >> 4) * 0x9E3779B97F4A7C15ull) >> 40) % EDEN_SITE_BLOCKS;
+  /* Not the sampling hash: sampled addresses share its top bits and piled into a few slots. */
+  uint64_t x = (uint64_t)(uintptr_t)address >> 4;
+  x ^= x >> 33;
+  x *= 0xFF51AFD7ED558CCDull;
+  x ^= x >> 33;
+  return (unsigned)(x % EDEN_SITE_BLOCKS);
 }
 
 static __attribute__((noinline)) unsigned eden_site_collect(uintptr_t pcs[EDEN_SITE_PCS]) {
@@ -1097,7 +1107,7 @@ static __attribute__((noinline)) void eden_site_alloc(const void *address, size_
   uintptr_t pcs[EDEN_SITE_PCS] = {0};
   eden_site_collect(pcs);
   uintptr_t hash = 0xCBF29CE484222325ull;
-  for (unsigned i = 0; i < EDEN_SITE_PCS; ++i)
+  for (unsigned i = 0; i < EDEN_SITE_KEY; ++i)
     hash = (hash ^ pcs[i]) * 0x100000001B3ull;
   hash |= 1;
   unsigned site = EDEN_SITE_TABLE;
@@ -1116,8 +1126,10 @@ static __attribute__((noinline)) void eden_site_alloc(const void *address, size_
       break;
     }
   }
-  if (site == EDEN_SITE_TABLE)
+  if (site == EDEN_SITE_TABLE) {
+    atomic_fetch_add_explicit(big ? &eden_site_lost_big : &eden_site_lost_sampled, (long)size, memory_order_relaxed);
     return;
+  }
   const unsigned first = eden_site_slot(address);
   for (unsigned probe = 0; probe < 16; ++probe) {
     const unsigned at = (first + probe) % EDEN_SITE_BLOCKS;
@@ -1139,6 +1151,7 @@ static __attribute__((noinline)) void eden_site_alloc(const void *address, size_
       return;
     }
   }
+  atomic_fetch_add_explicit(big ? &eden_site_nobox_big : &eden_site_nobox_sampled, (long)size, memory_order_relaxed);
 }
 
 static void eden_site_free(const void *address, size_t usable) {
@@ -1205,6 +1218,11 @@ void eden_heap_sites_report(void) {
     top[place].site = at;
   }
   fprintf(stderr, "EDEN_HEAP_SITES followed blocks hold %ld MiB; the largest places:\n", total >> 20);
+  fprintf(stderr, "EDEN_HEAP_SITES_LOST no_group big=%ld MiB sampled=%ld MiB, no_entry big=%ld MiB sampled=%ld MiB (allocated, never counted)\n",
+          atomic_load_explicit(&eden_site_lost_big, memory_order_relaxed) >> 20,
+          ((long)EDEN_SITE_RATE * atomic_load_explicit(&eden_site_lost_sampled, memory_order_relaxed)) >> 20,
+          atomic_load_explicit(&eden_site_nobox_big, memory_order_relaxed) >> 20,
+          ((long)EDEN_SITE_RATE * atomic_load_explicit(&eden_site_nobox_sampled, memory_order_relaxed)) >> 20);
   for (unsigned i = 0; i < count; ++i) {
     const unsigned at = top[i].site;
     fprintf(stderr, "EDEN_HEAP_SITE %ld MiB in %ld blocks:", top[i].bytes >> 20, top[i].blocks);
