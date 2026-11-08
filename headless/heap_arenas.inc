@@ -101,7 +101,16 @@ static atomic_long eden_heap_slot_live[EDEN_HEAP_SLOTS];
 static uintptr_t eden_heap_slot(const void *address);
 static void eden_heap_slot_count(const void *address, long sign);
 static void *eden_heap_emptiest_arena(const void *except);
-static void *eden_heap_arena_list[EDEN_HEAP_MAX_ARENAS];
+static void *_Atomic eden_heap_arena_list[EDEN_HEAP_MAX_ARENAS]; /* atomic: released places are reused */
+/* Empty arenas given back (eden_heap_release_arenas). A thread counts itself in an arena's slot
+ * around every call into its mspace (allocation, free, resize); a released arena's slot is retired
+ * so no request uses it, until a new arena is made there. Arenas were never given back: after
+ * Mario Kart World freed its shader modules, 483 arenas held 966 MiB for 374 MiB of live blocks,
+ * 102 of them empty, and the spaces holding them could not be trimmed. */
+static atomic_uint eden_heap_slot_users[EDEN_HEAP_SLOTS];
+static atomic_int eden_heap_slot_retired[EDEN_HEAP_SLOTS];
+static atomic_size_t eden_heap_arenas_released;
+int sceLibcMspaceDestroy(void *mspace);
 static void *_Atomic eden_heap_arena_blocks_probe[EDEN_HEAP_MAX_ARENAS];
 static atomic_size_t eden_heap_arena_backing_probe;
 static atomic_uint eden_heap_arena_count;
@@ -293,8 +302,16 @@ static void eden_heap_thread_exit(void *value) {
   atomic_store_explicit(&eden_heap_thread_used[self - eden_heap_threads], 0, memory_order_release);
 }
 
+/* Bytes of empty arenas given back to their spaces so far (eden_heap_release_arenas). */
+size_t eden_heap_arenas_given_back(void) {
+  return atomic_load_explicit(&eden_heap_arenas_released, memory_order_relaxed);
+}
+
+/* Arenas made since the process began (a released arena's place in the list is used again, so the
+ * list's length is not this). */
+static atomic_uint eden_heap_arenas_made;
 unsigned eden_heap_arenas_created(void) {
-  return atomic_load_explicit(&eden_heap_arena_count, memory_order_relaxed);
+  return atomic_load_explicit(&eden_heap_arenas_made, memory_order_relaxed);
 }
 
 /* Memory the heap's pieces hold now (pieces given back are not counted). */
@@ -501,6 +518,16 @@ static uintptr_t eden_heap_slot(const void *address) {
          ((uintptr_t)ps5_heap_base >> EDEN_HEAP_ARENA_SHIFT);
 }
 
+static void eden_heap_arena_enter(const void *address) {
+  atomic_fetch_add_explicit(&eden_heap_slot_users[eden_heap_slot(address)], 1, memory_order_seq_cst);
+}
+static void eden_heap_arena_leave(const void *address) {
+  atomic_fetch_sub_explicit(&eden_heap_slot_users[eden_heap_slot(address)], 1, memory_order_release);
+}
+static int eden_heap_arena_retired(const void *arena) {
+  return atomic_load_explicit(&eden_heap_slot_retired[eden_heap_slot(arena)], memory_order_seq_cst) != 0;
+}
+
 /* The slot tail belongs to the parent mspace and can hold ordinary allocations. */
 static void *eden_heap_arena_owner(const void *address) {
   if (((uintptr_t)address & (EDEN_HEAP_ARENA_SIZE - 1u)) >= EDEN_HEAP_ARENA_PAYLOAD)
@@ -533,8 +560,10 @@ static void eden_heap_space_free(void *address) {
 static void eden_heap_free_owned(void *address) {
   void *arena = eden_heap_arena_owner(address);
   if (arena != NULL) {
+    eden_heap_arena_enter(address);
     eden_heap_slot_count(address, -1);
     sceLibcMspaceFree(arena, address);
+    eden_heap_arena_leave(address);
   } else {
     eden_heap_space_free(address);
   }
@@ -683,12 +712,58 @@ static int eden_heap_grow(size_t bytes, unsigned seen) {
   return grown;
 }
 
+/* Empty arenas beyond the first EDEN_HEAP_ARENA_KEEP (8) found go back to their spaces: an arena
+ * whose live count is 0 is retired, and destroyed if no thread is inside it and it is still empty
+ * (a free lowers the count inside the arena, so either it is seen inside or it has finished). Its
+ * block then goes back to its space, which eden_heap_trim can give back once it holds nothing. */
+static size_t eden_heap_release_arenas(void) {
+  static long keep = -1;
+  if (keep < 0) {
+    const char *value = getenv("EDEN_HEAP_ARENA_KEEP");
+    keep = value != NULL ? strtol(value, NULL, 10) : 8;
+  }
+  eden_heap_create_acquire();
+  size_t released = 0;
+  long kept = 0;
+  const unsigned count = atomic_load_explicit(&eden_heap_arena_count, memory_order_relaxed);
+  for (unsigned i = 0; i < count && i < EDEN_HEAP_MAX_ARENAS; ++i) {
+    void *arena = eden_heap_arena_list[i];
+    if (arena == NULL)
+      continue;
+    const uintptr_t slot = eden_heap_slot(arena);
+    if (atomic_load_explicit(&eden_heap_slot_live[slot], memory_order_seq_cst) > 0)
+      continue;
+    if (kept < keep) {
+      ++kept;
+      continue;
+    }
+    atomic_store_explicit(&eden_heap_slot_retired[slot], 1, memory_order_seq_cst);
+    if (atomic_load_explicit(&eden_heap_slot_users[slot], memory_order_seq_cst) != 0 ||
+        atomic_load_explicit(&eden_heap_slot_live[slot], memory_order_seq_cst) > 0) {
+      atomic_store_explicit(&eden_heap_slot_retired[slot], 0, memory_order_seq_cst);
+      continue;
+    }
+    void *block = eden_heap_arena_blocks_probe[i];
+    atomic_store_explicit(&eden_heap_slots[slot], NULL, memory_order_release);
+    eden_heap_arena_list[i] = NULL;
+    eden_heap_arena_blocks_probe[i] = NULL;
+    sceLibcMspaceDestroy(arena);
+    atomic_fetch_sub_explicit(&eden_heap_arena_backing_probe, sceLibcMspaceMallocUsableSize(block), memory_order_relaxed);
+    eden_heap_space_free(block);
+    released += EDEN_HEAP_ARENA_SIZE;
+  }
+  eden_heap_create_release();
+  atomic_fetch_add_explicit(&eden_heap_arenas_released, released, memory_order_relaxed);
+  return released;
+}
+
 /* Gives the memory of every space (but the first) that holds no block back to the system: the
  * space is retired, its memory released, its address space kept for a later growth. Returns the
  * bytes given back. */
 size_t eden_heap_trim(void) {
   if (atomic_load_explicit(&ps5_heap_state, memory_order_acquire) != 2 || !eden_heap_grows)
     return 0;
+  eden_heap_release_arenas();
   eden_heap_grow_acquire();
   size_t returned = 0;
   const unsigned count = atomic_load_explicit(&eden_heap_space_count, memory_order_relaxed);
@@ -772,17 +847,27 @@ static void *eden_heap_create_arena(int first) {
   eden_heap_create_acquire();
   void *arena = NULL;
   const unsigned count = atomic_load_explicit(&eden_heap_arena_count, memory_order_relaxed);
-  if (count < EDEN_HEAP_MAX_ARENAS && (!first || eden_heap_first_arenas < EDEN_HEAP_FIRST_ARENAS)) {
+  /* A place an arena was given back from, else a new one at the end. */
+  unsigned index = count;
+  for (unsigned i = 0; i < count && i < EDEN_HEAP_MAX_ARENAS; ++i)
+    if (eden_heap_arena_list[i] == NULL) {
+      index = i;
+      break;
+    }
+  if (index < EDEN_HEAP_MAX_ARENAS && (!first || eden_heap_first_arenas < EDEN_HEAP_FIRST_ARENAS)) {
     void *block = eden_heap_main(EDEN_HEAP_ALIGNED, EDEN_HEAP_ARENA_SIZE, EDEN_HEAP_ARENA_PAYLOAD);
     if (block != NULL) {
       arena = sceLibcMspaceCreate("Eden-arena", block, EDEN_HEAP_ARENA_PAYLOAD, 0);
       if (arena != NULL) {
         const uintptr_t slot = eden_heap_slot(block);
-        eden_heap_arena_list[count] = arena;
-        eden_heap_arena_blocks_probe[count] = block;
+        atomic_store_explicit(&eden_heap_slot_retired[slot], 0, memory_order_seq_cst);
+        eden_heap_arena_list[index] = arena;
+        eden_heap_arena_blocks_probe[index] = block;
         atomic_fetch_add_explicit(&eden_heap_arena_backing_probe, sceLibcMspaceMallocUsableSize(block), memory_order_relaxed);
         atomic_store_explicit(&eden_heap_slots[slot], arena, memory_order_release);
-        atomic_store_explicit(&eden_heap_arena_count, count + 1, memory_order_release);
+        if (index == count)
+          atomic_store_explicit(&eden_heap_arena_count, count + 1, memory_order_release);
+        atomic_fetch_add_explicit(&eden_heap_arenas_made, 1, memory_order_relaxed);
         if (first)
           eden_heap_first_arenas++;
       } else {
@@ -850,8 +935,9 @@ static void *eden_heap_thread_arena(void) {
   struct eden_heap_thread *self = eden_heap_self();
   if (self == NULL)
     return NULL;
-  if (self->arena != NULL)
+  if (self->arena != NULL && !eden_heap_arena_retired(self->arena))
     return self->arena;
+  self->arena = NULL;
   void *arena = eden_heap_emptiest_arena(NULL);
   if (arena != NULL) {
     self->arena = arena;
@@ -863,7 +949,11 @@ static void *eden_heap_thread_arena(void) {
     const unsigned count = atomic_load_explicit(&eden_heap_arena_count, memory_order_acquire);
     if (count == 0)
       return NULL;
-    arena = eden_heap_arena_list[atomic_fetch_add_explicit(&eden_heap_next_shared, 1, memory_order_relaxed) % count];
+    arena = NULL;
+    for (unsigned tries = 0; arena == NULL && tries < count; ++tries)
+      arena = eden_heap_arena_list[atomic_fetch_add_explicit(&eden_heap_next_shared, 1, memory_order_relaxed) % count];
+    if (arena == NULL)
+      return NULL;
   } else if (self->owned < EDEN_HEAP_THREAD_ARENAS) {
     self->own[self->owned++] = arena;
   }
@@ -877,8 +967,13 @@ static void eden_heap_slot_count(const void *address, long sign) {
                               sign * (long)sceLibcMspaceMallocUsableSize((void *)address), memory_order_relaxed);
 }
 static void *eden_heap_arena_try(void *arena, size_t count, size_t size, int zero) {
-  void *address = zero ? sceLibcMspaceCalloc(arena, count, size) : sceLibcMspaceMalloc(arena, count * size);
-  eden_heap_slot_count(address, 1);
+  eden_heap_arena_enter(arena);
+  void *address = NULL;
+  if (!eden_heap_arena_retired(arena)) {
+    address = zero ? sceLibcMspaceCalloc(arena, count, size) : sceLibcMspaceMalloc(arena, count * size);
+    eden_heap_slot_count(address, 1);
+  }
+  eden_heap_arena_leave(arena);
   return address;
 }
 
@@ -900,7 +995,7 @@ static void *eden_heap_emptiest_arena(const void *except) {
   long best_live = (long)(EDEN_HEAP_ARENA_PAYLOAD / 2);
   for (unsigned i = 0; i < count && i < EDEN_HEAP_MAX_ARENAS; ++i) {
     void *arena = eden_heap_arena_list[i];
-    if (arena == NULL || arena == except)
+    if (arena == NULL || arena == except || eden_heap_arena_retired(arena))
       continue;
     const long live = atomic_load_explicit(&eden_heap_slot_live[eden_heap_slot(arena)], memory_order_relaxed);
     if (live < best_live) {
@@ -929,6 +1024,11 @@ static void *eden_heap_arena_allocate(size_t count, size_t size, int zero) {
   }
   for (unsigned i = 0; i < self->owned; ++i) {
     void *other = self->own[i];
+    if (eden_heap_arena_retired(other)) {
+      /* Given back (eden_heap_release_arenas): its place in the record goes to the last one. */
+      self->own[i--] = self->own[--self->owned];
+      continue;
+    }
     if (other == arena)
       continue;
     address = eden_heap_arena_try(other, count, size, zero);
@@ -981,8 +1081,10 @@ static void *eden_heap_spill(size_t count, size_t size, int zero) {
 static void eden_heap_release(void *address) {
   void *arena = eden_heap_arena_owner(address);
   if (arena != NULL) {
+    eden_heap_arena_enter(address);
     eden_heap_slot_count(address, -1);
     sceLibcMspaceFree(arena, address);
+    eden_heap_arena_leave(address);
     return;
   }
   const unsigned long long start = eden_heap_cycles();
@@ -1294,11 +1396,15 @@ static void *eden_realloc_inner(void *address, size_t size) {
   } else if (size < EDEN_HEAP_LARGE_REQUEST || !eden_heap_grows) {
     void *owner = eden_heap_owner(address);
     const int in_arena = eden_heap_arena_owner(address) != NULL;
-    if (in_arena)
+    if (in_arena) {
+      eden_heap_arena_enter(address);
       eden_heap_slot_count(address, -1);
+    }
     void *result = sceLibcMspaceRealloc(owner, address, size);
-    if (in_arena)
+    if (in_arena) {
       eden_heap_slot_count(result != NULL ? result : address, 1);
+      eden_heap_arena_leave(address);
+    }
     if (result) {
       eden_heap_account((long)sceLibcMspaceMallocUsableSize(result) - (long)before, 0);
       return result;
@@ -1364,8 +1470,17 @@ int __wrap_posix_memalign(void **address, size_t alignment, size_t size) {
   int result = ENOMEM;
   if (size < EDEN_HEAP_SMALL_REQUEST && alignment <= 4096) {
     void *arena = eden_heap_thread_arena();
-    if (arena != NULL)
-      result = sceLibcMspacePosixMemalign(arena, address, alignment, size);
+    if (arena != NULL) {
+      /* Counted in the arena like any of its blocks (it was not: the arena's live count missed
+       * these, and an arena given back while it held one would have taken it with it). */
+      eden_heap_arena_enter(arena);
+      if (!eden_heap_arena_retired(arena)) {
+        result = sceLibcMspacePosixMemalign(arena, address, alignment, size);
+        if (result == 0)
+          eden_heap_slot_count(*address, 1);
+      }
+      eden_heap_arena_leave(arena);
+    }
   }
   if (result != 0) {
     /* A large block's own memory starts on a page; the heap's spaces align anything. */
