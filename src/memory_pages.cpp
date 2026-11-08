@@ -888,6 +888,99 @@ int DecommitMemoryRange(void* address, std::size_t size) noexcept {
 #endif
 }
 
+// Part of one committed block, [address, +size) in 16 KiB pages, back to the system (the address
+// space kept, the block's record split around it), and memory again over such a part. The heap gives
+// a released arena's 2 MiB back this way (headless/heap_arenas.inc): its block stays the heap's, as
+// the 16 KiB after it hold the heap's own record of the next block. 1: done; 0: nothing done (the
+// range is as it was).
+constexpr std::size_t SmallPage = 0x4000;
+int PageOutRange(void* address, std::size_t size) noexcept {
+    const auto begin = reinterpret_cast<std::uintptr_t>(address);
+    if (address == nullptr || size == 0 || size % SmallPage != 0 || begin % SmallPage != 0) return 0;
+#ifdef PS5_NATIVE
+    const auto end = begin + size;
+    LockCommitted();
+    CommittedBlock* owner = nullptr;
+    for (auto& block : committed_blocks)
+        if (block.address != 0 && block.address <= begin && end <= block.address + block.size) {
+            owner = &block;
+            break;
+        }
+    if (owner == nullptr) {
+        UnlockCommitted();
+        return 0;
+    }
+    const std::uintptr_t owner_end = owner->address + owner->size;
+    const std::size_t left = begin - owner->address;
+    CommittedBlock* spare = nullptr;
+    if (end < owner_end && left != 0) {
+        for (auto& block : committed_blocks)
+            if (block.address == 0) {
+                spare = &block;
+                break;
+            }
+        if (spare == nullptr) {
+            UnlockCommitted();
+            return 0;
+        }
+    }
+    const std::int64_t physical = owner->physical + static_cast<std::int64_t>(left);
+    void* at = address;
+    if (munmap(at, size) != 0) {
+        UnlockCommitted();
+        return 0;
+    }
+    void* again = at;
+    const bool reserved = sceKernelReserveVirtualRange(&again, size, MAP_FIXED, SmallPage) == 0 && again == at;
+    if (!reserved || sceKernelReleaseDirectMemory(physical, size) != 0) {
+        // The system kept the memory: map it back where it was, as it was.
+        void* back = at;
+        if (sceKernelMapDirectMemory(&back, size, PROT_READ | PROT_WRITE, MAP_FIXED, physical, SmallPage) != 0 ||
+            back != at)
+            std::abort(); // the heap's block would be gone under it
+        UnlockCommitted();
+        return 0;
+    }
+    const CommittedBlock right{end, owner_end - end, owner->physical + static_cast<std::int64_t>(end - owner->address)};
+    if (left != 0) {
+        owner->size = left;
+        if (end < owner_end) *spare = right;
+    } else {
+        *owner = end < owner_end ? right : CommittedBlock{};
+    }
+    UnlockCommitted();
+    return 1;
+#else
+    void* at = mmap(address, size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED | MAP_NORESERVE, -1, 0);
+    return at == address ? 1 : 0;
+#endif
+}
+int PageInRange(void* address, std::size_t size) noexcept {
+    const auto begin = reinterpret_cast<std::uintptr_t>(address);
+    if (address == nullptr || size == 0 || size % SmallPage != 0 || begin % SmallPage != 0) return 0;
+#ifdef PS5_NATIVE
+    std::int64_t physical = -1;
+    if (eden_direct_high(size, SmallPage, 12, &physical) != 0) return 0;
+    void* at = address;
+    if (sceKernelMapDirectMemory(&at, size, PROT_READ | PROT_WRITE, MAP_FIXED, physical, SmallPage) != 0 || at != address) {
+        (void)sceKernelReleaseDirectMemory(physical, size);
+        return 0;
+    }
+    if (!RecordCommitted(begin, size, physical)) {
+        if (munmap(at, size) == 0) {
+            void* again = at;
+            (void)sceKernelReserveVirtualRange(&again, size, MAP_FIXED, SmallPage);
+            (void)sceKernelReleaseDirectMemory(physical, size);
+        }
+        return 0;
+    }
+    return 1;
+#else
+    void* at = mmap(address, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    return at == address ? 1 : 0;
+#endif
+}
+
 // A reserved range given back whole: its memory, then its address space.
 void ReleaseMemoryRange(void* address, std::size_t size) noexcept {
     if (address == nullptr || size == 0) return;

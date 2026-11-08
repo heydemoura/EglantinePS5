@@ -230,6 +230,24 @@ int eden_heap_decommit(void *address, size_t size) {
     atomic_fetch_add(&decommitted_bytes, size);
     return 1;
 }
+// A released arena's payload: unreadable until paged in again, so a stale use faults.
+static atomic_size_t paged_out_bytes;
+int eden_heap_page_out(void *address, size_t size) {
+    assert(((uintptr_t)address & 0x3fff) == 0 && (size & 0x3fff) == 0);
+    if (mprotect(address, size, PROT_NONE) != 0) return 0;
+    (void)madvise(address, size, MADV_DONTNEED);
+    atomic_fetch_sub(&committed_bytes, size);
+    atomic_fetch_add(&paged_out_bytes, size);
+    return 1;
+}
+static atomic_uint paged_in;
+int eden_heap_page_in(void *address, size_t size) {
+    assert(((uintptr_t)address & 0x3fff) == 0 && (size & 0x3fff) == 0);
+    atomic_fetch_add(&paged_in, 1);
+    if (mprotect(address, size, PROT_READ | PROT_WRITE) != 0) return 0;
+    atomic_fetch_add(&committed_bytes, size);
+    return 1;
+}
 // A large block in pieces of memory (the pool has no one piece for it): here simply a mapping.
 static int refuse_split;   // nor in pieces
 static atomic_uint split_blocks;
@@ -485,11 +503,14 @@ int main(int argc, char **argv) {
             abort();
         }
         // The workers' and keepers' arenas emptied: all but a few went back to their spaces.
-        if (!refuse_range && eden_heap_arenas_given_back() == 0) {
+        if (!refuse_range && (eden_heap_arenas_given_back() == 0 || atomic_load(&paged_out_bytes) == 0)) {
             fprintf(stderr, "no empty arena was given back\n");
             abort();
         }
     }
+    if (!refuse_range)
+        fprintf(stderr, "arenas given back: %zu MiB paged out, %u taken again\n",
+                atomic_load(&paged_out_bytes) >> 20, atomic_load(&paged_in));
     const size_t after_threads = eden_heap_committed();
     const size_t peak = atomic_load(&ps5_heap_peak_bytes);
     assert(eden_heap_arenas_created() >= 8);
