@@ -15,7 +15,7 @@ index 86ca391deb..6ab543fa6e 100644
      std::array<u32, NUM_TEXTURE_AND_IMAGE_SCALING_WORDS> words{};
      u32* texture_ptr{words.data()};
 diff --git a/src/video_core/renderer_vulkan/vk_graphics_pipeline.cpp b/src/video_core/renderer_vulkan/vk_graphics_pipeline.cpp
-index 1f5c63a3b6..7035094759 100644
+index 1f5c63a3b6..6c68931b5d 100644
 --- a/src/video_core/renderer_vulkan/vk_graphics_pipeline.cpp
 +++ b/src/video_core/renderer_vulkan/vk_graphics_pipeline.cpp
 @@ -12,6 +12,7 @@
@@ -26,21 +26,29 @@ index 1f5c63a3b6..7035094759 100644
  #include <span>
  #include <utility>
  
-@@ -284,6 +285,48 @@ bool TextureMemoVerify() {
+@@ -284,6 +285,56 @@ bool TextureMemoVerify() {
      return verify;
  }
  
 +// Fast draw delta draws replay the image descriptors the resolve that captured their views pushed
 +// (Lichii #949). EDEN_NX2_DELTA_DESCRIPTORS=0 turns it off; EDEN_NX2_DELTA_DESCRIPTORS_VERIFY=1
 +// resolves them as before and compares with the kept ones.
-+const bool delta_descriptors_on = [] {
-+    const char* const value = std::getenv("EDEN_NX2_DELTA_DESCRIPTORS");
-+    return value == nullptr || value[0] != '0';
-+}();
-+const bool delta_descriptors_verify = [] {
-+    const char* const value = std::getenv("EDEN_NX2_DELTA_DESCRIPTORS_VERIFY");
-+    return delta_descriptors_on && value != nullptr && value[0] == '1';
-+}();
++// Both are read at the first draw: the PS5 app sets its environment from env.txt in main, after
++// static initializers ran.
++bool DeltaDescriptorsOn() {
++    static const bool on = [] {
++        const char* const value = std::getenv("EDEN_NX2_DELTA_DESCRIPTORS");
++        return value == nullptr || value[0] != '0';
++    }();
++    return on;
++}
++bool DeltaDescriptorsVerify() {
++    static const bool verify = [] {
++        const char* const value = std::getenv("EDEN_NX2_DELTA_DESCRIPTORS_VERIFY");
++        return DeltaDescriptorsOn() && value != nullptr && value[0] == '1';
++    }();
++    return verify;
++}
 +
 +// Delta draws on the drawing thread, logged every 10 s with EDEN_NX2_GPU_PROFILE or the verify
 +// env.
@@ -55,7 +63,7 @@ index 1f5c63a3b6..7035094759 100644
 +void ReportDeltaDescriptors() {
 +    DeltaDescriptorStats& stats = delta_descriptor_stats;
 +    if (((stats.replayed + stats.pushed) & 1023) != 0 ||
-+        (!VideoCommon::Nx2Profile::Enabled() && !delta_descriptors_verify)) {
++        (!VideoCommon::Nx2Profile::Enabled() && !DeltaDescriptorsVerify())) {
 +        return;
 +    }
 +    const auto now = std::chrono::steady_clock::now();
@@ -67,7 +75,7 @@ index 1f5c63a3b6..7035094759 100644
 +                 "Delta descriptors in 10 s: {} replayed, {} pushed, {} verified, {} verify "
 +                 "mismatches{}",
 +                 stats.replayed, stats.pushed, stats.verified, stats.mismatches,
-+                 delta_descriptors_on ? "" : " (off: EDEN_NX2_DELTA_DESCRIPTORS=0)");
++                 DeltaDescriptorsOn() ? "" : " (off: EDEN_NX2_DELTA_DESCRIPTORS=0)");
 +    }
 +    stats = {.next_report = now + std::chrono::seconds{10}};
 +}
@@ -75,7 +83,7 @@ index 1f5c63a3b6..7035094759 100644
  // Texture memo counts, logged every 10 s with EDEN_NX2_GPU_PROFILE or the verify env.
  std::atomic<u64> g_memo_hits{};
  std::atomic<u64> g_memo_misses{};
-@@ -690,7 +733,9 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
+@@ -690,7 +741,9 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
          }
          ReportTextureMemo();
      }
@@ -86,7 +94,7 @@ index 1f5c63a3b6..7035094759 100644
          const auto same_view = [](const VideoCommon::ImageViewInOut& lhs,
                                    const VideoCommon::ImageViewInOut& rhs) {
              return lhs.index == rhs.index && lhs.id == rhs.id;
-@@ -704,6 +749,9 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
+@@ -704,6 +757,9 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
          delta_samplers.assign(samplers.begin(), samplers.end());
          configured_stages = Spec::enabled_stages;
          delta_views_valid = true;
@@ -96,20 +104,20 @@ index 1f5c63a3b6..7035094759 100644
      }
  
      VideoCommon::ImageViewInOut* texture_buffer_it{views.data()};
-@@ -793,8 +841,12 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
+@@ -793,8 +849,12 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
          }
          {
              Profile::Scope scope{Profile::Zone::PushDescriptors};
 +            const size_t first_image_entry = guest_descriptor_queue.UpdateCount();
              PushImageDescriptors(texture_cache, guest_descriptor_queue, stage_infos[stage],
                                   rescaling, samplers_it, views_it);
-+            if (captured_delta && delta_descriptors_on) {
++            if (captured_delta && DeltaDescriptorsOn()) {
 +                KeepImageDescriptors(stage, first_image_entry);
 +            }
          }
          const auto& info{stage_infos[stage]};
          if (info.uses_render_area) {
-@@ -821,6 +873,11 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
+@@ -821,6 +881,11 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
      if constexpr (Spec::enabled_stages[4]) {
          prepare_stage(4);
      }
@@ -121,15 +129,15 @@ index 1f5c63a3b6..7035094759 100644
      if (buffer_cache.any_buffer_uploaded) {
          buffer_cache.runtime.PostCopyBarrier();
          buffer_cache.any_buffer_uploaded = false;
-@@ -882,6 +939,24 @@ bool GraphicsPipeline::ConfigureDelta(bool indexed) {
+@@ -882,6 +947,24 @@ bool GraphicsPipeline::ConfigureDelta(bool indexed) {
      RenderAreaPushConstant render_area;
      const VideoCommon::SamplerId* samplers_it{delta_samplers.data()};
      const VideoCommon::ImageViewInOut* views_it{delta_views.data()};
 +    // Push the image descriptors kept for delta_views instead of resolving every view and sampler
 +    // again (Lichii #949); with EDEN_NX2_DELTA_DESCRIPTORS_VERIFY resolve them and compare.
-+    const bool kept_usable = delta_descriptors_on && kept_images_valid &&
++    const bool kept_usable = DeltaDescriptorsOn() && kept_images_valid &&
 +                             kept_scale_epoch == texture_cache.ScaleEpoch();
-+    const bool replay_images = kept_usable && !delta_descriptors_verify;
++    const bool replay_images = kept_usable && !DeltaDescriptorsVerify();
 +    struct VerifyKept {
 +        std::vector<DescriptorUpdateEntry> entries;
 +        std::array<std::pair<u32, u32>, NUM_STAGES> ranges;
@@ -146,7 +154,7 @@ index 1f5c63a3b6..7035094759 100644
      for (size_t stage = 0; stage < NUM_STAGES; ++stage) {
          if (!configured_stages[stage]) {
              continue;
-@@ -890,10 +965,19 @@ bool GraphicsPipeline::ConfigureDelta(bool indexed) {
+@@ -890,10 +973,19 @@ bool GraphicsPipeline::ConfigureDelta(bool indexed) {
              Profile::Scope scope{Profile::Zone::BindStageBuffers};
              buffer_cache.BindHostStageBuffers(stage);
          }
@@ -161,13 +169,13 @@ index 1f5c63a3b6..7035094759 100644
 +            const size_t first_image_entry = guest_descriptor_queue.UpdateCount();
              PushImageDescriptors(texture_cache, guest_descriptor_queue, stage_infos[stage],
                                   rescaling, samplers_it, views_it);
-+            if (delta_descriptors_on) {
++            if (DeltaDescriptorsOn()) {
 +                KeepImageDescriptors(stage, first_image_entry);
 +            }
          }
          if (stage_infos[stage].uses_render_area) {
              render_area.uses_render_area = true;
-@@ -904,6 +988,35 @@ bool GraphicsPipeline::ConfigureDelta(bool indexed) {
+@@ -904,6 +996,35 @@ bool GraphicsPipeline::ConfigureDelta(bool indexed) {
                                   static_cast<float>(clip_set ? clip_height : u32{regs.rt[0].height})};
          }
      }
@@ -203,7 +211,7 @@ index 1f5c63a3b6..7035094759 100644
      if (buffer_cache.any_buffer_uploaded) {
          buffer_cache.runtime.PostCopyBarrier();
          buffer_cache.any_buffer_uploaded = false;
-@@ -922,6 +1035,15 @@ bool GraphicsPipeline::ConfigureDelta(bool indexed) {
+@@ -922,6 +1043,15 @@ bool GraphicsPipeline::ConfigureDelta(bool indexed) {
      return configured;
  }
  
