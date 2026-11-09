@@ -1108,7 +1108,11 @@ int main(int argc, char** argv) {
 #else
         Settings::values.use_docked_mode.SetValue(Settings::ConsoleMode::Handheld);
 #if defined(PS5_NATIVE) && defined(EDEN_PS5_OPENGL)
-        const bool docked = Eden::LoadGameDocked(eden_game_title_id(guest));
+        // EDEN_CONSOLE_MODE=handheld (experiments) overrides the game's saved console mode.
+        const char* console_override = std::getenv("EDEN_CONSOLE_MODE");
+        const bool docked = console_override != nullptr
+                                ? std::string_view{console_override} != "handheld"
+                                : Eden::LoadGameDocked(eden_game_title_id(guest));
         Settings::values.use_docked_mode.SetValue(docked ? Settings::ConsoleMode::Docked
                                                        : Settings::ConsoleMode::Handheld);
         Eden::Report("launch", docked ? "Console mode: Docked" : "Console mode: Handheld");
