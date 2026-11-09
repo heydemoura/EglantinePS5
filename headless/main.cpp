@@ -1098,8 +1098,13 @@ int main(int argc, char** argv) {
                         static_cast<long long>(sceKernelGetDirectMemorySize()),
                         unsigned(Settings::values.vram_usage_mode.GetValue()));
         }
-        Settings::values.use_docked_mode.SetValue(Settings::ConsoleMode::Docked);
-        std::puts("[headless-startup] console_mode=docked");
+        // EDEN_CONSOLE_MODE=handheld: the game sees a handheld console (experiments: Switch 2
+        // games render smaller targets there).
+        const char* console_mode = std::getenv("EDEN_CONSOLE_MODE");
+        const bool handheld = console_mode != nullptr && std::string_view{console_mode} == "handheld";
+        Settings::values.use_docked_mode.SetValue(handheld ? Settings::ConsoleMode::Handheld
+                                                           : Settings::ConsoleMode::Docked);
+        std::puts(handheld ? "[headless-startup] console_mode=handheld" : "[headless-startup] console_mode=docked");
 #else
         Settings::values.use_docked_mode.SetValue(Settings::ConsoleMode::Handheld);
 #if defined(PS5_NATIVE) && defined(EDEN_PS5_OPENGL)

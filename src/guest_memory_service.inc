@@ -2288,3 +2288,15 @@ void GuestAliasCounts(std::uint64_t* made, std::uint64_t* dropped, std::uint64_t
     *dropped = aliases_dropped.load(std::memory_order_relaxed);
     *refused = aliases_refused.load(std::memory_order_relaxed);
 }
+
+// The state of the guest slot holding `host` (diagnostics: EDEN_MACRO_DMA, core patch 0060):
+// 0 zero, 1 own, 2 shared, 3 fine, 4 packed; +16 while locked; -1 outside the guest's memory.
+extern "C" int eden_guest_slot_state(const void* host) noexcept {
+    SparseRange* const range = guest_range.load(std::memory_order_acquire);
+    const auto address = reinterpret_cast<std::uintptr_t>(host);
+    if (range == nullptr || range->state == nullptr) return -1;
+    const std::uintptr_t begin = range->begin.load(std::memory_order_relaxed);
+    if (address < begin || address >= range->end) return -1;
+    const std::uint8_t value = range->state[(address - begin) / SparseSlot].load(std::memory_order_relaxed);
+    return (value & SlotMask) + ((value & SlotLock) ? 16 : 0);
+}
