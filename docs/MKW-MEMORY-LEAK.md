@@ -328,3 +328,39 @@ after the macro event at 254 s (app gone).
 
 Tally of GPU-packing runs since the JIT fix (run10, run11): 2 whole runs, 2 out of memory (heap,
 before the give-back), 2 ended by the macro event. **The macro event is now what ends most runs.**
+
+## Shrinking the driver and Eden's heap; what the failing macro reads (2026-11-09, run12)
+
+Build: main ae009f2 + core 0060 (`EDEN_MACRO_FAIL` / `EDEN_MACRO_DMA`: a failed native macro's
+parameters and its last 8 DMA reads with GPU address, device address, host pointer and guest slot
+state), the image footprint every 20 s, and `EDEN_CONSOLE_MODE`. Without Pro memory, 500 s
+title → Grand Prix.
+
+**Where the driver's memory goes.** Texture cache images are 2.0–2.3 GB (a 6144² RGBA8 target of
+151 MB, three 3840×2160 targets of 33 MB, 8192² partly resident textures of 20 MB). The buffer
+cache is ~300 MiB, and the stream buffer 128 MiB (FreeBSD). The collector already runs at its most
+aggressive (it reads ~2× the real usage) and keeps only what was used in the last frames. The
+buffer cache already collects whenever memory is short. Staging buffers are let go a few per
+frame.
+
+| Run | Driver | Images | Eden heap (holds) | Result |
+|---|---|---|---|---|
+| docked (baseline) | 3.4–3.9 GB | 2.15–2.29 GB | 1,420 → 1,836 MiB | whole 500 s: race 1 to lap 3/3, race 2 |
+| handheld + `EDEN_HEAP_ARENA_KEEP=2` | 3.4–3.7 GB | 2.03–2.19 GB | 1,484 → 1,580 MiB (−60 to −100 MiB at the same times) | macro failure at ~236 s, then no frames |
+
+Handheld mode does not shrink MKW's targets, and keeping fewer empty arenas saves ~0.1 GB. No
+cheap knob shrinks the driver: it is MKW's texture working set at 1x.
+
+**The failing macro does not read memory outside the GPU's.** At the failure (macro 0x1e6, 6 of 6
+parameters consumed, instruction limit), every recent `MME_DMA_READ_FIFOED` was from a mapped GPU
+address backed by an ordinary held slot (state 1, Own), and returned draw arguments
+(`00000001,0,0,0`). The macro's parameters were `00000004, c3b74c36, b6d956c6, c42cd9da, 452c8000,
+c3a379b3`: a count, then floats (-366.6, 2760.0, …), which look like vertex or position data. They
+match none of the DMA reads, so the parameters came from the command list itself. The front read
+words from the wrong place in a command list, or a list that was not yet (or no longer) what the
+game wrote. The ps5debug lookups of the host addresses did not run: the app prints `%p` without
+`0x` and the watcher's pattern missed it (fixed in `.local/mkwmem/macro_watch.py`).
+
+Next for the macro event: trace the command list behind the failing call (its GPU address, the
+method header and count before the parameters, whether its pages are GPU-written), and read the
+same host addresses with ps5debug-NG while the app is still alive.
