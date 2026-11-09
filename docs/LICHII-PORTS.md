@@ -54,3 +54,27 @@ per-draw setup falls from 5.7 to 2.7 microseconds. The GPU back thread is now sp
 stage buffers (115 ms/s), updating buffers (108 ms/s), pushing descriptors (31 ms/s) and decoding
 methods (144 ms/s); Lichii #949 (uniform buffer keeps, descriptor replay) targets the first three.
 Lichii measured +27% on a PC.
+
+## Uniform buffer keeps and descriptor replay (core 0065, 0066; draft)
+
+- **0065, uniform buffer keeps** (Lichii #949). On a fast draw delta draw, a uniform buffer slot
+  the previous draw streamed is bound again from that draw's allocation when the slot wasn't rebound,
+  no write overlaps its range (inline constant data by device range, CPU writes the caches were told
+  of, GPU-modified marks, DMA clears and copies) and no buffer was deleted. The Vulkan runtime records
+  each streamed graphics uniform bind's allocation per stage and slot; a keep needs the same address,
+  size and command buffer. `EDEN_NX2_UBO_KEEP=0` turns it off; `EDEN_NX2_UBO_KEEP_VERIFY=1` binds as
+  before and counts mismatches.
+- **0066, image descriptor replay** (Lichii #949). Delta draws copy the image descriptor entries and
+  rescaling words the capturing resolve pushed, instead of pushing them again. The kept entries are
+  dropped on every full resolve and unused once the scale epoch changes (ScaleUp, ScaleDown,
+  InvalidateScale). `EDEN_NX2_DELTA_DESCRIPTORS=0` / `EDEN_NX2_DELTA_DESCRIPTORS_VERIFY=1`.
+- Not ported: #949's drain-free semaphore acquires. Our acquire code already skips the drain for met
+  acquires and acquires met by a queued release, and polls with a 2 ms drain valve; the rest needs
+  split-thread pieces this core lacks (#639's back idle hook, Lichii's queued-write record).
+
+Bananza Ingot Isle gate (first round): main 14.45 / 16.96 FPS, with 0065+0066 17.60 / broken. In the
+second run the frame rate fell to 0.1-3.6 FPS from 173 s, with missing geometry, and the log showed
+491 "Native MME ... instruction limit exceeded" errors from 165 s; none of 14 other runs of any
+build show them. The profile run (3.8M uniform keeps and 1.18M descriptor replays per 10 s) was
+clean. Note: `EDEN_NX2_FAST_DRAW_VERIFY=1` sends every draw down the full path, so it disables both
+features; verify them with their own variables only.
