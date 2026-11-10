@@ -339,6 +339,25 @@ bool MapSlot(std::uintptr_t at, int protection, std::int64_t physical) {
            address == reinterpret_cast<void*>(at);
 }
 #endif
+} // namespace
+
+#ifdef PS5_NATIVE
+// A mapping of ours becomes reserved address space in one call: a fixed reservation replaces what
+// it covers (as VoidWindowRegion does). Unmapped first and reserved after, the range was free for a
+// moment, and a mapping the system placed meanwhile (ZeroedBlock's view at the same hint, or any
+// other without a fixed address) was overwritten by the reservation: a build whose heap gave memory
+// back often crashed so in FillReserve's memset. Refused, it goes the old way.
+// 1: reserved; 0: unmapped, not reserved again; -1: still mapped (nothing was done).
+int ReserveOver(void* at, std::size_t size, std::size_t alignment) noexcept {
+    void* again = at;
+    if (sceKernelReserveVirtualRange(&again, size, MAP_FIXED, alignment) == 0 && again == at) return 1;
+    if (munmap(at, size) != 0) return -1;
+    again = at;
+    return sceKernelReserveVirtualRange(&again, size, MAP_FIXED, alignment) == 0 && again == at ? 1 : 0;
+}
+#endif
+
+namespace {
 
 // Reserves `span` bytes whose every slot reads as zeroes. Null when the platform refuses. The
 // guest's memory goes above the guest's address space, as it does when it is taken whole.
@@ -821,11 +840,7 @@ bool CommitMemoryRangeFrom(void* address, std::size_t size, bool high) noexcept 
         }
         if (!RecordCommitted(begin + done, block, physical)) {
             // No entry left to give it back with: unmap it now, keeping the address space.
-            if (munmap(at, block) == 0) {
-                void* again = at;
-                (void)sceKernelReserveVirtualRange(&again, block, MAP_FIXED, LargePage);
-                (void)sceKernelReleaseDirectMemory(physical, block);
-            }
+            if (ReserveOver(at, block, LargePage) >= 0) (void)sceKernelReleaseDirectMemory(physical, block);
             break;
         }
         done += block;
@@ -866,15 +881,14 @@ int DecommitMemoryRange(void* address, std::size_t size) noexcept {
     LockCommitted();
     for (auto& block : committed_blocks) {
         if (block.address < begin || block.address >= end || block.address == 0) continue;
-        void* at = reinterpret_cast<void*>(block.address);
-        // As the guest's memory gives a block back (src/host_memory.cpp): unmapped, the address
-        // space reserved again at once, then the memory released.
-        if (munmap(at, block.size) != 0) {
+        // As the guest's memory gives a block back (src/host_memory.cpp): the mapping becomes
+        // reserved address space (ReserveOver), then the memory is released.
+        const int reserved = ReserveOver(reinterpret_cast<void*>(block.address), block.size, LargePage);
+        if (reserved < 0) {
             result = -1;
             continue;
         }
-        void* again = at;
-        if (sceKernelReserveVirtualRange(&again, block.size, MAP_FIXED, LargePage) != 0 || again != at) result = -1;
+        if (reserved == 0) result = -1;
         if (sceKernelReleaseDirectMemory(block.physical, block.size) != 0) result = -1;
         covered += block.size;
         block = CommittedBlock{};
@@ -926,13 +940,12 @@ int PageOutRange(void* address, std::size_t size) noexcept {
     }
     const std::int64_t physical = owner->physical + static_cast<std::int64_t>(left);
     void* at = address;
-    if (munmap(at, size) != 0) {
+    const int reserved = ReserveOver(at, size, SmallPage);
+    if (reserved < 0) {
         UnlockCommitted();
         return 0;
     }
-    void* again = at;
-    const bool reserved = sceKernelReserveVirtualRange(&again, size, MAP_FIXED, SmallPage) == 0 && again == at;
-    if (!reserved || sceKernelReleaseDirectMemory(physical, size) != 0) {
+    if (reserved == 0 || sceKernelReleaseDirectMemory(physical, size) != 0) {
         // The system kept the memory: map it back where it was, as it was.
         void* back = at;
         if (sceKernelMapDirectMemory(&back, size, PROT_READ | PROT_WRITE, MAP_FIXED, physical, SmallPage) != 0 ||
@@ -967,11 +980,7 @@ int PageInRange(void* address, std::size_t size) noexcept {
         return 0;
     }
     if (!RecordCommitted(begin, size, physical)) {
-        if (munmap(at, size) == 0) {
-            void* again = at;
-            (void)sceKernelReserveVirtualRange(&again, size, MAP_FIXED, SmallPage);
-            (void)sceKernelReleaseDirectMemory(physical, size);
-        }
+        if (ReserveOver(at, size, SmallPage) >= 0) (void)sceKernelReleaseDirectMemory(physical, size);
         return 0;
     }
     return 1;
