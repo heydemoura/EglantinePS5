@@ -61,8 +61,15 @@ public:
         const void* code_ptr = nullptr;
     };
     static_assert(sizeof(FastDispatchEntry) == 0x10);
+#if defined(__PROSPERO__) // PS5
+    // 64 Ki entries (1 MiB) per core instead of 1 Mi (16 MiB): the A32 size; a miss only costs a
+    // block lookup.
+    static constexpr u64 fast_dispatch_table_mask = 0xFFFF0;
+    static constexpr size_t fast_dispatch_table_size = 0x10000;
+#else // PS5
     static constexpr u64 fast_dispatch_table_mask = 0xFFFFF0;
     static constexpr size_t fast_dispatch_table_size = 0x100000;
+#endif // PS5
 
     void ClearFastDispatchTable();
     void GenMemory128Accessors();
