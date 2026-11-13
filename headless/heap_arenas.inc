@@ -238,6 +238,7 @@ struct eden_heap_thread {
   unsigned long long spills, spill_cycles, shared_frees, shared_free_cycles;
   void *bins[EDEN_TCACHE_BINS];
   unsigned char counts[EDEN_TCACHE_BINS];
+  char name[16]; /* research/heap-memory: the thread's name when it made its second arena */
 };
 #define EDEN_HEAP_THREADS 512u
 static struct eden_heap_thread eden_heap_threads[EDEN_HEAP_THREADS];
@@ -1066,6 +1067,17 @@ static void *eden_heap_arena_allocate(size_t count, size_t size, int zero) {
       return address;
     }
   }
+  if (self->name[0] == 0) {
+    extern int pthread_getname_np(pthread_t, char *, size_t);
+    /* The console's call writes the whole name (up to 32 characters), whatever the size passed. */
+    char full[64] = {0};
+    (void)pthread_getname_np(pthread_self(), full, sizeof(full));
+    full[sizeof(full) - 1] = 0;
+    strncpy(self->name, full, sizeof(self->name) - 1);
+    self->name[sizeof(self->name) - 1] = 0;
+    if (self->name[0] == 0)
+      self->name[0] = '?';
+  }
   void *fresh = self->owned < EDEN_HEAP_THREAD_ARENAS ? eden_heap_create_arena(0) : NULL;
   if (fresh == NULL) {
     /* At a limit, or no memory for one: each look through the arenas costs a request to each,
@@ -1180,6 +1192,8 @@ static struct {
   _Atomic uintptr_t hash;
   uintptr_t pcs[EDEN_SITE_PCS];
   _Atomic long exact_bytes, sampled_bytes, exact_blocks, sampled_blocks;
+  _Atomic long flow_bytes; /* research: bytes ever allocated here (big exact + sampled x rate) */
+  _Atomic long pin_bytes;  /* research: scratch for the report (bytes in arenas under a quarter full) */
 } eden_site_table[EDEN_SITE_TABLE];
 
 static int eden_site_sampled(const void *address) {
@@ -1247,6 +1261,9 @@ static __attribute__((noinline)) void eden_site_alloc(const void *address, size_
       break;
     }
   }
+  if (site != EDEN_SITE_TABLE)
+    atomic_fetch_add_explicit(&eden_site_table[site].flow_bytes, big ? (long)size : (long)EDEN_SITE_RATE * (long)size,
+                              memory_order_relaxed);
   if (site == EDEN_SITE_TABLE) {
     atomic_fetch_add_explicit(big ? &eden_site_lost_big : &eden_site_lost_sampled, (long)size, memory_order_relaxed);
     return;
@@ -1302,6 +1319,81 @@ static void eden_site_free(const void *address, size_t usable) {
   }
 }
 
+/* research/heap-memory. EDEN_HEAP_THREADARENAS: the thread records with more than one arena (name,
+ * arenas, bytes live in them). EDEN_HEAP_PIN: the places whose live blocks sit in arenas under a
+ * quarter full (what keeps them from going back). EDEN_HEAP_FLOW: the places that allocated the
+ * most since the start (transient memory shows here and not in EDEN_HEAP_SITE). */
+static void eden_site_print_top(const char *tag, int pin) {
+  struct {
+    long bytes;
+    unsigned site;
+  } top[12];
+  unsigned count = 0;
+  for (unsigned at = 0; at < EDEN_SITE_TABLE; ++at) {
+    if (atomic_load_explicit(&eden_site_table[at].hash, memory_order_relaxed) == 0)
+      continue;
+    const long bytes = atomic_load_explicit(pin ? &eden_site_table[at].pin_bytes : &eden_site_table[at].flow_bytes,
+                                            memory_order_relaxed);
+    if (bytes <= 0)
+      continue;
+    unsigned place = count;
+    if (count < 12)
+      ++count;
+    else if (bytes <= top[11].bytes)
+      continue;
+    else
+      place = 11;
+    while (place > 0 && top[place - 1].bytes < bytes) {
+      top[place] = top[place - 1];
+      --place;
+    }
+    top[place].bytes = bytes;
+    top[place].site = at;
+  }
+  for (unsigned i = 0; i < count; ++i) {
+    fprintf(stderr, pin ? "%s %ld KiB:" : "%s %ld MiB:", tag, pin ? top[i].bytes >> 10 : top[i].bytes >> 20);
+    for (unsigned k = 0; k < EDEN_SITE_PCS; ++k) {
+      const uintptr_t pc = eden_site_table[top[i].site].pcs[k];
+      fprintf(stderr, " %lx", (unsigned long)(pc ? pc - 0x400000ul : 0));
+    }
+    fputc('\n', stderr);
+  }
+}
+
+static void eden_heap_research_report(void) {
+  for (unsigned i = 0; i < EDEN_HEAP_THREADS; ++i) {
+    const struct eden_heap_thread *t = &eden_heap_threads[i];
+    if (t->owned < 2)
+      continue;
+    long live = 0;
+    for (unsigned k = 0; k < t->owned; ++k)
+      if (t->own[k] != NULL)
+        live += atomic_load_explicit(&eden_heap_slot_live[eden_heap_slot(t->own[k])], memory_order_relaxed);
+    fprintf(stderr, "EDEN_HEAP_THREADARENAS record=%u name=%s arenas=%u live=%ldMiB\n", i, t->name[0] ? t->name : "-",
+            t->owned, live >> 20);
+  }
+  for (unsigned at = 0; at < EDEN_SITE_TABLE; ++at)
+    atomic_store_explicit(&eden_site_table[at].pin_bytes, 0, memory_order_relaxed);
+  for (unsigned b = 0; b < EDEN_SITE_BLOCKS; ++b) {
+    const uintptr_t address = atomic_load_explicit(&eden_site_blocks[b].address, memory_order_relaxed);
+    if (address <= 1 || !eden_heap_in_range((const void *)address))
+      continue;
+    const uintptr_t slot = eden_heap_slot((const void *)address);
+    if (atomic_load_explicit(&eden_heap_slots[slot], memory_order_relaxed) == NULL)
+      continue; /* not in an arena */
+    if (atomic_load_explicit(&eden_heap_slot_live[slot], memory_order_relaxed) >= (long)(EDEN_HEAP_ARENA_PAYLOAD / 4))
+      continue;
+    const unsigned site = eden_site_blocks[b].site;
+    if (site < EDEN_SITE_TABLE)
+      atomic_fetch_add_explicit(&eden_site_table[site].pin_bytes,
+                                eden_site_blocks[b].big ? (long)eden_site_blocks[b].size
+                                                        : (long)EDEN_SITE_RATE * (long)eden_site_blocks[b].size,
+                                memory_order_relaxed);
+  }
+  eden_site_print_top("EDEN_HEAP_PIN", 1);
+  eden_site_print_top("EDEN_HEAP_FLOW", 0);
+}
+
 /* The places that hold the most, to stderr.log: MiB alive, blocks alive, and the chain of calls
  * (offsets in the app's image, for tools/symbolize-crash.py or llvm-symbolizer). */
 void eden_heap_sites_report(void) {
@@ -1351,6 +1443,7 @@ void eden_heap_sites_report(void) {
       fprintf(stderr, " %lx", (unsigned long)(eden_site_table[at].pcs[k] ? eden_site_table[at].pcs[k] - 0x400000ul : 0));
     fputc('\n', stderr);
   }
+  eden_heap_research_report();
 }
 
 static void *eden_heap_allocate(size_t count, size_t size, int zero) {

@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cstdlib>
 #include <stdexcept>
 #include <variant>
 #include <boost/container/static_vector.hpp>
@@ -19,12 +20,25 @@
 
 namespace Vulkan {
 
+namespace {
+// Research (research/heap-memory): EDEN_DESCRIPTOR_START_DIV=<n> starts each queue's host storage at
+// 1/n of its size (it grows on demand up to the usual ceiling, four times the size).
+size_t StartPayloadSize(size_t size) {
+    static const size_t divisor = [] {
+        const char* value = std::getenv("EDEN_DESCRIPTOR_START_DIV");
+        const long parsed = value ? std::strtol(value, nullptr, 10) : 1;
+        return static_cast<size_t>(parsed >= 1 && parsed <= 64 ? parsed : 1);
+    }();
+    return (std::max<size_t>)(size / divisor, 0x1000);
+}
+} // Anonymous namespace
+
 UpdateDescriptorQueue::UpdateDescriptorQueue(const Device& device_, size_t frame_payload_size_,
                                              bool supports_descriptor_buffer_)
-    : device{device_}, frame_payload_size{frame_payload_size_},
+    : device{device_}, frame_payload_size{StartPayloadSize(frame_payload_size_)},
       maximum_frame_payload_size{frame_payload_size_ * 4},
       supports_descriptor_buffer{supports_descriptor_buffer_},
-      payload(std::make_unique_for_overwrite<DescriptorUpdateEntry[]>(frame_payload_size_ * FRAMES_IN_FLIGHT))
+      payload(std::make_unique_for_overwrite<DescriptorUpdateEntry[]>(StartPayloadSize(frame_payload_size_) * FRAMES_IN_FLIGHT))
 {
     payload_start = payload.get();
     payload_cursor = payload.get();
@@ -33,6 +47,16 @@ UpdateDescriptorQueue::UpdateDescriptorQueue(const Device& device_, size_t frame
 UpdateDescriptorQueue::~UpdateDescriptorQueue() = default;
 
 void UpdateDescriptorQueue::TickFrame() {
+    // Research: the most entries one frame used, every 3,600 frames.
+    peak_frame_entries = (std::max)(peak_frame_entries,
+                                    static_cast<size_t>(std::distance(payload_start, payload_cursor)));
+    if (++ticks_since_report >= 3600) {
+        LOG_INFO(Render_Vulkan, "Descriptor queue: peak {} entries a frame of {} ({} MiB host storage)",
+                 peak_frame_entries, frame_payload_size,
+                 frame_payload_size * FRAMES_IN_FLIGHT * sizeof(DescriptorUpdateEntry) >> 20);
+        ticks_since_report = 0;
+        peak_frame_entries = 0;
+    }
     if (++frame_index >= FRAMES_IN_FLIGHT) {
         frame_index = 0;
     }
@@ -52,6 +76,7 @@ void UpdateDescriptorQueue::Acquire(Scheduler& scheduler, size_t required_entrie
     const size_t used = static_cast<size_t>(std::distance(payload_start, payload_cursor));
     if (reserve > frame_payload_size || used > frame_payload_size - reserve) {
         const size_t old_capacity = frame_payload_size;
+        peak_frame_entries = (std::max)(peak_frame_entries, used + reserve);
         auto result = PayloadGrowthResult::AtLimit;
         if (!growth_disabled) {
             result = GrowDescriptorPayload(

@@ -61,7 +61,11 @@ MemoryManager::MemoryManager(Core::System& system_, MaxwellDeviceMemoryManager& 
     big_page_table_dev.ResizeAndClear(big_page_table_size);
     big_entries.resize(big_page_table_size / 32, 0);
     big_page_continuous.resize(big_page_table_size / continuous_bits, 0);
+#if defined(__PROSPERO__) // PS5
+    entries.ResizeAndClear(page_table_size / 32);
+#else // PS5
     entries.resize(page_table_size / 32, 0);
+#endif // PS5
 }
 
 MemoryManager::MemoryManager(Core::System& system_, u64 address_space_bits_, GPUVAddr split_address_, u64 big_page_bits_, u64 page_bits_)
@@ -99,8 +103,15 @@ void MemoryManager::SetEntry(size_t position, MemoryManager::EntryType entry, bo
         position = position >> page_bits;
         const u64 entry_mask = entries[position / 32];
         const size_t sub_index = position % 32;
-        entries[position / 32] =
+        const u64 value =
             (~(3ULL << sub_index * 2) & entry_mask) | (static_cast<u64>(entry) << sub_index * 2);
+#if defined(__PROSPERO__) // PS5
+        if (value != entry_mask) {
+            entries.Set(position / 32, value);
+        }
+#else // PS5
+        entries[position / 32] = value;
+#endif // PS5
     }
 }
 
