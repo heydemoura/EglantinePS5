@@ -1195,8 +1195,18 @@ bool PipelineCache::KeyFitsDevice(const GraphicsPipelineCacheKey& key) const {
             dynamic_features.has_extended_dynamic_state_3_blend ||
         (key.state.extended_dynamic_state_3_enables != 0) !=
             dynamic_features.has_extended_dynamic_state_3_enables ||
+#if defined(__PROSPERO__) // PS5
+        (key.state.color_write_enable_dynamic != 0) != dynamic_features.has_color_write_enable ||
+        // A vertex shader that reads no attribute is drawn with a static key (no vertex input,
+        // CurrentGraphicsPipeline); the cache holds those keys, and building them here is what
+        // spares the session from building them again on the GPU thread.
+        ((key.state.dynamic_vertex_input != 0) != dynamic_features.has_dynamic_vertex_input &&
+         !(dynamic_features.has_dynamic_vertex_input && ::Eden::DevVulkan::static_vertex_input &&
+           EdenAttributelessStaticKey(key.state)))) {
+#else // PS5
         (key.state.color_write_enable_dynamic != 0) != dynamic_features.has_color_write_enable ||
         (key.state.dynamic_vertex_input != 0) != dynamic_features.has_dynamic_vertex_input) {
+#endif // PS5
         return false;
     }
     const bool key_requests_provoking_last = key.state.provoking_vertex_last != 0;
