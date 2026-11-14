@@ -14,6 +14,7 @@ the old AArch64 truncation. Success requires the compiled check to reject it.
 """
 from pathlib import Path
 import argparse
+import os
 import subprocess
 import tempfile
 
@@ -112,7 +113,7 @@ if negative:
     program = program.replace(old, 'int32_t value = Convert<int32_t>(GetArg64(args, 2));')
 with tempfile.TemporaryDirectory(prefix='oot-wait64-abi-') as d:
  cpp=Path(d)/'check.cpp';exe=Path(d)/'check';cpp.write_text(program)
- subprocess.run(['c++','-std=c++20','-O2',str(cpp),'-o',str(exe)],check=True)
+ subprocess.run([os.environ.get('CXX') or 'clang++','-std=c++20','-O2',str(cpp),'-o',str(exe)],check=True)
  result=subprocess.run([str(exe)])
  if negative:
     assert result.returncode!=0, 'Regression negative control unexpectedly passed'
