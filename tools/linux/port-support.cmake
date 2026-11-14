@@ -2,15 +2,15 @@
 # Include from the desktop CMAKE_PROJECT_yuzu_INCLUDE hook; defer this function
 # until the emulator targets exist. Keep SDL audio and the desktop renderers.
 function(add_linux_port_support)
-    get_filename_component(EDEN_PORT_DIR "${EGLANTINE_NUP_CHECK_SOURCE}" DIRECTORY)
-    get_filename_component(PORT_ROOT "${EDEN_PORT_DIR}/.." ABSOLUTE)
+    get_filename_component(PORT_ROOT "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../.." ABSOLUTE)
+    set(EDEN_PORT_DIR "${PORT_ROOT}/headless")
     set(PORT_BUILD_DIR "${CMAKE_BINARY_DIR}/linux-port")
     file(MAKE_DIRECTORY "${PORT_BUILD_DIR}")
 
     # Core public headers name headless/... and src/... headers from this repository.
     target_include_directories(common PUBLIC "${PORT_ROOT}")
     target_include_directories(dynarmic PRIVATE "${PORT_ROOT}")
-    foreach(target core network)
+    foreach(target core network qt_common)
         if(TARGET ${target})
             target_include_directories(${target} PRIVATE "${EDEN_PORT_DIR}")
         endif()

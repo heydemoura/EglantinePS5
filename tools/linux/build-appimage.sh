@@ -11,7 +11,7 @@ bash tools/sync-eden-source.sh "$work/source"
 python3 "$root/tools/linux/checks/wait64_abi_check.py" "$work/source"
 cmake -S "$work/source" -B "$work/cmake" -G Ninja \
     -DCMAKE_PROJECT_yuzu_INCLUDE="$root/tools/linux/checks/inject.cmake" \
-    -DEGLANTINE_NUP_CHECK_SOURCE="$root/headless/nup_check.cpp" \
+    -DEGLANTINE_NUP_CHECK_SOURCE="$root/tools/linux/checks/nup_check.cpp" \
     -DCMAKE_C_COMPILER="${CC:-clang}" -DCMAKE_CXX_COMPILER="${CXX:-clang++}" \
     -DCMAKE_BUILD_TYPE=RelWithDebInfo -DENABLE_LTO=OFF \
     -DCMAKE_CXX_FLAGS_RELWITHDEBINFO='-O2 -g -DNDEBUG -fno-omit-frame-pointer' \
