@@ -574,6 +574,9 @@ private:
     /// Mark an image as modified from the GPU
     void MarkModification(ImageBase& image) noexcept;
 
+    /// Arms read traps on an image's pages, so the guest's next read of them flushes it.
+    void ArmImageReadTraps(ImageBase& image) noexcept;
+
     /// Synchronize image aliases, copying data if needed
     void SynchronizeAliases(ImageId image_id);
 
