@@ -172,6 +172,7 @@ endif()
 
 get_target_property(video_sources video_core SOURCES)
 if(NOT EDEN_PS5_VULKAN)
+    target_compile_definitions(video_core PRIVATE EDEN_NO_VULKAN=1)
     # Without Vulkan (the host's test build): Eglantine/src/video_core/video_core.cpp leaves the
     # Vulkan renderer out there too.
     list(FILTER video_sources EXCLUDE REGEX "^(renderer_vulkan|vulkan_common)/")
