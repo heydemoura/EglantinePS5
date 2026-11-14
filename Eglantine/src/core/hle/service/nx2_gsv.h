@@ -1566,6 +1566,8 @@ struct Nx2NativeObjects {
     std::map<u32, Memory> memories;
     std::map<u32, Image> images;
     std::optional<VideoTrace> last_video_write;
+    // A decoded host frame is presented independently of the guest's render target.
+    Tegra::CpuVideoFrameStore video_frames;
     u32 next_memory{1};
     u32 next_image{1};
 
@@ -2159,6 +2161,7 @@ private:
         std::optional<Nx2NativeObjects::VideoTrace> video_trace;
         Nx2ImageLayout layout{};
         u32 image_format{};
+        std::shared_ptr<const Tegra::CpuFramebuffer> overlay;
         {
             std::scoped_lock lk{m_objects->mutex};
             const auto image = m_objects->images.find(image_id);
@@ -2176,6 +2179,9 @@ private:
             image_format = image->second.preference[6];
             if (Nx2VideoTraceEnabled()) {
                 video_trace = m_objects->last_video_write;
+            }
+            if (Tegra::UsesVideoColorKey(system.GetApplicationProcessProgramID())) {
+                overlay = m_objects->video_frames.Snapshot();
             }
         }
         auto& registry = Nvidia::Devices::Nx2GpuMemoryRegistry::Get();
@@ -2266,6 +2272,25 @@ private:
             .blending = Tegra::BlendMode::Opaque,
             .native_tiling = true,
         }};
+        if (overlay) {
+            layers.front().blending = Tegra::BlendMode::VideoKey;
+            Tegra::FramebufferConfig video_layer{
+                .width = overlay->width,
+                .height = overlay->height,
+                .stride = overlay->width,
+                .pixel_format = android::PixelFormat::Rgba8888,
+                .transform_flags = android::BufferTransformFlags::Unset,
+                .crop_rect = {0, 0, static_cast<int>(overlay->width), static_cast<int>(overlay->height)},
+                .blending = Tegra::BlendMode::Opaque,
+                .native_tiling = false,
+                .cpu_pixels = std::move(overlay),
+            };
+            layers.insert(layers.begin(), std::move(video_layer));
+            if (m_presents % 120 == 0) {
+                LOG_INFO(Service, "nx2:vi2 video composite: present #{} video {}x{}, guest {}x{}",
+                         m_presents, layers[0].width, layers[0].height, layout.width, layout.height);
+            }
+        }
         std::vector<Nvidia::NvFence> fences;
         if (fence_id < 192) {
             fences.push_back({static_cast<s32>(fence_id), fence_value});
@@ -2675,6 +2700,7 @@ public:
     }
 
     ~INx2VideoSession() override {
+        StopVideoPresentation();
         m_ready->SetRunning(system.Kernel(), false);
         if (m_worker.joinable()) {
             {
@@ -2706,6 +2732,7 @@ private:
         std::optional<Tegra::Host1x::Nx2Picture> picture; // none: an empty end-of-stream frame
         u64 pts;
         bool end;
+        Tegra::CpuVideoFrameStore::Token video_token{};
     };
     struct Output {
         u32 image;
@@ -2758,7 +2785,24 @@ private:
         TipcReplyWords(ctx, {});
     }
 
+    void StopVideoPresentationLocked(bool resume = false) {
+        if (resume) {
+            m_video_token = m_objects->video_frames.Restart(m_video_token);
+        } else {
+            m_objects->video_frames.Stop(std::exchange(m_video_token, 0));
+        }
+    }
+
+    void StopVideoPresentation() {
+        std::scoped_lock lk{m_mutex};
+        StopVideoPresentationLocked();
+    }
+
     void Start(HLERequestContext& ctx) {
+        {
+            std::scoped_lock lk{m_mutex};
+            m_video_token = m_objects->video_frames.Start();
+        }
         Log(ctx, "start");
         if (Nx2VideoTraceEnabled()) {
             LOG_INFO(Service, "nx2:vdec trace start syncpoint={}", m_syncpoint);
@@ -2979,6 +3023,7 @@ private:
                          m_decoded.size(), m_outputs.size(), m_decoded_frames, m_frames_out,
                          m_stream_ended, m_end_queued);
             }
+            StopVideoPresentationLocked(ctx.GetCommand() == 8);
             m_inputs.Clear();
             m_flush = true;
             m_stream_ended = false;
@@ -2997,6 +3042,7 @@ private:
     }
 
     void Finalize(HLERequestContext& ctx) {
+        StopVideoPresentation();
         Log(ctx, "finalize");
         m_ready->SetRunning(system.Kernel(), false);
         {
@@ -3185,6 +3231,7 @@ private:
                 continue;
             }
             Input input = m_inputs.Pop();
+            const auto video_token = m_video_token;
             if (!m_stream_ended && !m_end_queued) {
                 m_ready->room.store(m_inputs.BelowReadyWatermark(), std::memory_order_relaxed);
             }
@@ -3234,13 +3281,13 @@ private:
                     m_frame_interval = pts - m_last_decoded_pts;
                 }
                 m_last_decoded_pts = pts;
-                m_decoded.push_back({std::move(picture), pts, false});
+                m_decoded.push_back({std::move(picture), pts, false, video_token});
             }
             if (input.end) {
                 // The client stops at the frame marked end of stream; give it one even when the
                 // last input held no picture.
                 if (m_decoded.empty()) {
-                    m_decoded.push_back({std::nullopt, input.pts, true});
+                    m_decoded.push_back({std::nullopt, input.pts, true, video_token});
                 } else {
                     m_decoded.back().end = true;
                 }
@@ -3285,6 +3332,20 @@ private:
     // Writes a decoded frame into an output image; returns the size the frame reports.
     std::pair<u32, u32> WriteImage(Tegra::Host1x::Nx2VideoDecoder* decoder, u32 image_id,
                                    const Decoded& frame, std::vector<u8>& bytes) {
+        const auto video_token = frame.video_token;
+        const auto remember_overlay = [&](std::vector<u8> rgba, u32 width, u32 height,
+                                          u64 pitch) {
+            if (!Tegra::UsesVideoColorKey(system.GetApplicationProcessProgramID())) {
+                return;
+            }
+            auto frame = std::make_shared<Tegra::CpuFramebuffer>(Tegra::CpuFramebuffer{
+                .width = width, .height = height, .pitch = static_cast<size_t>(pitch),
+                .pixels = std::move(rgba)});
+            if (!frame->IsValid()) {
+                return;
+            }
+            (void)m_objects->video_frames.Publish(video_token, std::move(frame));
+        };
         const auto image_mutex = m_objects->DecoderMutex(image_id);
         std::unique_lock<std::mutex> image_lock;
         if (image_mutex) {
@@ -3366,6 +3427,12 @@ private:
                     Nvidia::Devices::Nx2GpuMemoryRegistry::Get().DeviceAddressOf(address)) {
                 system.GPU().InvalidateRegion(*device, m_tiled.size());
             }
+            // bytes is already pitch-linear RGBA8 (the block-linear branch renders Rgba8).
+            if (Tegra::UsesVideoColorKey(system.GetApplicationProcessProgramID())) {
+                const size_t overlay_size = (std::min)(bytes.size(), layout.pitch * height);
+                remember_overlay(std::vector<u8>(bytes.begin(), bytes.begin() + overlay_size), width,
+                                 height, layout.pitch);
+            }
             trace_write();
             return {width, height};
         }
@@ -3380,6 +3447,16 @@ private:
         // The game samples the image on the GPU: drop the texture cache's copy of the old frame.
         if (const auto device = Nvidia::Devices::Nx2GpuMemoryRegistry::Get().DeviceAddressOf(address)) {
             system.GPU().InvalidateRegion(*device, layout.size);
+        }
+        if (Tegra::UsesVideoColorKey(system.GetApplicationProcessProgramID())) {
+            // NV12 cannot be a present layer: make a second RGBA copy for the overlay. The NV12
+            // pitch is one byte per pixel; a packed RGBA row needs four. Reusing layout.pitch
+            // here made sws_scale write width*4 bytes every pitch bytes and overrun the buffer.
+            const u64 rgba_pitch = Common::AlignUp(u64{width} * 4, 64);
+            std::vector<u8> overlay(static_cast<size_t>(rgba_pitch * height), u8{});
+            decoder->Render(*frame.picture, Tegra::Host1x::Nx2PictureFormat::Rgba8, width, height,
+                            rgba_pitch, 0, overlay);
+            remember_overlay(std::move(overlay), width, height, rgba_pitch);
         }
         trace_write();
         // A 428/426 that came in while this frame was written didn't see it: relayout it here.
@@ -3458,6 +3535,7 @@ private:
     bool m_flush{};
     bool m_quit{};
     std::thread m_worker;
+    Tegra::CpuVideoFrameStore::Token m_video_token{};
 };
 
 // Placeholder for the Switch 2 graphics-system server that nn::gsv::BootWithRemoteMemory talks
@@ -3491,12 +3569,14 @@ public:
             {1510, &INx2GraphicsSystemSession::CalculateRequirements, "CalculateRequirements"},
             {991, &INx2GraphicsSystemSession::CalculateDecoderImagePoolBuffer,
              "CalculateDecoderImagePoolBuffer"},
-            {901, &INx2GraphicsSystemSession::Stub, "VideoInitialize (guessed)"},
+            {901, &INx2GraphicsSystemSession::CreateVideoContext, "CreateVideoDecoderContext"},
             {902, &INx2GraphicsSystemSession::OpenVideoSession, "OpenVideoDecoderSession (guessed)"},
+            {903, &INx2GraphicsSystemSession::DestroyVideoContext, "DestroyVideoDecoderContext"},
             {905, &INx2GraphicsSystemSession::OpenVideoSession, "OpenVideoDecoderSessionWithFlag"},
             {906, &INx2GraphicsSystemSession::OpenVideoSession, "OpenVideoDecoderSessionWithVersion"},
-            {1001, &INx2GraphicsSystemSession::Stub, "VideoInitialize2 (guessed)"},
+            {1001, &INx2GraphicsSystemSession::CreateVideoContext, "CreateVideoEncoderContext"},
             {1002, &INx2GraphicsSystemSession::OpenVideoSession, "OpenVideoDecoderSession2 (guessed)"},
+            {1003, &INx2GraphicsSystemSession::DestroyVideoContext, "DestroyVideoEncoderContext"},
             {601, &INx2GraphicsSystemSession::Stub, "CameraInitialize (guessed)"},
             {602, &INx2GraphicsSystemSession::OpenCameraSession, "OpenCameraContext (guessed)"},
             {1201, &INx2GraphicsSystemSession::Stub, "ChatInitialize (guessed)"},
@@ -3570,7 +3650,6 @@ public:
             {814, &INx2GraphicsSystemSession::StubReplyZeroed, "Unknown814"},
             {861, &INx2GraphicsSystemSession::GetCpuImageDescriptor, "GetFeatureCpuImageDescriptor861"},
             {891, &INx2GraphicsSystemSession::CalculateChatImagePoolSize, "CalculateFeatureImagePoolSize891"},
-            {1003, &INx2GraphicsSystemSession::StubReplyZeroed, "Unknown1003"},
             {1011, &INx2GraphicsSystemSession::StubReplyZeroed, "Unknown1011"},
             {1012, &INx2GraphicsSystemSession::StubReplyZeroed, "Unknown1012"},
             {1091, &INx2GraphicsSystemSession::StubReplyZeroed, "Unknown1091"},
@@ -3672,6 +3751,18 @@ private:
                     ctx.GetCommand(), cmd_buf[2], cmd_buf[3], cmd_buf[4], cmd_buf[5]);
         IPC::ResponseBuilder rb{ctx, 2};
         rb.Push(ResultSuccess);
+    }
+
+    // Switchbrew documents 901/1001 and 903/1003 as context create/destroy with no input/output.
+    // Decoder resources belong to the returned sessions; these contexts own no resources here.
+    void CreateVideoContext(HLERequestContext& ctx) {
+        LOG_DEBUG(Service, "nx2:gsv TIPC {} create video context", ctx.GetCommand());
+        TipcReplyWords(ctx, {});
+    }
+
+    void DestroyVideoContext(HLERequestContext& ctx) {
+        LOG_DEBUG(Service, "nx2:gsv TIPC {} destroy video context", ctx.GetCommand());
+        TipcReplyWords(ctx, {});
     }
 
     // nn::codec::video::detail::ipc::Initialize sends 901, 902, 1001, 1002. 902 and 1002 return
