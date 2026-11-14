@@ -9,6 +9,9 @@ including any local source edits. It builds the shared core's Linux Qt/SDL front
 the Qt executable currently uses the upstream name lichii. The PS5 frontend, SDK,
 platform allocator and bundled PS5 RADV driver are separate from this Linux target.
 Existing kernel, audio, NUP and Zelda shader fixes come from the in-repo core.
+This Linux target reuses the port's POSIX backing-only memory backend. Its native
+fastmem windows are disabled, so CPU performance may differ from other desktop
+builds. Desktop frame metrics come from Qt/MangoHud; the PS5 HUD stays disabled.
 
 Requirements: Linux x86_64, CMake >=3.31, Clang, Ninja, Python >=3.11, rsync, curl,
 binutils, and Qt 6 development packages. On Debian 13:

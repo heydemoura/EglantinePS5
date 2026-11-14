@@ -38,6 +38,15 @@ function(add_linux_port_support)
     target_include_directories(dynarmic BEFORE PUBLIC "${PORT_BUILD_DIR}/include")
     include("${EDEN_PORT_DIR}/jit-alias.cmake")
 
+    # The shared present pass includes the port HUD shaders even when the desktop
+    # frontend does not enable that overlay.
+    execute_process(COMMAND python3 "${PORT_ROOT}/tools/build-hud-shaders.py" "${PORT_BUILD_DIR}"
+        COMMAND_ERROR_IS_FATAL ANY)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        "${PORT_ROOT}/tools/build-hud-shaders.py"
+        "${EDEN_PORT_DIR}/vulkan_hud.vert" "${EDEN_PORT_DIR}/vulkan_hud.frag")
+    target_include_directories(video_core PRIVATE "${PORT_BUILD_DIR}")
+
     target_sources(video_core PRIVATE
         "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/port-support.cpp")
 endfunction()

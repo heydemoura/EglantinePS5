@@ -5,6 +5,8 @@
 #include <cstdio>
 #include <malloc.h>
 
+#include "headless/hud.h"
+
 extern "C" std::size_t eden_heap_committed() {
     const auto usage = mallinfo2();
     return static_cast<std::size_t>(usage.arena) + static_cast<std::size_t>(usage.hblkhd);
@@ -26,3 +28,14 @@ void ReportHeap(const char* why) {
                  why != nullptr ? why : "");
 }
 } // namespace Eden::Performance
+
+namespace Eden {
+HudSnapshot GetVulkanHud() {
+    // Desktop frontends use their own UI or MangoHud rather than the PS5 overlay.
+    return {};
+}
+
+void CountPresentedFrame() {
+    // Only feeds the PS5 overlay's output-rate counter; desktop metrics are separate.
+}
+} // namespace Eden
