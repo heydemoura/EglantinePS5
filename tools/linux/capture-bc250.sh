@@ -11,7 +11,6 @@ output="$debug_dir/evidence/$(date -u +%Y%m%dT%H%M%SZ)-$mode"
 mkdir -p "$output"
 exec > >(tee "$output/session.txt") 2>&1
 printf 'Game: %s\nMode: %s\n' "$game" "$mode"
-printf 'EDEN_NX2_MEMORY_LAYOUT_GB=%s\n' "${EDEN_NX2_MEMORY_LAYOUT_GB:-default}"
 uname -a
 sha256sum "$app/EglantinePS5-Linux-x86_64.AppImage"
 cp "$app/EglantinePS5-Linux-build.json" "$output/"

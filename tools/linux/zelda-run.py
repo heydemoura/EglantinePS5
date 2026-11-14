@@ -134,7 +134,6 @@ def main(argv=None):
     parser.add_argument("tag", type=valid_tag, help="a new evidence-directory name")
     parser.add_argument("--game", type=Path, help="game file; defaults to a previous local download receipt")
     parser.add_argument("--seconds", type=capture_duration, default=120)
-    parser.add_argument("--layout", choices=("default", "6", "8", "10", "12"), default="default")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--cli", type=Path, help="test a deployed CLI candidate")
     mode.add_argument("--gui", action="store_true", help="test the installed AppImage GUI")
@@ -160,10 +159,6 @@ def main(argv=None):
     env["CAPTURE_SECONDS"] = str(args.seconds)
     env["MANGOHUD"] = "1"
     env["MANGOHUD_CONFIG"] = f"autostart_log=1,log_duration={args.seconds - 5},output_folder={output}"
-    if args.layout == "default":
-        env.pop("EDEN_NX2_MEMORY_LAYOUT_GB", None)
-    else:
-        env["EDEN_NX2_MEMORY_LAYOUT_GB"] = args.layout
     if args.cli:
         env["EDEN_LINUX_CLI"] = str(executable)
     if args.fresh_cache:
@@ -238,7 +233,7 @@ def main(argv=None):
     if available_logs:
         shutil.copy2(max(available_logs, key=lambda path: path.stat().st_mtime), output / "emulator.log")
     result = {"tag": args.tag, "game": str(game), "exit_status": code,
-              "duration_seconds": round(time.monotonic() - started, 3), "guest_memory_layout": args.layout,
+              "duration_seconds": round(time.monotonic() - started, 3), "guest_memory_layout": "core default",
               "timeout_seconds": args.seconds, "screenshots": shots,
               "cli": str(executable) if args.cli else ("installed AppImage Qt GUI" if args.gui else "installed AppImage CLI"),
               "fresh_shader_cache": args.fresh_cache, "requested_focus": args.focus,
