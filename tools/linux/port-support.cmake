@@ -10,11 +10,13 @@ function(add_linux_port_support)
     # Core public headers name headless/... and src/... headers from this repository.
     target_include_directories(common PUBLIC "${PORT_ROOT}")
     target_include_directories(dynarmic PRIVATE "${PORT_ROOT}")
-    foreach(target core network video_core)
+    foreach(target core network)
         if(TARGET ${target})
             target_include_directories(${target} PRIVATE "${EDEN_PORT_DIR}")
         endif()
     endforeach()
+    # Public Vulkan headers include the port's performance counters.
+    target_include_directories(video_core PUBLIC "${EDEN_PORT_DIR}")
     target_link_libraries(core PRIVATE zstd::zstd)
     target_link_libraries(video_core PUBLIC OpenSSL::Crypto)
 
