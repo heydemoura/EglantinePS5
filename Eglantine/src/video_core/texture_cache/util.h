@@ -45,6 +45,17 @@ struct OverlapResult {
 /// True if no 16-byte ASTC block in `data` decodes to alpha below 1.
 [[nodiscard]] bool AstcDataLooksOpaque(std::span<const u8> data) noexcept;
 
+/// True if the alpha of ASTC `data` in `format` is only 0 or 1 (within `tolerance`, in 8-bit
+/// steps), so BC1 with punch-through alpha keeps it. Decodes the blocks that may carry alpha.
+[[nodiscard]] bool AstcDataAlphaIsBinary(std::span<const u8> data,
+                                         VideoCore::Surface::PixelFormat format,
+                                         u32 tolerance) noexcept;
+
+/// PS5 diagnostics (EDEN_NX2_ASTC_ALPHA_HIST): largest distance of an alpha byte from 0 or 255,
+/// and the share of texels (per mille) with alpha strictly between.
+[[nodiscard]] std::pair<u32, u32> AstcDataAlphaSpread(std::span<const u8> data,
+                                                      VideoCore::Surface::PixelFormat format) noexcept;
+
 [[nodiscard]] u32 CalculateLayerStride(const ImageInfo& info) noexcept;
 
 [[nodiscard]] u32 CalculateLayerSize(const ImageInfo& info) noexcept;

@@ -182,6 +182,16 @@ class TextureCache : public VideoCommon::ChannelSetupCaches<TextureCacheChannelI
     u64 slack_margin{};           ///< Extra room for allocator block space the driver counts as used
     u64 astc_opaque_images{};
     u64 astc_alpha_images{};
+#if defined(__PROSPERO__) // PS5
+    u64 astc_cutout_images{};     ///< Of astc_opaque_images, those with alpha only 0 or 1
+    u64 astc_cutout_scans{};      ///< Alpha decodes (ClassifyAlpha) run, and their time
+    u64 astc_cutout_scan_ns{};
+    u64 astc_cutout_cache_hits{};
+    std::unordered_map<u64, bool> astc_cutout_cache; ///< Data hash -> alpha is binary
+    std::array<u64, 6> astc_alpha_hist{};       ///< EDEN_NX2_ASTC_ALPHA_HIST census
+    std::array<u64, 6> astc_alpha_hist_bytes{};
+    std::array<u64, 4> astc_alpha_between{};
+#endif
     Common::ScratchBuffer<u8> astc_scan_buffer;
     u64 images_deleted{};
     u64 scale_epoch{};
@@ -612,6 +622,14 @@ private:
     /// none for an unbacked image (too large to back, or over unwritten sparse blocks), what is
     /// bound to its layers for a SparseLayers one.
     u64 ImageMemoryBytes(const Image& image) const;
+
+    /// PS5 with EDEN_NX2_TC_HOST_BYTES=1: ImageMemoryBytes counts the driver's bytes for the
+    /// image rather than an estimate from its guest size. False elsewhere.
+    static bool UseHostImageBytes();
+
+    /// What the memory trace lines count for an image: the driver's bytes on PS5, the guest
+    /// size elsewhere.
+    u64 TraceImageBytes(const Image& image);
 
     void QueueAsyncDecode(Image& image, ImageId image_id);
     void TickAsyncDecode();

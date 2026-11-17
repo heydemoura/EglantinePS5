@@ -1734,6 +1734,8 @@ static void FillError(std::span<u32> outBuf, u32 blockWidth, u32 blockHeight) {
     }
 }
 
+// AlphaOnly: only the alpha channel is interpolated (ClassifyAlpha); the colour bytes are 0.
+template <bool AlphaOnly = false>
 static void DecompressBlock(std::span<const u8, 16> inBuf, const u32 blockWidth,
                             const u32 blockHeight, std::span<u32, 12 * 12> outBuf) {
     InputBitStream strm(inBuf);
@@ -1952,7 +1954,7 @@ static void DecompressBlock(std::span<const u8, 16> inBuf, const u32 blockWidth,
             assert(partition < nPartitions);
 
             Pixel p;
-            for (u32 c = 0; c < 4; c++) {
+            for (u32 c = 0; c < (AlphaOnly ? 1U : 4U); c++) {
                 u32 C0 = endpoints[partition][0].Component(c);
                 u32 C1 = endpoints[partition][1].Component(c);
 
@@ -2067,76 +2069,130 @@ static std::array<BlockModeInfo, 2048> MakeBlockModeInfos() {
     return infos;
 }
 
-bool IsOpaque(std::span<const uint8_t> data) {
-    // Endpoint modes with an alpha channel: LDR luminance+alpha (4, 5), RGB scale + two alpha
-    // (10), LDR RGBA (12, 13) and HDR RGBA (14, 15).
-    constexpr u32 AlphaModes = (1U << 4) | (1U << 5) | (1U << 10) | (1U << 12) | (1U << 13) |
-                               (1U << 14) | (1U << 15);
+// Endpoint modes with an alpha channel: LDR luminance+alpha (4, 5), RGB scale + two alpha (10),
+// LDR RGBA (12, 13) and HDR RGBA (14, 15).
+constexpr u32 AlphaModes = (1U << 4) | (1U << 5) | (1U << 10) | (1U << 12) | (1U << 13) |
+                           (1U << 14) | (1U << 15);
+
+static const std::array<BlockModeInfo, 2048>& BlockModeInfos() {
     // Decoding each block's mode bit by bit took ~12% of title 1's long frames, where every
     // new ASTC texture is scanned (its title screen streams them in by the thousand).
     static const std::array<BlockModeInfo, 2048> mode_infos = MakeBlockModeInfos();
-    for (size_t offset = 0; offset + 16 <= data.size(); offset += 16) {
-        const std::span<const u8> block = data.subspan(offset, 16);
-        u32 low;
-        std::memcpy(&low, block.data(), sizeof(low));
-        const BlockModeInfo& info = mode_infos[low & 0x7FF];
-        if (info.error) {
-            continue; // decodes to the opaque error colour
+    return mode_infos;
+}
+
+// True if the 16-byte block decodes to alpha 1 everywhere, from its mode bits alone.
+static bool BlockIsOpaque(std::span<const u8> block, const std::array<BlockModeInfo, 2048>& mode_infos) {
+    u32 low;
+    std::memcpy(&low, block.data(), sizeof(low));
+    const BlockModeInfo& info = mode_infos[low & 0x7FF];
+    if (info.error) {
+        return true; // decodes to the opaque error colour
+    }
+    if (info.void_extent) {
+        if ((low & 0xC00) != 0xC00) {
+            return true; // reserved bits clear: the error colour too
         }
-        if (info.void_extent) {
-            if ((low & 0xC00) != 0xC00) {
-                continue; // reserved bits clear: the error colour too
-            }
-            // One RGBA16 colour in bits 64-127: UNORM16, or FP16 for HDR.
-            const u32 alpha = block[14] | (u32{block[15]} << 8);
-            if (alpha != (info.void_extent_hdr ? 0x3C00U : 0xFFFFU)) {
-                return false;
-            }
-            continue;
-        }
-        const u32 partitions = ((low >> 11) & 3) + 1;
-        if (partitions == 4 && info.dual_plane) {
-            continue;
-        }
-        if (partitions == 1) {
-            if ((AlphaModes >> ((low >> 13) & 0xF)) & 1) {
-                return false;
-            }
-            continue;
-        }
-        // Bits 13-22 are the partition index.
-        const u32 base_cem = (low >> 23) & 0x3F;
-        const u32 base_mode = base_cem & 3;
-        if (base_mode == 0) {
-            if ((AlphaModes >> (base_cem >> 2)) & 1) {
-                return false;
-            }
-            continue;
-        }
-        // The rest of the per-partition modes sit just below the weights (DecompressBlock).
-        const u32 weight_bits = info.weight_bits;
-        if (weight_bits < 24 || weight_bits > 96) {
-            continue;
-        }
-        const u32 extra_bits = partitions == 2 ? 2 : partitions == 3 ? 5 : 8;
-        const u32 extra_offset = 128 - weight_bits - extra_bits;
-        u32 extra = 0;
-        for (u32 bit = 0; bit < extra_bits; ++bit) {
-            const u32 position = extra_offset + bit;
-            extra |= ((block[position / 8] >> (position % 8)) & 1U) << bit;
-        }
-        u32 cem = ((extra << 6) | base_cem) >> 2;
-        const u32 classes = cem;
-        cem >>= partitions;
-        for (u32 i = 0; i < partitions; ++i) {
-            const u32 mode = ((base_mode - (((classes >> i) & 1) != 0 ? 0 : 1)) << 2) |
-                             ((cem >> (2 * i)) & 3);
-            if ((AlphaModes >> mode) & 1) {
-                return false;
-            }
+        // One RGBA16 colour in bits 64-127: UNORM16, or FP16 for HDR.
+        const u32 alpha = block[14] | (u32{block[15]} << 8);
+        return alpha == (info.void_extent_hdr ? 0x3C00U : 0xFFFFU);
+    }
+    const u32 partitions = ((low >> 11) & 3) + 1;
+    if (partitions == 4 && info.dual_plane) {
+        return true;
+    }
+    if (partitions == 1) {
+        return ((AlphaModes >> ((low >> 13) & 0xF)) & 1) == 0;
+    }
+    // Bits 13-22 are the partition index.
+    const u32 base_cem = (low >> 23) & 0x3F;
+    const u32 base_mode = base_cem & 3;
+    if (base_mode == 0) {
+        return ((AlphaModes >> (base_cem >> 2)) & 1) == 0;
+    }
+    // The rest of the per-partition modes sit just below the weights (DecompressBlock).
+    const u32 weight_bits = info.weight_bits;
+    if (weight_bits < 24 || weight_bits > 96) {
+        return true;
+    }
+    const u32 extra_bits = partitions == 2 ? 2 : partitions == 3 ? 5 : 8;
+    const u32 extra_offset = 128 - weight_bits - extra_bits;
+    u32 extra = 0;
+    for (u32 bit = 0; bit < extra_bits; ++bit) {
+        const u32 position = extra_offset + bit;
+        extra |= ((block[position / 8] >> (position % 8)) & 1U) << bit;
+    }
+    u32 cem = ((extra << 6) | base_cem) >> 2;
+    const u32 classes = cem;
+    cem >>= partitions;
+    for (u32 i = 0; i < partitions; ++i) {
+        const u32 mode = ((base_mode - (((classes >> i) & 1) != 0 ? 0 : 1)) << 2) |
+                         ((cem >> (2 * i)) & 3);
+        if ((AlphaModes >> mode) & 1) {
+            return false;
         }
     }
     return true;
+}
+
+bool IsOpaque(std::span<const uint8_t> data) {
+    const auto& mode_infos = BlockModeInfos();
+    for (size_t offset = 0; offset + 16 <= data.size(); offset += 16) {
+        if (!BlockIsOpaque(data.subspan(offset, 16), mode_infos)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+AlphaStats ScanAlpha(std::span<const uint8_t> data, uint32_t block_width, uint32_t block_height,
+                     uint32_t stop_above) {
+    AlphaStats stats{};
+    if (block_width == 0 || block_height == 0 || block_width * block_height > 12 * 12) {
+        stats.max_between = 255;
+        return stats;
+    }
+    const auto& mode_infos = BlockModeInfos();
+    const u32 texels = block_width * block_height;
+    std::array<u32, 12 * 12> decoded;
+    for (size_t offset = 0; offset + 16 <= data.size(); offset += 16) {
+        const std::span<const u8> block = data.subspan(offset, 16);
+        stats.texels += texels;
+        if (BlockIsOpaque(block, mode_infos)) {
+            continue;
+        }
+        u32 low;
+        std::memcpy(&low, block.data(), sizeof(low));
+        if (mode_infos[low & 0x7FF].void_extent_hdr) {
+            stats.max_between = 255; // DecompressBlock does not decode these
+            return stats;
+        }
+        // Only blocks that may carry alpha are decoded, alpha alone (the slow part of a scan).
+        DecompressBlock<true>(std::span<const u8, 16>{block.data(), 16}, block_width, block_height,
+                              decoded);
+        for (u32 i = 0; i < texels; ++i) {
+            const u32 alpha = decoded[i] >> 24;
+            const u32 between = (std::min)(alpha, 255 - alpha);
+            stats.transparent += alpha < 128 ? 1 : 0;
+            if (between != 0) {
+                ++stats.between;
+                stats.max_between = (std::max)(stats.max_between, between);
+                if (stats.max_between > stop_above) {
+                    return stats;
+                }
+            }
+        }
+    }
+    return stats;
+}
+
+AlphaKind ClassifyAlpha(std::span<const uint8_t> data, uint32_t block_width, uint32_t block_height,
+                        uint32_t tolerance) {
+    const AlphaStats stats = ScanAlpha(data, block_width, block_height, tolerance);
+    if (stats.max_between > tolerance) {
+        return AlphaKind::Other;
+    }
+    return stats.transparent != 0 ? AlphaKind::Binary : AlphaKind::Opaque;
 }
 
 } // namespace Tegra::Texture::ASTC

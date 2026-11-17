@@ -21,6 +21,7 @@
 #include <boost/container/small_vector.hpp>
 
 #include "common/alignment.h"
+#include "common/cityhash.h"
 #include "common/memory_detect.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
@@ -517,7 +518,7 @@ void TextureCache<P>::TickFrame() {
                 ++unbacked;
                 continue;
             }
-            const u64 bytes = GetScaledImageSizeBytes(*image);
+            const u64 bytes = TraceImageBytes(*image);
             image_bytes += bytes;
             if (True(image->flags & ImageFlagBits::GpuModified)) {
                 gpu_written_bytes += bytes;
@@ -586,7 +587,7 @@ void TextureCache<P>::TickFrame() {
         std::vector<std::pair<u64, const Image*>> largest;
         std::map<u32, std::pair<u64, u32>> by_format;
         for (const auto [image_id, image] : slot_images) {
-            const u64 bytes = GetScaledImageSizeBytes(*image);
+            const u64 bytes = TraceImageBytes(*image);
             image_bytes += bytes;
             ++images;
             if (debug_stats) {
@@ -632,6 +633,26 @@ void TextureCache<P>::TickFrame() {
                  (stale_pages.Count() << StalePages::PAGE_BITS) >> 20);
         tc_stale_skips = tc_stale_skip_bytes = tc_stale_gpu_written = 0;
         images_uploaded = uploaded_bytes = largest_upload = layer_uploads = 0;
+#if defined(__PROSPERO__) // PS5
+        LOG_INFO(HW_GPU, "Texture cache last 600 frames: ASTC cut-outs to BC1 {} (of the opaque); "
+                 "{} alpha scans in {} ms, {} cached",
+                 astc_cutout_images, astc_cutout_scans, astc_cutout_scan_ns / 1000000,
+                 astc_cutout_cache_hits);
+        if (std::getenv("EDEN_NX2_ASTC_ALPHA_HIST") != nullptr) {
+            const auto& h = astc_alpha_hist;
+            const auto& b = astc_alpha_hist_bytes;
+            const auto& w = astc_alpha_between;
+            LOG_INFO(HW_GPU, "Texture cache ASTC alpha spread (new textures): binary {} ({} KiB), "
+                     "<=4 {} ({} KiB), <=16 {} ({} KiB), <=32 {} ({} KiB), <=64 {} ({} KiB), "
+                     ">64 {} ({} KiB); texels in between: none {}, <=1% {}, <=5% {}, more {}",
+                     h[0], b[0] >> 10, h[1], b[1] >> 10, h[2], b[2] >> 10, h[3], b[3] >> 10,
+                     h[4], b[4] >> 10, h[5], b[5] >> 10, w[0], w[1], w[2], w[3]);
+            astc_alpha_hist = {};
+            astc_alpha_hist_bytes = {};
+            astc_alpha_between = {};
+        }
+        astc_cutout_images = astc_cutout_scans = astc_cutout_scan_ns = astc_cutout_cache_hits = 0;
+#endif
         astc_opaque_images = astc_alpha_images = 0;
         std::vector<std::pair<u32, u64>> shapes;
         for (const auto& [key, value] : created_shapes) shapes.emplace_back(value.first, key);
@@ -2835,6 +2856,33 @@ u64 TextureCache<P>::GetScaledImageSizeBytes(const ImageBase& image) {
 }
 
 template <class P>
+bool TextureCache<P>::UseHostImageBytes() {
+#if defined(__PROSPERO__) // PS5
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_TC_HOST_BYTES");
+        return value != nullptr && value[0] == '1';
+    }();
+    return enabled;
+#else
+    return false;
+#endif
+}
+
+template <class P>
+u64 TextureCache<P>::TraceImageBytes(const Image& image) {
+#if defined(__PROSPERO__) // PS5
+    // The driver's bytes (VMA allocation + bound sparse memory) plus a rescaled copy, whatever
+    // the collector counts: the guest size understates re-compressed ASTC 2-4x and counts
+    // sparse images at full size.
+    if constexpr (requires { image.MemoryBlock(); image.SparseBoundBytes(); }) {
+        return Common::AlignUp(image.MemoryBlock().size + image.SparseBoundBytes(), 1024) +
+               (image.HasScaled() ? GetScaledImageSizeBytes(image) : 0);
+    }
+#endif
+    return GetScaledImageSizeBytes(image);
+}
+
+template <class P>
 u64 TextureCache<P>::ImageMemoryBytes(const Image& image) const {
     if (True(image.flags & ImageFlagBits::Unbacked)) {
         // No device memory but what BindLayers gave a SparseLayers image: at its full size (GBs
@@ -2845,6 +2893,17 @@ u64 TextureCache<P>::ImageMemoryBytes(const Image& image) const {
         }
         return 0;
     }
+#if defined(__PROSPERO__) // PS5
+    // What the driver gave the image: its VMA allocation plus the sparse memory bound to it. The
+    // guest-size estimate below counts every re-compressed ASTC image as BC3 (BC1 ones are half
+    // that) and sparse images at their full size (title 1's 1.3 GB images hold ~0.4 GB).
+    // Off by default (it changes how much one collector pass deletes): EDEN_NX2_TC_HOST_BYTES=1.
+    if constexpr (requires { image.MemoryBlock(); image.SparseBoundBytes(); }) {
+        if (UseHostImageBytes()) {
+            return Common::AlignUp(image.MemoryBlock().size + image.SparseBoundBytes(), 1024);
+        }
+    }
+#endif
     u64 tentative_size = (std::max)(image.guest_size_bytes, image.unswizzled_size_bytes);
     if ((IsPixelFormatASTC(image.info.format) &&
          True(image.flags & ImageFlagBits::AcceleratedUpload)) ||
@@ -3272,8 +3331,66 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
                 // buffer) when the range is split.
                 Tegra::Memory::GpuGuestMemory<u8, Tegra::Memory::GuestMemoryFlags::UnsafeRead>
                     scan_data(*gpu_memory, gpu_addr, scan_bytes, &astc_scan_buffer);
-                new_info.astc_opaque =
-                    AstcDataLooksOpaque(std::span<const u8>{scan_data.data(), scan_data.size()});
+                const std::span<const u8> scan_span{scan_data.data(), scan_data.size()};
+                new_info.astc_opaque = AstcDataLooksOpaque(scan_span);
+#if defined(__PROSPERO__) // PS5
+                // Alpha only 0 or 1 (cut-outs, foliage): BC1 with punch-through alpha keeps it,
+                // at half of BC3's size (astc_opaque here means "re-compressed to BC1"). The
+                // collector re-creates the same textures over and over, so results are kept by
+                // content. Off by default: in MKW only ~1% of the alpha ASTC textures are strictly
+                // binary, so it saves next to nothing (see MKW-MEMORY-HOTSPOTS.md). On with
+                // EDEN_NX2_ASTC_CUTOUT=1; EDEN_NX2_ASTC_CUTOUT_TOL=<0-127> also counts alpha bytes
+                // that close to 0 or 255 as binary (default 0; soft edges become hard).
+                static const bool cutout = [] {
+                    const char* value = std::getenv("EDEN_NX2_ASTC_CUTOUT");
+                    return value != nullptr && value[0] == '1';
+                }();
+                static const u32 cutout_tolerance = [] {
+                    const char* value = std::getenv("EDEN_NX2_ASTC_CUTOUT_TOL");
+                    return value != nullptr
+                               ? (std::min)(static_cast<u32>(std::strtoul(value, nullptr, 10)), 127U)
+                               : 0U;
+                }();
+                if (cutout && !new_info.astc_opaque) {
+                    const u64 key = Common::CityHash64(
+                                        reinterpret_cast<const char*>(scan_span.data()),
+                                        scan_span.size()) ^
+                                    (static_cast<u64>(new_info.format) << 56);
+                    bool binary;
+                    if (const auto it = astc_cutout_cache.find(key); it != astc_cutout_cache.end()) {
+                        binary = it->second;
+                        ++astc_cutout_cache_hits;
+                    } else {
+                        const auto start = std::chrono::steady_clock::now();
+                        binary = AstcDataAlphaIsBinary(scan_span, new_info.format, cutout_tolerance);
+                        astc_cutout_scan_ns += static_cast<u64>(
+                            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                std::chrono::steady_clock::now() - start)
+                                .count());
+                        ++astc_cutout_scans;
+                        // EDEN_NX2_ASTC_ALPHA_HIST=1: how far from binary each new alpha texture
+                        // is (a census for the cut-out tolerance; decodes all of it).
+                        static const bool hist = std::getenv("EDEN_NX2_ASTC_ALPHA_HIST") != nullptr;
+                        if (hist) {
+                            const auto [spread, between] =
+                                AstcDataAlphaSpread(scan_span, new_info.format);
+                            const size_t bucket = spread == 0 ? 0 : spread <= 4 ? 1 : spread <= 16 ? 2
+                                                  : spread <= 32 ? 3 : spread <= 64 ? 4 : 5;
+                            ++astc_alpha_hist[bucket];
+                            astc_alpha_hist_bytes[bucket] += scan_span.size();
+                            ++astc_alpha_between[between == 0 ? 0 : between <= 10 ? 1 : between <= 50 ? 2 : 3];
+                        }
+                        if (astc_cutout_cache.size() >= 32768) {
+                            astc_cutout_cache.clear();
+                        }
+                        astc_cutout_cache.emplace(key, binary);
+                    }
+                    if (binary) {
+                        new_info.astc_opaque = true;
+                        ++astc_cutout_images;
+                    }
+                }
+#endif
                 ++(new_info.astc_opaque ? astc_opaque_images : astc_alpha_images);
             }
         }
