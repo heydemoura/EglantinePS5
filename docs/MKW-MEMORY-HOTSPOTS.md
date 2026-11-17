@@ -144,6 +144,25 @@ next to its guest size. diag1 at ~360 s:
     loss. Dropping the top mip of large ASTC 8×8 images would halve again, with visual loss.
   - Make the collector count host bytes. It then evicts by what it actually frees.
 
+**Tried (branch `perf/astc-cutout-bc1`):**
+
+- **Binary-alpha ASTC → BC1 punch-through** (`EDEN_NX2_ASTC_CUTOUT=1`, off by default). The scan
+  decodes only blocks whose endpoint modes carry alpha, alpha channel only, and stops at the
+  first in-between alpha; results are cached by content hash.
+  - Cost: none worth counting. ≤23 ms of scans per 600 frames at race load, ~0 in the race
+    (98% cache hits).
+  - Gain: none. Only ~5 of ~520 alpha ASTC images per 600 frames are strictly 0/255. MKW's alpha
+    textures have soft alpha. ASTC 8×8 UNORM host stayed 525 MiB (baseline 522–535).
+  - A tolerance (`EDEN_NX2_ASTC_CUTOUT_TOL`) would catch more, but it hardens soft edges. It was
+    not measured: the console's control port died before that run.
+- **Trace lines count driver bytes** (PS5, always). The 600-frame line now reads ~2,650 MiB of
+  images, where it used to read 8,750 MiB (guest size).
+- **Collector counts driver bytes** (`EDEN_NX2_TC_HOST_BYTES=1`, off by default). One run:
+  - churn 3,923 deletes per 600 frames, against 3,562–3,615 at baseline;
+  - 32.0 presents/s, against 32.7–33.0.
+
+  That is within noise, but there is only one run, so it stays opt-in.
+
 ### 4. Game memory: 4.5–4.8 GB held, ~2 GB of it cold
 
 - The game writes fresh pages of its 8 GB heap as scenes change, and only returns ~0.6 GB a
