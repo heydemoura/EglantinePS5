@@ -24,6 +24,10 @@
 #include "common/memory_detect.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
+#include "common/thread_cpu_clock.h"
+#if defined(__PROSPERO__) // PS5
+#include <time.h>
+#endif
 #include "common/slot_vector.h"
 #include "video_core/control/channel_state.h"
 #include "video_core/dirty_flags.h"
@@ -39,6 +43,7 @@
 #include "video_core/texture_cache/host_mip_limits.h"
 #include "video_core/texture_cache/image_view_base.h"
 #include "video_core/texture_cache/samples_helper.h"
+#include "video_core/texture_cache/tc_cost.h"
 #include "video_core/texture_cache/texture_cache_base.h"
 #include "texture_partial.h"
 #include "astc_policy.h"
@@ -151,6 +156,7 @@ TextureCache<P>::TextureCache(Runtime& runtime_, Tegra::MaxwellDeviceMemoryManag
 template <class P>
 void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
     const StutterTrace::SiteScope site{StutterTrace::Site::TextureCollect};
+    const TcCost::Scope cost{TcCost::Slot::Collect};
     bool high_priority_mode = false;
     bool aggressive_mode = false;
     bool evict_old_costly = false;
@@ -378,7 +384,73 @@ void TextureCache<P>::LogThresholds() const {
 }
 
 template <class P>
+void TextureCache<P>::ReportCost() {
+    // Every 600 frames, as the EDEN_NX2_TC_LOG lines: each slot's milliseconds and calls in the
+    // window, the window's wall time and this thread's CPU time (the GPU thread that runs the
+    // texture cache), per frame.
+    auto& window = cost_window;
+    const auto now = std::chrono::steady_clock::now();
+    const u64 now_ticks = TcCost::Ticks();
+#if defined(__PROSPERO__) // PS5
+    // Common::CurrentThreadCpuTimeNs has no PS5 branch; the console's clock_gettime has it.
+    const std::optional<u64> cpu_now = [] () -> std::optional<u64> {
+        timespec time{};
+        if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &time) != 0) {
+            return std::nullopt;
+        }
+        return static_cast<u64>(time.tv_sec) * 1'000'000'000 + static_cast<u64>(time.tv_nsec);
+    }();
+#else
+    const std::optional<u64> cpu_now = Common::CurrentThreadCpuTimeNs();
+#endif
+    auto& totals = TcCost::g_totals;
+    std::array<u64, static_cast<size_t>(TcCost::Slot::Count)> ticks{};
+    std::array<u64, static_cast<size_t>(TcCost::Slot::Count)> calls{};
+    for (size_t i = 0; i < ticks.size(); ++i) {
+        ticks[i] = totals.ticks[i].load(std::memory_order_relaxed);
+        calls[i] = totals.calls[i].load(std::memory_order_relaxed);
+    }
+    const u64 churn = totals.churn_ticks.load(std::memory_order_relaxed);
+    const bool first = window.ticks == 0;
+    if (!first && ++window.frames % 600 != 0) {
+        return;
+    }
+    if (!first) {
+        const double wall_ms =
+            std::chrono::duration<double, std::milli>(now - window.wall).count();
+        const double ms_per_tick =
+            wall_ms / static_cast<double>((std::max<u64>)(now_ticks - window.ticks, 1));
+        const auto ms = [&](u64 delta) { return static_cast<double>(delta) * ms_per_tick; };
+        std::string line;
+        for (size_t i = 0; i < ticks.size(); ++i) {
+            line += fmt::format(" {} {:.1f} ms/{}", TcCost::slot_names[i],
+                                ms(ticks[i] - window.ticks_by_slot[i]),
+                                calls[i] - window.calls_by_slot[i]);
+        }
+        const double churn_ms = ms(churn - window.churn_ticks);
+        const double cpu_ms = cpu_now && window.cpu_ns && *cpu_now >= *window.cpu_ns
+                                  ? static_cast<double>(*cpu_now - *window.cpu_ns) / 1e6
+                                  : -1.0;
+        LOG_INFO(HW_GPU,
+                 "Texture cache cost last 600 frames: wall {:.0f} ms ({:.2f} ms/frame), thread CPU "
+                 "{:.0f} ms, churn {:.0f} ms ({:.2f} ms/frame, {:.1f}% of wall, {:.1f}% of thread "
+                 "CPU) |{}",
+                 wall_ms, wall_ms / 600.0, cpu_ms, churn_ms, churn_ms / 600.0,
+                 100.0 * churn_ms / (std::max)(wall_ms, 1.0),
+                 cpu_ms > 0 ? 100.0 * churn_ms / cpu_ms : -1.0, line);
+    }
+    window.frames = first ? 0 : window.frames;
+    window.wall = now;
+    window.ticks = now_ticks;
+    window.cpu_ns = cpu_now;
+    window.ticks_by_slot = ticks;
+    window.calls_by_slot = calls;
+    window.churn_ticks = churn;
+}
+
+template <class P>
 void TextureCache<P>::TickFrame() {
+    const TcCost::Scope cost{TcCost::Slot::TickFrame};
     // Upload buffers grown for one huge image (title 1's 341 MiB terrain layer pools) are freed
     // rather than kept for the rest of the session.
     for (auto* const scratch : {&swizzle_data_buffer, &unswizzle_data_buffer}) {
@@ -484,6 +556,7 @@ void TextureCache<P>::TickFrame() {
         }
     }
     if constexpr (requires { runtime.CurrentTick(); }) {
+        const TcCost::Scope destroy_cost{TcCost::Slot::Destroy};
         while (!gpu_sentenced_images.empty() &&
                runtime.IsFree(gpu_sentenced_images.front().tick)) {
             gpu_sentenced_bytes -= gpu_sentenced_images.front().bytes;
@@ -649,6 +722,9 @@ void TextureCache<P>::TickFrame() {
         gc_deletes = gc_costly_deletes = gc_download_deletes = async_decodes_queued = 0;
         images_created = images_deleted = 0;
     }
+    if (TcCost::Enabled()) {
+        ReportCost();
+    }
     // An image that could not be made at all: the driver is out of memory whatever the counts
     // say, so collect as at the critical threshold.
     bool out_of_memory = false;
@@ -668,11 +744,14 @@ void TextureCache<P>::TickFrame() {
             channel_storage[c].compute_image_table.Invalidate();
         }
     }
-    sentenced_images.Tick();
-    sentenced_image_index = (sentenced_image_index + 1) % TICKS_TO_DESTROY;
-    sentenced_image_bytes[sentenced_image_index] = 0;
-    sentenced_framebuffers.Tick();
-    sentenced_image_view.Tick();
+    {
+        const TcCost::Scope destroy_cost{TcCost::Slot::Destroy};
+        sentenced_images.Tick();
+        sentenced_image_index = (sentenced_image_index + 1) % TICKS_TO_DESTROY;
+        sentenced_image_bytes[sentenced_image_index] = 0;
+        sentenced_framebuffers.Tick();
+        sentenced_image_view.Tick();
+    }
     ::Eden::AstcPolicy::Frame();
     TickAsyncDecode();
     TickAsyncUnswizzle();
@@ -2200,6 +2279,9 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
         return;
     }
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::TextureUpload};
+    // Made this frame: the upload that re-creating an evicted image costs.
+    const TcCost::Scope cost{image.allocation_tick == frame_tick ? TcCost::Slot::RefreshNew
+                                                                  : TcCost::Slot::RefreshOld};
 
     image.flags &= ~ImageFlagBits::CpuModified;
 
@@ -2588,6 +2670,7 @@ void TextureCache<P>::UploadLayers(Image& image, std::span<const u32> layers) {
 template <class P>
 template <typename StagingBuffer>
 void TextureCache<P>::UploadImageContents(Image& image, StagingBuffer& staging) {
+    const TcCost::Scope cost{TcCost::Slot::Upload};
     const std::span<u8> mapped_span = staging.mapped_span;
     const GPUVAddr gpu_addr = image.gpu_addr;
 
@@ -3134,6 +3217,7 @@ template <class P>
 ImageId TextureCache<P>::InsertImage(const ImageInfo& info, GPUVAddr gpu_addr,
                                      RelaxedOptions options) {
     const StutterTrace::SiteScope site{StutterTrace::Site::ImageCreate};
+    const TcCost::Scope cost{TcCost::Slot::Insert};
     std::optional<DAddr> cpu_addr = ImageCpuAddress(gpu_addr, CalculateGuestSizeInBytes(info));
     if (!cpu_addr) {
         const DAddr fake_addr = ~(1ULL << 40ULL) + virtual_invalid_space;
@@ -3278,7 +3362,10 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
             }
         }
     }
-    const ImageId new_image_id = slot_images.insert(runtime, new_info, gpu_addr, cpu_addr);
+    const ImageId new_image_id = [&] {
+        const TcCost::Scope construct_cost{TcCost::Slot::Construct};
+        return slot_images.insert(runtime, new_info, gpu_addr, cpu_addr);
+    }();
     if constexpr (requires(const Image& image) { image.OutOfMemory(); }) {
         if (slot_images[new_image_id].OutOfMemory()) {
             // Left out of the cache: lookups see no image (a null view) and make it again once
@@ -3972,6 +4059,7 @@ ImageViewId TextureCache<P>::FindOrEmplaceImageView(ImageId image_id, const Imag
                  info.range.base.level, info.range.extent.levels, info.range.base.layer,
                  info.range.extent.layers);
     }
+    const TcCost::Scope cost{TcCost::Slot::ViewCreate};
     const ImageViewId image_view_id = slot_image_views.insert(runtime, info, image_id, image, slot_images);
     image.InsertView(info, image_view_id);
     return image_view_id;
@@ -4191,6 +4279,7 @@ void TextureCache<P>::UntrackImage(ImageBase& image, ImageId image_id) {
 template <class P>
 void TextureCache<P>::DeleteImage(ImageId image_id, bool immediate_delete) {
     const StutterTrace::SiteScope site{StutterTrace::Site::ImageDelete};
+    const TcCost::Scope cost{TcCost::Slot::Delete};
     ImageBase& image = slot_images[image_id];
     ++images_deleted;
     VideoCommon::Nx2FastDraw::Break(VideoCommon::Nx2FastDraw::Reason::Invalidation);
