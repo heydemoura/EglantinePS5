@@ -57,6 +57,10 @@ extern "C" int eden_direct_high(size_t size, size_t alignment, int type, std::in
 extern "C" int eden_direct_low(size_t size, size_t alignment, int type, std::int64_t* out) {
     return sceKernelAllocateDirectMemory(0, std::int64_t{1}<<40, size, alignment, type, out);
 }
+extern "C" int eden_direct_guest(size_t size, size_t alignment, int type, std::int64_t* out) {
+    return sceKernelAllocateDirectMemory(0, std::int64_t{1}<<40, size, alignment, type, out);
+}
+extern "C" int eden_direct_guest_runs(void) { return 0; }
 extern "C" int sceKernelReleaseDirectMemory(std::int64_t physical, size_t) {
     return close(physical>>32);
 }
