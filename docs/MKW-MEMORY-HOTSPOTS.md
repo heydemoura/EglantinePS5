@@ -30,7 +30,7 @@ measured on the old core.
 | base1 | main | ran 420 s | 31.1 |
 | mirror1 | main + mirror hook | ran | 32.4 |
 | diag1 | + image host-size trace | ran | 32.6 |
-| pack1 | diag + `EDEN_CRAM_PACK=1` | ran | 32.0 |
+| pack1 | diag + `EDEN_CRAM_PACK=1` (already the default: same setup as diag1) | ran | 32.0 |
 | poolA | + pool-free walk (switch off) | **OOM crash at 58 s** (race load) | – |
 | poolT1 | `EDEN_POOL_FREE_TOTAL=1` | ran | 33.3 |
 | poolS1 | `EDEN_POOL_FREE_TOTAL=1 EDEN_POOL_SHORT_MIB=256` | ran | 33.0 |
@@ -76,10 +76,12 @@ runs within ~5%.
     critical mark).
   - Meanwhile 0.5–0.65 GB is usable as 2 MiB pieces, which the driver can map since
     `tools/patch-radv-pieces.py`.
-- **Effect on packing:** this is also why packing does not help.
-  - pack1 packed 2,034 MiB of cold guest slots into 387 MiB (5.3:1).
-  - Guest memory held fell ~0.5 GB, but the largest block and the cache churn did not change.
-  - The slots it frees are scattered 2 MiB holes.
+- **Effect on packing:** packing is **on by default** on this core (`PackEnabled`: on unless
+  `EDEN_CRAM_PACK=0`), so every run here packs.
+  - pack1 packed 2,034 MiB of cold guest slots into 387 MiB (5.3:1). base1 packed ~1.8 GB.
+  - Even so, the pool still reads full: the slots it frees are scattered 2 MiB holes.
+  - pack1 is not a contrast (it only repeats the default). An `EDEN_CRAM_PACK=0` run is still to
+    do.
 - **Where the holes come from:** the guest service takes and returns 2 MiB slots one at a time.
   The heap grows by 32 MiB pieces and trims. VMA frees and re-takes 16–64 MiB blocks. All of them
   share one pool with no zoning.
@@ -149,11 +151,13 @@ next to its guest size. diag1 at ~360 s:
 - The game writes fresh pages of its 8 GB heap as scenes change, and only returns ~0.6 GB a
   session to its kernel (`returns_free` 520–680).
 - At ~360 s, 1.8–2.2 GB of it had not been written for 120 s.
-- **Packing (`EDEN_CRAM_PACK=1`):**
+- **Packing (on by default; `EDEN_CRAM_PACK=0` turns it off):**
   - Compresses the cold slots 5.3:1 in practice (2,034 → 387 MiB).
   - But 70% of packs are unpacked again (3,419 packs, 2,397 unpacks).
   - The freed slots land as scattered holes (hotspot 1).
-  - Earlier sessions tied packing to garbage GPU draws (see `MKW-MEMORY-LEAK.md`). It stays off.
+  - Earlier sessions tied packing to garbage GPU draws (see `MKW-MEMORY-LEAK.md`). Since then it
+    was turned back on by default (GPU-reachable slots included, `EDEN_CRAM_PACK_GPU`). Correction
+    of this report's first version, which said it was off.
 - **Running cost of the guest service:**
   - The scanner spends **22–27 s of CPU per 420 s session** (`scan_ms`, ~6% of one core).
   - Guest writes waited for a block **940–1,300 times** per session (`waits`). While one waits,
