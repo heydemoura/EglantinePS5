@@ -16,6 +16,8 @@
 #include <span>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 #include <fmt/format.h>
 #include <openssl/evp.h>
@@ -25,6 +27,7 @@
 #include "common/fs/file.h"
 #include "common/fs/path_util.h"
 #include "common/logging.h"
+#include "common/scope_exit.h"
 #include "common/swap.h"
 #include "core/file_sys/vfs/vfs_offset.h"
 
@@ -178,6 +181,15 @@ std::string Hex(const std::array<u8, 0x20>& bytes) {
     }
     return text;
 }
+
+/// One zstd context and read buffer for the header probes of a directory build. A context per
+/// probe was 831 MiB of heap traffic building MKW's romfs tree (thousands of probes).
+struct ZstdProbe {
+    std::unique_ptr<ZSTD_DCtx, decltype(&ZSTD_freeDCtx)> dctx{nullptr, &ZSTD_freeDCtx};
+    std::vector<u8> compressed;
+};
+/// Set while BuildPackageDir runs on this thread; HasZstdMagic makes its own probe otherwise.
+thread_local ZstdProbe* active_zstd_probe = nullptr;
 
 } // namespace
 
@@ -1042,17 +1054,27 @@ std::optional<bool> NupContainer::HasZstdMagic(std::size_t file_index) const {
     // The first block decodes the first bytes, and a block takes at most 128 KiB plus headers.
     const std::size_t compressed_size =
         static_cast<std::size_t>(std::min<u64>(node.extent_size, 132 * 1024));
-    const auto compressed =
-        file->ReadBytes(compressed_size, static_cast<std::size_t>(node.extent_offset));
-    std::unique_ptr<ZSTD_DCtx, decltype(&ZSTD_freeDCtx)> dctx{ZSTD_createDCtx(), &ZSTD_freeDCtx};
-    if (compressed.size() != compressed_size || !dctx) {
+    ZstdProbe local_probe;
+    ZstdProbe& probe = active_zstd_probe ? *active_zstd_probe : local_probe;
+    if (!probe.dctx) {
+        probe.dctx.reset(ZSTD_createDCtx());
+        if (!probe.dctx) {
+            return std::nullopt;
+        }
+    } else {
+        ZSTD_DCtx_reset(probe.dctx.get(), ZSTD_reset_session_only);
+    }
+    probe.compressed.resize(compressed_size);
+    if (file->Read(probe.compressed.data(), compressed_size,
+                   static_cast<std::size_t>(node.extent_offset)) != compressed_size) {
         return std::nullopt;
     }
-    ZSTD_DCtx_setParameter(dctx.get(), ZSTD_d_windowLogMax, ZSTD_WINDOWLOG_MAX);
-    ZSTD_inBuffer input{compressed.data(), compressed.size(), 0};
+    // Parameters survive a session-only reset
+    ZSTD_DCtx_setParameter(probe.dctx.get(), ZSTD_d_windowLogMax, ZSTD_WINDOWLOG_MAX);
+    ZSTD_inBuffer input{probe.compressed.data(), compressed_size, 0};
     ZSTD_outBuffer output{head.data(), head.size(), 0};
     while (output.pos < output.size && input.pos < input.size) {
-        if (ZSTD_isError(ZSTD_decompressStream(dctx.get(), &output, &input))) {
+        if (ZSTD_isError(ZSTD_decompressStream(probe.dctx.get(), &output, &input))) {
             return std::nullopt;
         }
     }
@@ -1147,6 +1169,11 @@ void NupContainer::BuildDirTree(u32 dir_index, VectorVfsDirectory& out, bool ser
 VirtualDir NupContainer::BuildPackageDir(u32 dir_index, bool serve_stand_ins) {
     auto out = std::make_shared<VectorVfsDirectory>(std::vector<VirtualFile>{},
                                                     std::vector<VirtualDir>{}, dirs[dir_index].name);
+    ZstdProbe probe;
+    ZstdProbe* const outer = std::exchange(active_zstd_probe, &probe);
+    SCOPE_EXIT {
+        active_zstd_probe = outer;
+    };
     BuildDirTree(dir_index, *out, serve_stand_ins);
     return out;
 }

@@ -21,13 +21,21 @@
 namespace Vulkan {
 
 namespace {
-// Research (research/heap-memory): EDEN_DESCRIPTOR_START_DIV=<n> starts each queue's host storage at
-// 1/n of its size (it grows on demand up to the usual ceiling, four times the size).
+// Each queue's host storage starts at 1/n of its size and grows on demand up to the usual ceiling,
+// four times the size. EDEN_DESCRIPTOR_START_DIV=<n> sets n (1 = the full size at start).
+// PS5: n = 4 by default, so the guest queue starts at 0x20000 entries (24 MiB instead of 96) and
+// the compute queues at 0x8000 (6 MiB instead of 24). Peaks seen a frame: guest 48k (MKW) and
+// 76-80k (Zelda), compute 5-14k, so neither grows (docs/HEAP-MEMORY-RESEARCH.md).
 size_t StartPayloadSize(size_t size) {
     static const size_t divisor = [] {
+#if defined(__PROSPERO__) // PS5
+        constexpr long default_divisor = 4;
+#else
+        constexpr long default_divisor = 1;
+#endif
         const char* value = std::getenv("EDEN_DESCRIPTOR_START_DIV");
-        const long parsed = value ? std::strtol(value, nullptr, 10) : 1;
-        return static_cast<size_t>(parsed >= 1 && parsed <= 64 ? parsed : 1);
+        const long parsed = value ? std::strtol(value, nullptr, 10) : default_divisor;
+        return static_cast<size_t>(parsed >= 1 && parsed <= 64 ? parsed : default_divisor);
     }();
     return (std::max<size_t>)(size / divisor, 0x1000);
 }

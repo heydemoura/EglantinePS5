@@ -1238,9 +1238,23 @@ std::shared_ptr<ShaderPools> PipelineCache::TakeSparePools() {
 }
 
 void PipelineCache::ReturnPools(std::shared_ptr<ShaderPools> pools) {
+    // One spare per worker plus the GPU thread: boot and precache jobs translate on every worker
+    // at once, and a pool dropped here is a fresh 1 MiB Inst chunk (and Block chunks) on the next
+    // job, which was ~7 GB of heap traffic at a 4,200-pipeline boot.
+    static const size_t spare_limit = GetTotalPipelineWorkers() + 2;
+    // ReleaseContents squashes the chunks a large program needed into one, and a spare kept that
+    // for good: ~230 MiB of MKW's heap was squashed pools of a few huge pipelines. Keep only
+    // pools near the default size (8,192 Insts are 1 MiB), and free a larger one as it is rather
+    // than squash it first (one more large allocation).
+    constexpr size_t MaxSpareBytes = size_t{4} << 20;
+    if (pools->inst.CapacityBytes() + pools->block.CapacityBytes() +
+            pools->flow_block.CapacityBytes() >
+        MaxSpareBytes) {
+        return;
+    }
     pools->ReleaseContents();
     std::scoped_lock lock{spare_pools_mutex};
-    if (spare_pools.size() < 4) {
+    if (spare_pools.size() < spare_limit) {
         spare_pools.push_back(std::move(pools));
     }
 }
@@ -1265,7 +1279,12 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::TranslateCachedGraphics(
             envs = std::move(read);
         }};
     VideoCommon::ReadPipelinePayload(payload, read_compute, read_graphics);
-    ShaderPools pools;
+    // Not built in parallel, so the IR is done with when CreateGraphicsPipeline returns
+    std::shared_ptr<ShaderPools> pools_owner = TakeSparePools();
+    SCOPE_EXIT {
+        ReturnPools(std::move(pools_owner));
+    };
+    ShaderPools& pools = *pools_owner;
     boost::container::static_vector<Shader::Environment*, Maxwell::MaxShaderProgram> env_ptrs;
     for (auto& env : envs) {
         env_ptrs.push_back(&env);
@@ -1535,7 +1554,11 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
                         }
                     }
                     OrderComputeTranslations(candidates);
-                    ShaderPools pools;
+                    std::shared_ptr<ShaderPools> pools_owner = TakeSparePools();
+                    SCOPE_EXIT {
+                        ReturnPools(std::move(pools_owner));
+                    };
+                    ShaderPools& pools = *pools_owner;
                     ComputePipelineCacheEntry entry;
                     size_t chosen{};
                     for (; chosen < candidates.size() && !context.StopRequested(); ++chosen) {
@@ -1766,9 +1789,12 @@ void PipelineCache::PrecacheShaders(u64 title_id, std::vector<PrecacheJob> jobs,
                                   env = std::move(env)]() mutable -> Common::UniqueFunction<bool> {
                         static const GuessMissing guess{};
                         env.SetGuessMissing(&guess);
-                        ShaderPools pools;
+                        std::shared_ptr<ShaderPools> pools_owner = TakeSparePools();
+                        SCOPE_EXIT {
+                            ReturnPools(std::move(pools_owner));
+                        };
                         auto pipeline =
-                            CreateComputePipeline(pools, key, env, nullptr, false).pipeline;
+                            CreateComputePipeline(*pools_owner, key, env, nullptr, false).pipeline;
                         if (!pipeline) {
                             return {};
                         }

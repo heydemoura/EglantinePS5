@@ -30,6 +30,15 @@ public:
         node = &chunks.emplace_back(new_chunk_size);
     }
 
+    /// Bytes of object storage the pool holds, used or not
+    [[nodiscard]] size_t CapacityBytes() const noexcept {
+        size_t objects = 0;
+        for (const Chunk& chunk : chunks) {
+            objects += chunk.num_objects;
+        }
+        return objects * sizeof(Storage);
+    }
+
     void ReleaseContents() {
         if (chunks.empty()) {
             return;
