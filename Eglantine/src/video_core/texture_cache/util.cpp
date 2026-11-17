@@ -611,6 +611,19 @@ bool AstcDataLooksOpaque(std::span<const u8> data) noexcept {
     return Tegra::Texture::ASTC::IsOpaque(data);
 }
 
+bool AstcDataAlphaIsBinary(std::span<const u8> data, PixelFormat format, u32 tolerance) noexcept {
+    return Tegra::Texture::ASTC::ClassifyAlpha(data, DefaultBlockWidth(format),
+                                               DefaultBlockHeight(format), tolerance) !=
+           Tegra::Texture::ASTC::AlphaKind::Other;
+}
+
+std::pair<u32, u32> AstcDataAlphaSpread(std::span<const u8> data, PixelFormat format) noexcept {
+    const auto stats = Tegra::Texture::ASTC::ScanAlpha(data, DefaultBlockWidth(format),
+                                                       DefaultBlockHeight(format), 255);
+    return {stats.max_between,
+            stats.texels != 0 ? static_cast<u32>(stats.between * 1000 / stats.texels) : 0U};
+}
+
 u32 CalculateConvertedSizeBytes(const ImageInfo& info) noexcept {
     if (info.type == ImageType::Buffer) {
         return info.size.width * BytesPerBlock(info.format);
