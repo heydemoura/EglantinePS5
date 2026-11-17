@@ -48,6 +48,7 @@
 #include "video_core/surface.h"
 #include "video_core/texture_cache/formatter.h"
 #include "video_core/texture_cache/samples_helper.h"
+#include "video_core/texture_cache/tc_cost.h"
 #include "video_core/texture_cache/util.h"
 #include "video_core/dlss_contract.h"
 #include "video_core/vulkan_common/vulkan_device.h"
@@ -548,6 +549,7 @@ constexpr std::array<VkFormat, 2> OpaqueAstcViewFormats{VK_FORMAT_BC1_RGBA_UNORM
     if (info.type == ImageType::Buffer) {
         return vk::Image{};
     }
+    const VideoCommon::TcCost::Scope cost{VideoCommon::TcCost::Slot::Allocate};
     VkImageCreateInfo image_ci = MakeImageCreateInfo(device, info, format_override);
     const VkImageFormatListCreateInfo image_format_list = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO,
@@ -1350,6 +1352,7 @@ TextureCacheRuntime::TextureCacheRuntime(const Device& device_, Scheduler& sched
 }
 
 void TextureCacheRuntime::Finish() {
+    const VideoCommon::TcCost::Scope cost{VideoCommon::TcCost::Slot::Finish};
     { auto timer = Eden::Performance::VulkanTimer(8); scheduler.Finish(); }
 }
 
@@ -5112,6 +5115,7 @@ void TextureCacheRuntime::AccelerateImageUpload(
     Image& image, const StagingBufferRef& map,
     std::span<const VideoCommon::SwizzleParameters> swizzles,
     u32 z_start, u32 z_count) {
+    const VideoCommon::TcCost::Scope cost{VideoCommon::TcCost::Slot::AstcDispatch};
 
     if (IsPixelFormatASTC(image.info.format)) {
         if (bc_encoder_pass && WillUseGpuBcnTranscode(device, image.info)) {
@@ -5138,6 +5142,7 @@ void TextureCacheRuntime::AccelerateImageUpload(
 void TextureCacheRuntime::AccelerateImageUploadLayers(
     Image& image, const StagingBufferRef& map,
     std::span<const VideoCommon::SwizzleParameters> swizzles, std::span<const u32> layers) {
+    const VideoCommon::TcCost::Scope cost{VideoCommon::TcCost::Slot::AstcDispatch};
     astc_decoder_pass->AssembleLayers(image, map, swizzles, layers);
 }
 
@@ -5199,6 +5204,7 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
             scheduler.Flush();
         }
         while (!pending_transcodes.empty() && held_bytes + decode_bytes > held_limit) {
+            const VideoCommon::TcCost::Scope cost{VideoCommon::TcCost::Slot::Finish};
             { auto timer = Eden::Performance::VulkanTimer(8); scheduler.Wait(pending_transcodes.front().tick); }
             while (!pending_transcodes.empty() && scheduler.IsFree(pending_transcodes.front().tick)) {
                 held_bytes -= bytes_of(pending_transcodes.front());

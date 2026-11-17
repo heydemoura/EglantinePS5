@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <deque>
@@ -48,6 +49,7 @@
 #include "video_core/texture_cache/render_targets.h"
 #include "video_core/texture_cache/sampled_views.h"
 #include "video_core/texture_cache/stale_pages.h"
+#include "video_core/texture_cache/tc_cost.h"
 #include "video_core/texture_cache/types.h"
 #include "video_core/textures/texture.h"
 #include "video_core/textures/unswizzle_worker.h"
@@ -189,6 +191,18 @@ class TextureCache : public VideoCommon::ChannelSetupCaches<TextureCacheChannelI
     bool debug_stats{}; ///< Collect what only the debug statistics lines use
     /// EDEN_NX2_MEM_TRACE: when the last memory trace lines were logged.
     std::chrono::steady_clock::time_point mem_trace_time{};
+    /// EDEN_NX2_TC_COST (tc_cost.h): the last report's frame, wall clock, counter, thread CPU time
+    /// and totals.
+    struct CostWindow {
+        u64 frames{};
+        std::chrono::steady_clock::time_point wall{};
+        u64 ticks{};
+        std::optional<u64> cpu_ns;
+        std::array<u64, static_cast<size_t>(TcCost::Slot::Count)> ticks_by_slot{};
+        std::array<u64, static_cast<size_t>(TcCost::Slot::Count)> calls_by_slot{};
+        u64 churn_ticks{};
+    } cost_window;
+    void ReportCost();
 
     static constexpr s64 DEFAULT_EXPECTED_MEMORY = 1_GiB + 125_MiB;
     static constexpr s64 DEFAULT_CRITICAL_MEMORY = 1_GiB + 625_MiB;
