@@ -815,6 +815,13 @@ bool WaitForBlock(Promote&& promote) noexcept {
 // device memory manager. Counted per slot; packing skips slots with any (PackSlot).
 extern "C" void eden_guest_gpu_cached(const void* host, int delta) noexcept {
     SparseRange* const range = guest_range.load(std::memory_order_acquire);
+    static std::atomic<int> logged{0};
+    if (logged.fetch_add(1, std::memory_order_relaxed) < 4) {
+        char line[200];
+        const int n = std::snprintf(line, sizeof(line), "EDEN_CRAM_MIRROR hook host=%p range=%p begin=%#zx end=%#zx\n", host,
+                                    static_cast<void*>(range), range ? std::size_t(range->begin.load()) : 0, range ? std::size_t(range->end) : 0);
+        if (n > 0) Report(line);
+    }
     if (range == nullptr) return;
     const std::uintptr_t begin = range->begin.load(std::memory_order_relaxed);
     const auto at = reinterpret_cast<std::uintptr_t>(host);
@@ -1575,6 +1582,30 @@ void ServiceReport(SparseRange& range, const char* when) noexcept {
             ++fine;
             fine_kept += FineKept(range, slot);
         }
+    }
+    // Held slots the GPU's caches also hold pages of (eden_guest_gpu_cached): guest memory the
+    // texture and buffer caches mirror.
+    std::size_t mirrored_slots = 0, mirrored_pages = 0, cached_unheld_pages = 0;
+    if (auto* table = gpu_cached_table.load(std::memory_order_acquire); table != nullptr) {
+        for (std::size_t slot = 0; slot < slots && slot < gpu_cached_slots; ++slot) {
+            const std::int32_t pages = table[slot].load(std::memory_order_relaxed);
+            if (pages <= 0) continue;
+            const auto state = SlotState(range, slot);
+            if (state == SlotOwn || state == SlotFine) {
+                ++mirrored_slots;
+                mirrored_pages += static_cast<std::size_t>(pages);
+            } else {
+                cached_unheld_pages += static_cast<std::size_t>(pages);
+            }
+        }
+    }
+    {
+        char mirror[200];
+        const int n = std::snprintf(mirror, sizeof(mirror),
+            "EDEN_CRAM_MIRROR %s held_slots_cached=%zu (%zuMiB) cached_pages_in_held=%zuMiB cached_pages_unheld=%zuMiB\n",
+            when, mirrored_slots, mirrored_slots * (SparseSlot >> 20), (mirrored_pages << 12) >> 20,
+            (cached_unheld_pages << 12) >> 20);
+        if (n > 0) Report(mirror);
     }
     char line[640];
     const int length = std::snprintf(line, sizeof(line),
