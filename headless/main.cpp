@@ -265,6 +265,8 @@ static void UpdateGrips(Core::System& system, Eden::Pad& pad) {
 void EdenRegisterNirBackend(); // nir_backend.cpp
 #endif
 
+extern "C" void eden_direct_guest_configure(void) __attribute__((weak));
+
 int main(int argc, char** argv) {
     try {
 #ifdef EDEN_PS5_RADV
@@ -547,6 +549,8 @@ int main(int argc, char** argv) {
                 setenv(entry.substr(0, split).c_str(), entry.c_str() + split + 1, 1);
                 std::printf("EDEN_ENV %s\n", entry.c_str());
             }
+            // Switches read before env.txt was (src/direct_memory.c, EDEN_GUEST_RUNS) are read again.
+            if (eden_direct_guest_configure) eden_direct_guest_configure();
         }
         // The console's defaults for the core's switches (env.txt above wins). Without a fastmem
         // arena every guest read of a GPU-tracked page is a call; a Switch 2 title's reads of

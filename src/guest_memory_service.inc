@@ -242,7 +242,7 @@ void* StoreAlloc(std::size_t size, std::int64_t* donate) noexcept {
     while (index < StoreBlocks && store_physical[index] >= 0) ++index;
     if (index == StoreBlocks) return nullptr;
     std::int64_t physical = -1;
-    if (eden_direct_low(StoreBlock, StoreBlock, 12, &physical) != 0) {
+    if (eden_direct_guest(StoreBlock, StoreBlock, 12, &physical) != 0) {
         if (donate == nullptr || *donate < 0) return nullptr;
         physical = std::exchange(*donate, -1);
     }
@@ -453,7 +453,7 @@ bool PromoteShared(SparseRange& range, std::size_t slot) noexcept {
     shared_lock.clear(std::memory_order_release);
     if (last) return mprotect(reinterpret_cast<void*>(at), SparseSlot, PROT_READ | PROT_WRITE) == 0;
     std::int64_t physical = -1;
-    if (eden_direct_low(SparseSlot, SparseSlot, 12, &physical) != 0 && !ReserveBlock(&physical)) return false;
+    if (eden_direct_guest(SparseSlot, SparseSlot, 12, &physical) != 0 && !ReserveBlock(&physical)) return false;
     void* view = reinterpret_cast<void*>(cpu_mapping_hint);
     if (sceKernelMapDirectMemory(&view, SparseSlot, PROT_READ | PROT_WRITE, 0, physical, SparseSlot) != 0) {
         (void)sceKernelReleaseDirectMemory(physical, SparseSlot);
@@ -533,7 +533,7 @@ bool UnpackSlot(SparseRange& range, std::size_t slot) noexcept {
     if (table == nullptr || table[slot].data == nullptr) std::abort();
     const std::uintptr_t at = SlotAddress(range, slot);
     std::int64_t physical = -1;
-    if (eden_direct_low(SparseSlot, SparseSlot, 12, &physical) != 0 && !UnpackBlock(&physical) &&
+    if (eden_direct_guest(SparseSlot, SparseSlot, 12, &physical) != 0 && !UnpackBlock(&physical) &&
         !ReserveBlock(&physical))
         return false;
     // Unpacked in a view of its own and only then mapped at the slot: mapped first, a reader that
@@ -610,7 +610,7 @@ bool PromoteFine(SparseRange& range, std::size_t slot) noexcept {
     const std::size_t kept = FineKept(range, slot);
 #ifdef PS5_NATIVE
     std::int64_t physical = -1;
-    if (eden_direct_low(SparseSlot, SparseSlot, 12, &physical) != 0 && !ReserveBlock(&physical)) return false;
+    if (eden_direct_guest(SparseSlot, SparseSlot, 12, &physical) != 0 && !ReserveBlock(&physical)) return false;
     void* view = reinterpret_cast<void*>(cpu_mapping_hint);
     if (sceKernelMapDirectMemory(&view, SparseSlot, PROT_READ | PROT_WRITE, 0, physical, SparseSlot) != 0) {
         (void)sceKernelReleaseDirectMemory(physical, SparseSlot);
@@ -651,7 +651,7 @@ bool MakeFine(SparseRange& range, std::size_t slot, const bool (&zero)[FinePages
     const std::uintptr_t at = SlotAddress(range, slot);
 #ifdef PS5_NATIVE
     std::int64_t compact = -1;
-    if (eden_direct_low(kept * FinePage, FinePage, 12, &compact) != 0) return false;
+    if (eden_direct_guest(kept * FinePage, FinePage, 12, &compact) != 0) return false;
     void* view = reinterpret_cast<void*>(cpu_mapping_hint);
     if (sceKernelMapDirectMemory(&view, kept * FinePage, PROT_READ | PROT_WRITE, 0, compact, FinePage) != 0) {
         (void)sceKernelReleaseDirectMemory(compact, kept * FinePage);
@@ -1519,6 +1519,15 @@ void PackPass(SparseRange& range, std::size_t slots, std::vector<std::size_t>& c
     for (const std::size_t slot : candidates)
         if (now - cold_since[slot] >= (ColdSeconds << std::min<unsigned>(pack_times[slot], 4))) ready.push_back(slot);
     std::sort(ready.begin(), ready.end(), [](std::size_t a, std::size_t b) { return cold_since[a] < cold_since[b]; });
+#ifdef PS5_NATIVE
+    // With the guest's memory in runs (EDEN_GUEST_RUNS=1, src/direct_memory.c): the lowest blocks
+    // first, so what packing gives back is the bottom of the guest's zone, next to the free run
+    // between it and the driver's blocks, rather than holes spread over the zone. A racy read of
+    // `physical` only changes the order.
+    if (eden_direct_guest_runs())
+        std::sort(ready.begin(), ready.end(),
+                  [&range](std::size_t a, std::size_t b) { return range.physical[a] < range.physical[b]; });
+#endif
     std::size_t done = 0;
     for (const std::size_t slot : ready) {
         if (done >= PackPerPass) break;

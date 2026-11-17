@@ -561,6 +561,9 @@ static void ReportFileHandles() {
 static std::atomic<unsigned long long> largest_free_block{0};
 // The driver's own buffer bytes (RADV's PS5 winsys counter, renamed by tools/isolate-radv.py).
 extern "C" unsigned long long eden_radv_private_radv_ps5_allocated_bytes __attribute__((weak));
+// The guest's zone at the top of the pool (src/direct_memory.c, EDEN_GUEST_RUNS=1).
+extern "C" std::int64_t eden_direct_guest_lo(void) __attribute__((weak));
+extern "C" int eden_direct_guest_report(char* out, std::size_t bytes) __attribute__((weak));
 static void RefreshFreeMemory() {
 #if defined(PS5_NATIVE) || defined(__linux__)
     Eden::HangStacks::Beat();
@@ -585,16 +588,23 @@ static void RefreshFreeMemory() {
     }();
     static std::atomic<long long> walked_ns{0};
     static std::atomic<unsigned long long> free_pieces_bytes{0}, free_all_bytes{0}, free_holes{0};
+    static std::atomic<long long> free_largest_at{0}, free_in_zone{0}, free_largest_size{0};
     if (known && now - walked_ns.load(std::memory_order_relaxed) >= 1'000'000'000) {
         walked_ns.store(now, std::memory_order_relaxed);
         constexpr std::int64_t Piece = std::int64_t{2} << 20;
-        std::int64_t offset = 0, pieces = 0, all = 0;
+        std::int64_t offset = 0, pieces = 0, all = 0, largest_at = 0, largest_size = 0, in_zone = 0;
+        const std::int64_t zone_lo = eden_direct_guest_lo ? eden_direct_guest_lo() : 0;
         unsigned regions = 0, holes = 0;
         DirectMemoryRegion region{};
         const auto gap = [&](std::int64_t from, std::int64_t to) {
             if (to <= from) return;
             all += to - from;
             ++holes;
+            if (to - from > largest_size) {
+                largest_size = to - from;
+                largest_at = from;
+            }
+            if (zone_lo != 0 && to > zone_lo) in_zone += to - (std::max)(from, zone_lo);
             const std::int64_t first = (from + Piece - 1) & ~(Piece - 1), last = to & ~(Piece - 1);
             if (last > first) pieces += last - first;
         };
@@ -608,6 +618,9 @@ static void RefreshFreeMemory() {
         free_pieces_bytes.store(static_cast<unsigned long long>(pieces), std::memory_order_relaxed);
         free_all_bytes.store(static_cast<unsigned long long>(all), std::memory_order_relaxed);
         free_holes.store(holes, std::memory_order_relaxed);
+        free_largest_at.store(largest_at, std::memory_order_relaxed);
+        free_largest_size.store(largest_size, std::memory_order_relaxed);
+        free_in_zone.store(in_zone, std::memory_order_relaxed);
     }
     const std::size_t seen_free =
         use_total ? (std::max)(largest, static_cast<std::size_t>(free_pieces_bytes.load(std::memory_order_relaxed))) : largest;
@@ -634,6 +647,13 @@ static void RefreshFreeMemory() {
         std::fprintf(stderr, "EDEN_MEMORY_FREE largest=%zuMiB free=%lluMiB in_2mib_pieces=%lluMiB holes=%llu use_total=%d view_free=%zuMiB\n",
                      largest >> 20, free_all_bytes.load() >> 20, free_pieces_bytes.load() >> 20, free_holes.load(),
                      int(use_total), view.free >> 20);
+        // Where the largest hole is, and (EDEN_GUEST_RUNS=1) how much of the free memory is in the guest's zone.
+        std::fprintf(stderr, "EDEN_MEMORY_LAYOUT walked_largest=%lldMiB at=%lldMiB free_in_guest_zone=%lldMiB\n",
+                     free_largest_size.load() >> 20, free_largest_at.load() >> 20, free_in_zone.load() >> 20);
+        if (eden_direct_guest_report) {
+            char line[320];
+            if (eden_direct_guest_report(line, sizeof(line)) > 0) std::fputs(line, stderr);
+        }
         std::fprintf(stderr, "EDEN_MEMORY_PARTS t=%lld driver_mib=%llu guest_held_mib=%zu guest_span_mib=%zu\n",
                      now / 1'000'000'000,
                      &eden_radv_private_radv_ps5_allocated_bytes != nullptr

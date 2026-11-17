@@ -315,6 +315,10 @@ SparseRange* SparseRangeOf(std::uintptr_t address) {
 extern "C" int eden_direct_high(std::size_t size, std::size_t alignment, int type, std::int64_t* start);
 // Where the system puts it: a 2 MiB block of this file's, which a session gives back.
 extern "C" int eden_direct_low(std::size_t size, std::size_t alignment, int type, std::int64_t* start);
+// A block of the guest's memory: with EDEN_GUEST_RUNS=1 from a zone at the top of the pool, kept in
+// runs apart from the driver's blocks; else as eden_direct_low.
+extern "C" int eden_direct_guest(std::size_t size, std::size_t alignment, int type, std::int64_t* start);
+extern "C" int eden_direct_guest_runs(void);
 #endif
 
 #ifdef PS5_NATIVE
@@ -322,7 +326,7 @@ std::int64_t zero_block = -1;
 
 // A 2 MiB block of direct memory, zeroed through a mapping of its own that is gone again.
 bool ZeroedBlock(std::int64_t* physical) {
-    if (eden_direct_low(SparseSlot, SparseSlot, 12, physical) != 0)
+    if (eden_direct_guest(SparseSlot, SparseSlot, 12, physical) != 0)
         return false;
     void* view = reinterpret_cast<void*>(cpu_mapping_hint);
     if (sceKernelMapDirectMemory(&view, SparseSlot, PROT_READ | PROT_WRITE, 0, *physical, SparseSlot) != 0) {
