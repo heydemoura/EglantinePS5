@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <memory>
 #include <span>
 #include <vector>
 
@@ -16,12 +17,15 @@
 #include "core/hle/service/nvnflinger/pixel_format.h"
 #include "core/hle/service/nvnflinger/ui/fence.h"
 
+#include "video_core/cpu_framebuffer.h"
+
 namespace Tegra {
 
 enum class BlendMode {
     Opaque,
     Premultiplied,
     Coverage,
+    VideoKey,
 };
 
 /**
@@ -38,6 +42,7 @@ struct FramebufferConfig {
     Common::Rectangle<int> crop_rect{};
     BlendMode blending{};
     bool native_tiling{};
+    std::shared_ptr<const CpuFramebuffer> cpu_pixels;
     u32 layer_stack_mask{Service::Nvnflinger::DefaultLayerStackMask};
 };
 

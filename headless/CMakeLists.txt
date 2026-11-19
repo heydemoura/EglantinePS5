@@ -319,6 +319,11 @@ else()
     target_link_libraries(eden-devices-check PRIVATE core eden-pad eden-device-mock)
     target_compile_options(eden-devices-check PRIVATE -fno-rtti)
     # The player profiles (profiles.h): Eden's profile file and the choice in the settings file.
+    add_executable(eden-cpu-video-frame-check "${EDEN_PORT_DIR}/cpu_video_frame_check.cpp")
+    target_include_directories(eden-cpu-video-frame-check PRIVATE "${PROJECT_SOURCE_DIR}/src")
+    target_link_libraries(eden-cpu-video-frame-check PRIVATE common Threads::Threads)
+    target_compile_options(eden-cpu-video-frame-check PRIVATE -UNDEBUG)
+
     add_executable(eden-profiles-check "${EDEN_PORT_DIR}/profiles_check.cpp")
     target_link_libraries(eden-profiles-check PRIVATE core)
     target_compile_options(eden-profiles-check PRIVATE -UNDEBUG)
