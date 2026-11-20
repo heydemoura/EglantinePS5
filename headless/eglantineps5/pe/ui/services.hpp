@@ -314,6 +314,7 @@ struct Preferences
     int language = 0;
     int menu_volume = 70; // launcher sounds, 0-100
     bool skip_game_aa = true; // Video: skip a game's tensor anti-aliasing network (Ocarina of Time)
+    bool amd_fsr31 = true;    // Video: AMD FSR 3.1 in place of a game's own upscaler (Ocarina of Time)
     // Accessibility: how the launcher itself is shown (theme.hpp, Look).
     bool large_text = false;
     bool high_contrast = false;

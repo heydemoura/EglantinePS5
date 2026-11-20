@@ -11,5 +11,9 @@ void main() {
         return;
     }
     // The guest has already tonemapped this square-root-encoded color for LDR.
-    imageStore(dlss_color, pixel, vec4(texelFetch(guest_color, pixel, 0).rgb, 1.0));
+    // Below 1x (Settings > Video > Resolution) the scene is smaller than the guest's colour, which a
+    // compute pass writes at full size: the nearest guest pixel to this scene pixel's centre.
+    const ivec2 source = ivec2((vec2(pixel) + 0.5) * vec2(textureSize(guest_color, 0)) /
+                               vec2(imageSize(dlss_color)));
+    imageStore(dlss_color, pixel, vec4(texelFetch(guest_color, source, 0).rgb, 1.0));
 }

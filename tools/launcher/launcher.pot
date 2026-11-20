@@ -1969,6 +1969,10 @@ msgid "Skip game anti-aliasing"
 msgstr ""
 
 #: pe/ui/settings.cpp
+msgid "AMD FSR 3.1"
+msgstr ""
+
+#: pe/ui/settings.cpp
 msgid "Skips some checks when a game changes memory the GPU uses: faster, and textures can be stale."
 msgstr ""
 

@@ -145,6 +145,13 @@ int main() {
     assert(video.resolution == 1 && video.upscaling_filter == 1 && video.volume == 40);
     assert(Read(file).find("\"resolution\": \"0.75x\"") != std::string::npos);
     assert(Read(file).find("\"upscaling_filter\": \"fsr\"") != std::string::npos);
+    // AMD FSR 3.1 (Settings > Video) is on by default and is saved when turned off.
+    assert(video.amd_fsr31);
+    video.amd_fsr31 = false;
+    assert(Eden::SavePreferences(video, file) && !Eden::LoadPreferences(file).amd_fsr31);
+    assert(Read(file).find("\"amd_fsr31\": false") != std::string::npos);
+    video.amd_fsr31 = true;
+    assert(Eden::SavePreferences(video, file) && Eden::LoadPreferences(file).amd_fsr31);
     // The largest scale is 4x; nothing beyond the list is saved.
     video.resolution = 6;
     assert(Eden::SavePreferences(video, file) && Eden::LoadPreferences(file).resolution == 6);

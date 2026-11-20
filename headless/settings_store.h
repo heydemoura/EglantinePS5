@@ -167,6 +167,9 @@ struct Preferences {
     // Settings > Video: skip the anti-aliasing network some games run on tensor cores (Ocarina of
     // Time's, video_core/oot_network.h) for a plain upscale; off runs the game's own.
     bool skip_game_aa = true;
+    // Settings > Video: AMD FSR 3.1 (the FidelityFX SDK's upscaler, vk_fsr3_upscaler.cpp) in place of
+    // a game's own upscaler where Eglantine has the game's motion and depth (Ocarina of Time).
+    bool amd_fsr31 = true;
 };
 
 inline int KeyIndex(const std::string& value, const char* const* keys, int count, int fallback) {
@@ -396,6 +399,7 @@ inline Preferences LoadPreferences(const std::string& file = SettingsFile()) {
                              kOutputKeys, int(std::size(kOutputKeys)), result.output);
     result.frame_gen = Settings::Bool(document, Json::json_pointer("/video/frame_gen"), result.frame_gen);
     result.skip_game_aa = Settings::Bool(document, Json::json_pointer("/video/skip_game_aa"), result.skip_game_aa);
+    result.amd_fsr31 = Settings::Bool(document, Json::json_pointer("/video/amd_fsr31"), result.amd_fsr31);
     result.frame_gen_type = KeyIndex(Settings::String(document, Json::json_pointer("/video/frame_gen_type")),
                                      kFrameGenTypeKeys, int(std::size(kFrameGenTypeKeys)), result.frame_gen_type);
     result.frame_gen_target = KeyIndex(
@@ -449,6 +453,7 @@ inline bool SavePreferences(const Preferences& value, const std::string& file = 
     document["video"]["output_resolution"] = kOutputKeys[value.output];
     document["video"]["frame_gen"] = value.frame_gen;
     document["video"]["skip_game_aa"] = value.skip_game_aa;
+    document["video"]["amd_fsr31"] = value.amd_fsr31;
     document["video"]["frame_gen_type"] = kFrameGenTypeKeys[value.frame_gen_type];
     document["video"]["frame_gen_target"] = kFrameGenTargetKeys[value.frame_gen_target];
     document["video"]["frame_gen_multiplier"] = kFrameGenMultiplierKeys[value.frame_gen_multiplier];

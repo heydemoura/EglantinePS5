@@ -1126,6 +1126,13 @@ int main(int argc, char** argv) {
             // Settings > Video > Skip game anti-aliasing (video_core/oot_network.h): read by the core
             // at each dispatch of a game's network.
             setenv("EDEN_OOT_ANTI_ALIASING", video.skip_game_aa ? "skip" : "game", 1);
+            // Settings > Video > AMD FSR 3.1: the FidelityFX SDK's FSR 3.1 upscaler in place of Ocarina
+            // of Time's own (vk_ocarina_camera_motion.cpp), from the game's camera motion and depth. On
+            // the console: 1080p to 1440p, about 0.7 FPS and 250 MiB of graphics memory. env.txt's
+            // EDEN_OCARINA_FSR=0/1 overrides the switch (A/B runs).
+            bool ocarina_fsr = video.amd_fsr31;
+            if (const char* value = std::getenv("EDEN_OCARINA_FSR")) ocarina_fsr = value[0] == '1';
+            Settings::values.ocarina_fsr.SetValue(ocarina_fsr);
             const int resolution = video.resolution;
             const int filter = video.upscaling_filter;
             Settings::values.resolution_setup.SetValue(resolutions[resolution]);

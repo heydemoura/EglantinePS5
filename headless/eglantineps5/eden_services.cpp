@@ -1364,6 +1364,7 @@ pe::ui::Preferences EdenServices::preferences() {
     result.output = saved.output;
     result.frame_gen = saved.frame_gen;
     result.skip_game_aa = saved.skip_game_aa;
+    result.amd_fsr31 = saved.amd_fsr31;
     result.frame_gen_type = saved.frame_gen_type;
     result.frame_gen_target = saved.frame_gen_target;
     result.frame_gen_multiplier = saved.frame_gen_multiplier;
@@ -1406,6 +1407,7 @@ bool EdenServices::set_preferences(const pe::ui::Preferences& preferences) {
     value.output = preferences.output;
     value.frame_gen = preferences.frame_gen;
     value.skip_game_aa = preferences.skip_game_aa;
+    value.amd_fsr31 = preferences.amd_fsr31;
     value.frame_gen_type = preferences.frame_gen_type;
     value.frame_gen_target = preferences.frame_gen_target;
     value.frame_gen_multiplier = preferences.frame_gen_multiplier;

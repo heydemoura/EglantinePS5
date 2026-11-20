@@ -758,6 +758,10 @@ msgstr "Tipo de geração de fotogramas"
 msgid "Skip game anti-aliasing"
 msgstr "Ignorar o anti-aliasing do jogo"
 
+#: pe/ui/settings.cpp
+msgid "AMD FSR 3.1"
+msgstr "AMD FSR 3.1"
+
 #: pe/ui/game_options.cpp, pe/ui/settings.cpp
 msgid "Frame generation"
 msgstr "Geração de fotogramas"
