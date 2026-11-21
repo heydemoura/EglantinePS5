@@ -3132,8 +3132,27 @@ void BufferCache<P>::UpdateIndexBuffer() {
     const GPUVAddr gpu_addr_begin = index_buffer_ref.StartAddress();
     const GPUVAddr gpu_addr_end = index_buffer_ref.EndAddress();
     const std::optional<DAddr> device_addr = gpu_memory->GpuToCpuAddress(gpu_addr_begin);
-    const u32 address_size = static_cast<u32>(gpu_addr_end - gpu_addr_begin);
-    const u32 draw_size = (index_buffer_ref.count + index_buffer_ref.first) * u32(index_buffer_ref.FormatSizeInBytes());
+    // Switch 2 titles leave the index limit at 0 (end below start: no bound), and the count and first
+    // registers can hold values no draw uses: Mario Kart World's race load came here with 1.8 billion
+    // indices, and the 32-bit products wrapped to a 2.9 GB "index buffer" that merged 101 buffers
+    // and asked the pool for 2.9 GB of staging at once (out of device memory every time). The span
+    // is worked out in 64 bits, an end below the start means no bound, and a binding is capped at
+    // 128 MiB (64 M 16-bit indices); indices past it read as out of bounds. (Old core patch 0056.)
+    constexpr u64 MaxIndexBinding = u64{128} << 20;
+    const u64 address_size64 = gpu_addr_end > gpu_addr_begin ? gpu_addr_end - gpu_addr_begin : ~u64{0};
+    const u64 draw_size64 = (u64{index_buffer_ref.count} + u64{index_buffer_ref.first}) *
+                            u64{index_buffer_ref.FormatSizeInBytes()};
+    const u64 wanted64 = (std::min)(address_size64, draw_size64);
+    if (wanted64 > MaxIndexBinding) {
+        static std::atomic<unsigned> clamped{0};
+        if (clamped.fetch_add(1, std::memory_order_relaxed) < 16) {
+            LOG_WARNING(HW_GPU, "Index buffer span of {} MiB (count {}, first {}) capped at {} MiB",
+                        wanted64 >> 20, index_buffer_ref.count, index_buffer_ref.first,
+                        MaxIndexBinding >> 20);
+        }
+    }
+    const u32 address_size = static_cast<u32>((std::min)(address_size64, MaxIndexBinding));
+    const u32 draw_size = static_cast<u32>((std::min)(draw_size64, MaxIndexBinding));
     const u32 size = (std::min)(address_size, draw_size);
     if (size == 0 || !device_addr) {
         channel_state->index_buffer = NULL_BINDING;

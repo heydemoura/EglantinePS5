@@ -561,6 +561,10 @@ static void ReportFileHandles() {
 static std::atomic<unsigned long long> largest_free_block{0};
 // The driver's own buffer bytes (RADV's PS5 winsys counter, renamed by tools/isolate-radv.py).
 extern "C" unsigned long long eden_radv_private_radv_ps5_allocated_bytes __attribute__((weak));
+// RADV's per-priority report (tools/patch-radv-memory-report.py, RADV_PS5_MEMORY_REPORT=1). It ran
+// only on memory budget queries, and the texture collector now reads the pool instead.
+extern "C" void eden_radv_private_radv_ps5_memory_report(unsigned long long pool, unsigned long long available,
+                                                        unsigned long long driver) __attribute__((weak));
 static void RefreshFreeMemory() {
 #if defined(PS5_NATIVE) || defined(__linux__)
     Eden::HangStacks::Beat();
@@ -595,6 +599,10 @@ static void RefreshFreeMemory() {
                      &eden_radv_private_radv_ps5_allocated_bytes != nullptr
                          ? __atomic_load_n(&eden_radv_private_radv_ps5_allocated_bytes, __ATOMIC_RELAXED) >> 20 : 0ULL,
                      guest_held >> 20, guest_span >> 20);
+        if (&eden_radv_private_radv_ps5_memory_report != nullptr && &eden_radv_private_radv_ps5_allocated_bytes != nullptr)
+            eden_radv_private_radv_ps5_memory_report(
+                static_cast<unsigned long long>(total > 0 ? total : 0), largest,
+                __atomic_load_n(&eden_radv_private_radv_ps5_allocated_bytes, __ATOMIC_RELAXED));
         ReportHeap("every 20 s");
         ReportFileHandles();
         ::Kernel::Svc::MemoryStats::Report(stderr);

@@ -311,12 +311,16 @@ struct FileBackend final : public Backend {
         // Prevent logs from exceeding a set maximum size in the event that log entries are spammed.
         const auto write_limit = Settings::values.extended_logging.GetValue() ? 1_GiB : 100_MiB;
         const bool write_limit_exceeded = bytes_written > write_limit;
-        if (entry.log_level >= Level::Error || write_limit_exceeded) {
+        // EglantinePS5: at most 2 s of lines wait in the buffer. The console ends a killed app at
+        // once, and the lines before an out-of-memory kill were the ones lost.
+        const auto now = std::chrono::steady_clock::now();
+        if (entry.log_level >= Level::Error || write_limit_exceeded || now - last_flush >= std::chrono::seconds{2}) {
             // Stop writing after the write limit is exceeded.
             // Don't close the file so we can print a stacktrace if necessary
             if (write_limit_exceeded)
                 enabled = false;
             file->Flush();
+            last_flush = now;
         }
     }
 
@@ -327,6 +331,7 @@ private:
     std::optional<FS::IOFile> file;
     std::size_t bytes_written = 0;
     bool enabled = true;
+    std::chrono::steady_clock::time_point last_flush{};
 };
 #endif
 /// @brief Backend that keeps the last lines in memory, off unless the debug server turns it on

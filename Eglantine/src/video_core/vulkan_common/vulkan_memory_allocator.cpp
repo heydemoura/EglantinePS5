@@ -49,8 +49,27 @@ extern "C" std::size_t eden_heap_committed(void);
 #include "video_core/gpu_logging/gpu_logging.h"
 #include "common/settings.h"
 
+// The guest memory service (PS5 port) gives memory back on demand: it trims the driver's unused
+// blocks, then packs guest memory the game has not written for a while. Absent elsewhere. Returns
+// the bytes it gave back. (Old core patch 0023, lost in the move to the in-repo core.)
+extern "C" [[gnu::weak]] std::size_t eden_memory_recover(std::size_t bytes) noexcept;
+
 namespace Vulkan {
 namespace {
+// Out of device memory: asks for memory back (`bytes` and a 64 MiB block more) and tries again, up
+// to three times. The pool the console shares with the guest's memory fills with cold guest
+// memory that can be packed; without this the first failure skipped an image or ended the app.
+template <typename Create>
+VkResult RecoverDeviceMemory(VkResult result, VkDeviceSize bytes, Create&& create) {
+    for (int attempt = 0; result == VK_ERROR_OUT_OF_DEVICE_MEMORY && attempt < 3; ++attempt) {
+        if (&eden_memory_recover == nullptr ||
+            eden_memory_recover(static_cast<std::size_t>(bytes) + (std::size_t{64} << 20)) == 0) {
+            break;
+        }
+        result = create();
+    }
+    return result;
+}
 
 // Helpers translating MemoryUsage to flags/usage
 
@@ -315,6 +334,10 @@ VkResult MemoryAllocator::AllocateImage(const VkImageCreateInfo &ci, bool dedica
         VmaAllocationCreateInfo relaxed = alloc_ci;
         relaxed.flags &= ~VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
         result = vmaCreateImage(allocator, &ci, &relaxed, &handle, &allocation, &alloc_info);
+        // The request is not known before a failure: 8 bytes a texel covers every format used.
+        result = RecoverDeviceMemory(result, texels * 8, [&] {
+            return vmaCreateImage(allocator, &ci, &relaxed, &handle, &allocation, &alloc_info);
+        });
     }
     if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY && !huge) {
         // Still out of device memory: a real image in host memory (slow, but valid) beats one
@@ -552,6 +575,9 @@ vk::Buffer MemoryAllocator::CreateBuffer(const VkBufferCreateInfo &ci, MemoryUsa
             VmaAllocationCreateInfo relaxed = alloc_ci;
             relaxed.flags &= ~VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
             result = vmaCreateBuffer(allocator, &ci, &relaxed, &handle, &allocation, &alloc_info);
+            result = RecoverDeviceMemory(result, ci.size, [&] {
+                return vmaCreateBuffer(allocator, &ci, &relaxed, &handle, &allocation, &alloc_info);
+            });
         }
         vk::Check(result);
     }
@@ -689,6 +715,8 @@ MemoryCommit MemoryAllocator::Commit(const VkMemoryRequirements &reqs, MemoryUsa
             ci3.preferredFlags &= ~VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
             res = vmaAllocateMemory(allocator, &reqs, &ci3, &a, &info);
         }
+        res = RecoverDeviceMemory(res, reqs.size,
+                                  [&] { return vmaAllocateMemory(allocator, &reqs, &ci2, &a, &info); });
     }
 
     vk::Check(res);
@@ -726,6 +754,10 @@ MemoryCommit MemoryAllocator::Commit(const vk::Buffer &buffer, MemoryUsage usage
             ci3.preferredFlags &= ~VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
             res = vmaAllocateMemoryForBuffer(allocator, raw, &ci3, &a, &info);
         }
+        const VkMemoryRequirements requirements = device.GetLogical().GetBufferMemoryRequirements(raw);
+        res = RecoverDeviceMemory(res, requirements.size, [&] {
+            return vmaAllocateMemoryForBuffer(allocator, raw, &ci2, &a, &info);
+        });
     }
 
     vk::Check(res);
@@ -850,7 +882,7 @@ void LogMemoryStatistics(const Device& device) {
         if (s.blockCount == 0) {
             continue;
         }
-        LOG_DEBUG(Render_Vulkan, "VMA type {} (heap {}, flags {:#x}): {} blocks {} MiB, {} allocations {} MiB",
+        LOG_INFO(Render_Vulkan, "VMA type {} (heap {}, flags {:#x}): {} blocks {} MiB, {} allocations {} MiB",
                  type, properties->memoryTypes[type].heapIndex,
                  static_cast<u32>(properties->memoryTypes[type].propertyFlags), s.blockCount,
                  s.blockBytes >> 20, s.allocationCount, s.allocationBytes >> 20);

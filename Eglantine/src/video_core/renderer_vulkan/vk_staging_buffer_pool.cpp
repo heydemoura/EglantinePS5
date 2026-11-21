@@ -166,6 +166,21 @@ void StagingBufferPool::TickFrame() {
     ReleaseCache(MemoryUsage::Download);
     if (::Eden::Performance::GraphicsMemoryIsShort()) {
         ReleaseCompleted();
+        return;
+    }
+    // Large buffers (over 32 MiB) go as soon as the GPU is done with them. The console's one pool is
+    // shared with the game's memory: kept for 64 frames, idle ones held 0.5-0.9 GB in Ocarina of
+    // Time (uploads up to 288 MiB). Making one again costs less than the pool running out.
+    constexpr size_t KeepMaxLog2 = 25;
+    const auto idle = [this](const StagingBuffer& entry) {
+        return !entry.deferred && scheduler.IsFree(entry.tick);
+    };
+    for (StagingBuffersCache* const cache : {&device_local_cache, &upload_cache, &download_cache}) {
+        for (size_t level = KeepMaxLog2 + 1; level < NUM_LEVELS; ++level) {
+            if (!(*cache)[level].entries.empty()) {
+                ::Eden::StagingBuffers::ReleaseFrom((*cache)[level], idle);
+            }
+        }
     }
 }
 

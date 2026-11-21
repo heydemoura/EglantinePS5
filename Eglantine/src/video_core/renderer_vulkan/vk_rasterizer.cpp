@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <atomic>
 #include "performance.h"
 #include "image_pages.h"
 #include "dev_vulkan.h"
@@ -1384,6 +1385,23 @@ void TraceWindowTarget(const Tegra::Engines::Maxwell3D& maxwell3d, Tegra::Memory
 } // Anonymous namespace
 
 void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
+    // An indexed draw past the 128 MiB index binding (BufferCache::UpdateIndexBuffer) is dropped: its
+    // count register holds no real draw (Mario Kart World's race load: 559 million indices), and run
+    // on the GPU it kept the queue busy past the driver's 10 s limit and the device was lost.
+    if (is_indexed) {
+        const auto& index_buffer = maxwell3d->draw_manager.draw_state.index_buffer;
+        const u64 bytes = (u64{index_buffer.count} + u64{index_buffer.first}) *
+                          u64{index_buffer.FormatSizeInBytes()};
+        if (bytes > (u64{128} << 20)) {
+            static std::atomic<unsigned> dropped{0};
+            if (dropped.fetch_add(1, std::memory_order_relaxed) < 16) {
+                LOG_WARNING(Render_Vulkan,
+                            "Indexed draw of {} indices (first {}) dropped: past the index binding",
+                            index_buffer.count, index_buffer.first);
+            }
+            return;
+        }
+    }
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Draw};
     {
         // A draw's first and count can come from memory a skipped (rejected) compute program

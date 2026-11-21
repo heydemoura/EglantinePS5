@@ -1965,7 +1965,12 @@ std::size_t RecoverMemory(std::size_t bytes, bool wait) noexcept {
     const std::uint32_t now = ColdNow();
     recover_order.clear();
     for (std::size_t slot = 0; slot < cold_since.size(); ++slot)
-        if (SlotState(*range, slot) == SlotOwn && now - cold_since[slot] >= 10) recover_order.push_back(slot);
+        // Cold for 10 s, twice as long for each time the slot was packed or would not pack (the
+        // scanner's back-off): a slot that does not compress was compressed again on every call,
+        // and Ocarina of Time's memory mostly does not (LZ4 ratio ~0.83).
+        if (SlotState(*range, slot) == SlotOwn &&
+            now - cold_since[slot] >= (10u << std::min<unsigned>(pack_times[slot], 4)))
+            recover_order.push_back(slot);
     std::sort(recover_order.begin(), recover_order.end(),
               [](std::size_t a, std::size_t b) { return cold_since[a] < cold_since[b]; });
     std::size_t freed = 0;
@@ -1973,6 +1978,10 @@ std::size_t RecoverMemory(std::size_t bytes, bool wait) noexcept {
         if (freed >= bytes) break;
         if (PackSlot(*range, slot)) {
             freed += SparseSlot;
+            cold_since[slot] = now;
+            if (pack_times[slot] < 255) ++pack_times[slot];
+        } else {
+            // Would not pack (or could not now): not tried again until it has waited its back-off.
             cold_since[slot] = now;
             if (pack_times[slot] < 255) ++pack_times[slot];
         }

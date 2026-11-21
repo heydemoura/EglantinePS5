@@ -2901,6 +2901,10 @@ bool TextureCacheRuntime::CanReportMemoryUsage() const {
 
 void TextureCacheRuntime::LogMemoryStatistics() const {
     Vulkan::LogMemoryStatistics(device);
+    LOG_INFO(Render_Vulkan, "Staging buffers kept: device-local {} MiB, upload {} MiB, download {} MiB",
+             staging_buffer_pool.CachedBytes(MemoryUsage::DeviceLocal) >> 20,
+             staging_buffer_pool.CachedBytes(MemoryUsage::Upload) >> 20,
+             staging_buffer_pool.CachedBytes(MemoryUsage::Download) >> 20);
 }
 
 void TextureCacheRuntime::LogMemoryTrace() {
@@ -2997,6 +3001,11 @@ void TextureCacheRuntime::TickFrame() {
     std::erase_if(free_transcodes, [](PendingTranscode& t) {
         return ++t.unused_frames > MAX_UNUSED_SCRATCH_FRAMES;
     });
+    // While the console's pool is short, finished decode images are not kept for the next texture
+    // of their shape (up to 256 MiB of them): they go, and a later texture makes its own.
+    if (::Eden::Performance::GraphicsMemoryIsShort()) {
+        free_transcodes.clear();
+    }
     std::erase_if(msaa_scratch_images, [this](MsaaScratchImage& scratch) {
         if (!scheduler.IsFree(scratch.tick)) {
             scratch.unused_frames = 0;
@@ -4953,7 +4962,10 @@ void Framebuffer::CreateFramebuffer(TextureCacheRuntime& runtime,
     u32 height = (std::numeric_limits<u32>::max)();
     for (size_t index = 0; index < NUM_RT; ++index) {
         const ImageView* const color_buffer = color_buffers[index];
-        if (!color_buffer) {
+        // A target whose image got no memory (the pool ran out) has no view: left out, as an
+        // unbound target, rather than a null attachment the driver dereferences.
+        if (!color_buffer || color_buffer->RenderTarget() == VK_NULL_HANDLE ||
+            color_buffer->ImageHandle() == VK_NULL_HANDLE) {
             renderpass_key.color_formats[index] = PixelFormat::Invalid;
             continue;
         }
@@ -4973,6 +4985,10 @@ void Framebuffer::CreateFramebuffer(TextureCacheRuntime& runtime,
     const size_t num_colors = attachments.size();
     VkImage depth_image = VK_NULL_HANDLE;
     VkImageAspectFlags depth_aspect_mask = 0;
+    if (depth_buffer && (depth_buffer->RenderTarget() == VK_NULL_HANDLE ||
+                         depth_buffer->ImageHandle() == VK_NULL_HANDLE)) {
+        depth_buffer = nullptr; // no memory for its image: drawn without depth
+    }
     if (depth_buffer) {
         width = (std::min)(width, is_rescaled ? resolution.ScaleUp(depth_buffer->size.width)
                                             : depth_buffer->size.width);
