@@ -30,6 +30,10 @@
 #include "core/memory.h"
 #include "video_core/nx2_perf.h"
 
+#if defined(__PROSPERO__) // PS5
+extern "C" void eden_guest_gpu_cached(const void* host, int delta) noexcept;
+#endif
+
 namespace Core {
 
 namespace {
@@ -705,6 +709,14 @@ void DeviceMemoryManager<Traits>::UpdatePagesCachedCountNoLock(DAddr addr, size_
 
         // Adds or subtracts 1, as count is a unsigned 8-bit value
         count.fetch_add(static_cast<CounterType>(delta), std::memory_order_release);
+#if defined(__PROSPERO__) // PS5
+        // The guest memory service counts the pages the GPU's caches hold per 2 MiB slot
+        // (EDEN_CRAM held/gpu_mirrored report).
+        if (const auto now = count.load(std::memory_order::relaxed);
+            (delta > 0 && now == 1) || (delta < 0 && now == 0)) {
+            eden_guest_gpu_cached(GetPointer<u8>(page << Memory::YUZU_PAGEBITS), delta > 0 ? 1 : -1);
+        }
+#endif
 
         // Assume delta is either -1 or 1
         if (count.load(std::memory_order::relaxed) == 0) {

@@ -576,7 +576,48 @@ static void RefreshFreeMemory() {
     const bool known = total > 0 && sceKernelAvailableDirectMemorySize(0, total, 0x4000, &start, &largest) == 0;
     std::size_t held = 0, target = 0;
     if (eden_guest_memory_reserve) eden_guest_memory_reserve(&held, &target);
-    const PoolView view = ViewOfPool(known, largest, held, target);
+    // Research (EDEN_POOL_FREE_TOTAL=1): the driver takes memory from 2 MiB pieces when no run is
+    // large enough (tools/patch-radv-pieces.py), so what graphics can still get is every free
+    // 2 MiB-aligned piece, not the largest run. Walked at most once a second.
+    static const bool use_total = [] {
+        const char* value = std::getenv("EDEN_POOL_FREE_TOTAL");
+        return value != nullptr && value[0] == '1';
+    }();
+    static std::atomic<long long> walked_ns{0};
+    static std::atomic<unsigned long long> free_pieces_bytes{0}, free_all_bytes{0}, free_holes{0};
+    if (known && now - walked_ns.load(std::memory_order_relaxed) >= 1'000'000'000) {
+        walked_ns.store(now, std::memory_order_relaxed);
+        constexpr std::int64_t Piece = std::int64_t{2} << 20;
+        std::int64_t offset = 0, pieces = 0, all = 0;
+        unsigned regions = 0, holes = 0;
+        DirectMemoryRegion region{};
+        const auto gap = [&](std::int64_t from, std::int64_t to) {
+            if (to <= from) return;
+            all += to - from;
+            ++holes;
+            const std::int64_t first = (from + Piece - 1) & ~(Piece - 1), last = to & ~(Piece - 1);
+            if (last > first) pieces += last - first;
+        };
+        while (offset < total && regions < 65536 &&
+               sceKernelDirectMemoryQuery(offset, 1, &region, sizeof(region)) == 0 && region.end > offset) {
+            gap(offset, region.start);
+            offset = region.end;
+            ++regions;
+        }
+        gap(offset, total);
+        free_pieces_bytes.store(static_cast<unsigned long long>(pieces), std::memory_order_relaxed);
+        free_all_bytes.store(static_cast<unsigned long long>(all), std::memory_order_relaxed);
+        free_holes.store(holes, std::memory_order_relaxed);
+    }
+    const std::size_t seen_free =
+        use_total ? (std::max)(largest, static_cast<std::size_t>(free_pieces_bytes.load(std::memory_order_relaxed))) : largest;
+    PoolView view = ViewOfPool(known, seen_free, held, target);
+    // Research (EDEN_POOL_SHORT_MIB=<MiB>): the "short" mark (kShortMemory, 1 GiB) set lower.
+    static const std::size_t short_mark = [] {
+        const char* value = std::getenv("EDEN_POOL_SHORT_MIB");
+        return value != nullptr ? static_cast<std::size_t>(std::strtoull(value, nullptr, 10)) << 20 : std::size_t{0};
+    }();
+    if (known && short_mark != 0) view.short_memory = view.free < short_mark || (target != 0 && held < target / 2);
     largest_free_block.store(known ? (view.free != 0 ? view.free : 1) : 0, std::memory_order_relaxed);
     graphics_memory_short.store(view.short_memory, std::memory_order_relaxed);
     // The pool, the guest's memory and the heap in stderr.log every 20 s, to see what holds it.
@@ -590,6 +631,9 @@ static void RefreshFreeMemory() {
                      " (the kernel maps %llu MiB)\n",
                      largest >> 20, int(view.short_memory), guest_held >> 20,
                      kernel_memory ? kernel_memory() >> 20 : 0ULL);
+        std::fprintf(stderr, "EDEN_MEMORY_FREE largest=%zuMiB free=%lluMiB in_2mib_pieces=%lluMiB holes=%llu use_total=%d view_free=%zuMiB\n",
+                     largest >> 20, free_all_bytes.load() >> 20, free_pieces_bytes.load() >> 20, free_holes.load(),
+                     int(use_total), view.free >> 20);
         std::fprintf(stderr, "EDEN_MEMORY_PARTS t=%lld driver_mib=%llu guest_held_mib=%zu guest_span_mib=%zu\n",
                      now / 1'000'000'000,
                      &eden_radv_private_radv_ps5_allocated_bytes != nullptr

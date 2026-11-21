@@ -576,6 +576,38 @@ void TextureCache<P>::TickFrame() {
         if constexpr (requires { runtime.LogMemoryTrace(); }) {
             runtime.LogMemoryTrace();
         }
+#if defined(__PROSPERO__) // PS5
+        // Every 30 s: the driver memory images really hold next to their guest size, by guest
+        // format (transcodes such as ASTC -> BC3/RGBA8 make an image larger than its guest data).
+        if constexpr (requires(Image& image) { image.MemoryBlock(); image.SparseBoundBytes(); image.ExtraMemoryBytes(); }) {
+            static int host_trace_tick = 0;
+            if (++host_trace_tick % 15 == 0) {
+                struct Sum { u64 guest; u64 host; u64 scaled; u64 extra; u32 count; };
+                std::map<u32, Sum> sums;
+                Sum total{};
+                for (const auto [image_id, image] : slot_images) {
+                    const u64 guest = image->guest_size_bytes;
+                    const u64 host = image->MemoryBlock().size + image->SparseBoundBytes();
+                    const u64 scaled = image->ExtraMemoryBytes();
+                    const u64 extra = 0;
+                    auto& sum = sums[static_cast<u32>(image->info.format)];
+                    for (Sum* s2 : {&sum, &total}) {
+                        s2->guest += guest; s2->host += host; s2->scaled += scaled; s2->extra += extra; ++s2->count;
+                    }
+                }
+                LOG_INFO(HW_GPU, "Memory trace: images host {} MiB (guest {} MiB, scaled {} MiB, unswizzle buffers {} MiB) in {} images",
+                         total.host >> 20, total.guest >> 20, total.scaled >> 20, total.extra >> 20, total.count);
+                std::vector<std::pair<u64, u32>> order;
+                for (const auto& [format, sum] : sums) order.emplace_back(sum.host, format);
+                std::sort(order.rbegin(), order.rend());
+                for (size_t i = 0; i < std::min<size_t>(10, order.size()); ++i) {
+                    const Sum& sum = sums[order[i].second];
+                    LOG_INFO(HW_GPU, "Memory trace:   format {}: host {} MiB guest {} MiB scaled {} MiB in {} images",
+                             order[i].second, sum.host >> 20, sum.guest >> 20, sum.scaled >> 20, sum.count);
+                }
+            }
+        }
+#endif
     }
     // Every 600 frames: device memory in use against the collector's thresholds.
     // Skip expensive heap allocation, map construction, and sorting unless debug logging is explicitly enabled.

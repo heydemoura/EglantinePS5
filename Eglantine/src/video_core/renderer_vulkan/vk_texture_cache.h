@@ -574,6 +574,13 @@ public:
         return sparse_layers.bound_bytes;
     }
 
+#if defined(__PROSPERO__) // PS5
+    /// Memory-trace diagnostics: the rescaled copy's and the compute unswizzle buffer's bytes.
+    u64 ExtraMemoryBytes() const noexcept {
+        return (scaled_image ? scaled_image.GetMemoryBlock().size : 0) + compute_unswizzle_buffer_size;
+    }
+#endif
+
     bool IsRescaled() const noexcept;
 
     bool ScaleUp(bool ignore = false);
