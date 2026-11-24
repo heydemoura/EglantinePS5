@@ -8,7 +8,11 @@ Ported from PS5_Lichii (mihawk, codeberg.org/mihawk/PS5_Lichii, commit 5a424f7, 
 GPL-3.0-or-later). The file format, the key and the code are PS5_Lichii's; only the paths and this text were
 adapted. The emulator side is described in [docs/TEXTURE-STORE.md](../../docs/TEXTURE-STORE.md).
 
-Nothing here has been run for EglantinePS5 yet: see "Untested" in that document.
+`texture_store.py` has not been run for EglantinePS5 yet: see "Untested" in that document. `from_dump.py` has: it
+makes store files from the emulator's own dump of the ASTC images a game used (`EDEN_NX2_TEXTURE_STORE_DUMP`), for
+a game whose files `texture_store.py` cannot read. Its text says how, and "From a dump" in that document. It needs
+only `build.sh`'s library, `numpy` and `astc-encoder-py` (any Python 3), and `bc7tex.cpp` has three faster levels
+for it.
 
 Game files, and everything made from them, stay out of this repository: the tool only reads the unpacked game and
 writes to a folder you name. A store is made from your own dump and is never distributed.
