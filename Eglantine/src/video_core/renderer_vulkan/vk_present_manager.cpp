@@ -169,7 +169,10 @@ PresentManager::PresentManager(const vk::Instance& instance_,
     , surface{surface_}
     , blit_supported{CanBlitToSwapchain(device.GetPhysical(), swapchain.GetImageViewFormat())}
     , storage_supported{CanStoreToFrame(device.GetPhysical(), swapchain.GetImageFormat())}
-    , use_present_thread{Settings::values.async_presentation.GetValue()}
+    // Frame generation needs the present thread to space generated frames without stalling the
+    // emulator (upstream Eglantine faa4bd13a8).
+    , use_present_thread{Settings::values.async_presentation.GetValue() ||
+                         Settings::values.frame_gen.GetValue()}
 {
     SetImageCount();
 
