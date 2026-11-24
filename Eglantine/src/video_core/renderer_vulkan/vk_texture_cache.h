@@ -11,6 +11,8 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <string>
+#include <unordered_map>
 
 #include "video_core/texture_cache/texture_cache_base.h"
 
@@ -128,6 +130,16 @@ public:
 
     /// True when ASTC is re-compressed to BC3 and opaque images may use BC1 instead.
     bool UseOpaqueAstcFormat() const;
+
+    /// The texture store: ASTC images converted to BC7 ahead of time (tools/texture-store), one
+    /// file each in the running title's store folder, named by the CityHash64 of the guest's ASTC
+    /// bytes. The key of the image with these guest bytes when the store has a file that fits
+    /// `info`, else 0 (always, without a store). From PS5_Lichii (mihawk,
+    /// codeberg.org/mihawk/PS5_Lichii), src/video_core/renderer_vulkan/vk_texture_cache.h.
+    u64 FindStoredAstc(std::span<const u8> guest_data, const VideoCommon::ImageInfo& info);
+    /// Uploads a stored image's BC7 levels from its file; false when the file cannot be read or
+    /// does not fit the image, which is then left as it was.
+    bool UploadStoredAstc(Image& image);
 
     bool CanDownloadMsaa(const VideoCommon::ImageInfo& info) const;
 
@@ -301,7 +313,8 @@ public:
     void TranscodeAstcToBcn(Image& image, const StagingBufferRef& map,
                             std::span<const VideoCommon::SwizzleParameters> swizzles);
 
-    /// Temporary decode images, reusable once the GPU is past `tick`.
+    /// Temporary decode images, reusable once the GPU is past `tick`. `layers` is the decode
+    /// image's own count: fewer than the texture's when it is decoded in batches of layers.
     struct PendingTranscode {
         u64 tick;
         vk::Image image;
@@ -315,6 +328,11 @@ public:
     std::deque<PendingTranscode> pending_transcodes;
     /// Decode images the GPU is done with, for the next texture of the same shape.
     std::vector<PendingTranscode> free_transcodes;
+
+    /// The texture store's files by key (FindStoredAstc); empty without a store.
+    std::unordered_map<u64, std::string> astc_store;
+    u64 astc_store_hits = 0;
+    u64 astc_store_misses = 0;
 
     std::optional<BlockLinearUnswizzle3DPass> bl3d_unswizzle_pass;
     const Settings::ResolutionScalingInfo& resolution;

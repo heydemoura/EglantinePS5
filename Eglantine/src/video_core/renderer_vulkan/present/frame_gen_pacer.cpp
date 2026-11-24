@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <utility>
 
 #include "common/settings.h"
@@ -25,6 +26,19 @@ constexpr f32 TARGET_SATISFIED_RATIO = 0.95f;
 constexpr f32 UNLOADED_BASE_RETENTION = 0.75f;
 constexpr f32 CREDIT_EPSILON = 1.0e-4f;
 constexpr u32 MAX_PROBE_FAILURES = 4;
+/// Outputs per real frame for a wanted (fractional) count: 2x from 1.3 (FIFO slows a faster
+/// guest to half the refresh, which is smooth), more only from k + 0.85, since each step past
+/// 2x slows the guest to refresh/k (3x: 20 fps at 60 Hz).
+[[nodiscard]] size_t PickOutputs(f32 wanted) {
+    if (wanted < 1.3f) {
+        return 1;
+    }
+    return std::max<size_t>(2, static_cast<size_t>(std::floor(wanted + 0.15f)));
+}
+constexpr auto STEP_UP_DELAY = std::chrono::seconds(1);
+constexpr auto DOWN_TRIAL_PERIOD = std::chrono::seconds(3);
+constexpr auto DOWN_TRIAL_BACKOFF = std::chrono::seconds(10);
+constexpr auto DOWN_TRIAL_DURATION = std::chrono::seconds(1);
 
 constexpr auto STABILIZATION_DURATION = std::chrono::seconds(1);
 constexpr auto PROBE_DURATION = std::chrono::seconds(1);
@@ -42,6 +56,15 @@ constexpr auto PROBE_STEP_DELAY = std::chrono::milliseconds(250);
     default:
         return std::chrono::seconds(60);
     }
+}
+
+/// EDEN_FG_DITHER=1: the old per-frame output credit (varying generations per real frame).
+[[nodiscard]] bool DitherOutputs() {
+    static const bool dither = [] {
+        const char* value = std::getenv("EDEN_FG_DITHER");
+        return value != nullptr && value[0] == '1';
+    }();
+    return dither;
 }
 
 } // Anonymous namespace
@@ -122,6 +145,51 @@ FrameGenPlan FrameGenPacer::Plan(size_t capacity) {
     if (allowed == 0 || desired_outputs <= 1.0f) {
         output_credit = 0.0f;
         return {};
+    }
+
+    if (!DitherOutputs()) {
+        // One output count for every real frame. Varying it frame to frame (the credit below)
+        // alternates half-interval and whole-interval motion steps: at 34 fps toward 60 every
+        // fourth frame got no generated frame, a judder well visible in Zelda on BC250.
+        // Frame generation presents FIFO, so a held count above what the guest needs only
+        // slows the guest to refresh/count. Hence PickOutputs prefers 2x, a higher count needs a
+        // full second of clear shortfall, and past 2x one step lower is tried now and then: a
+        // FIFO-paced guest cannot show that it would run faster (Zelda walking: 3x held the
+        // guest at 20 fps where 2x ran 23-29).
+        const size_t wanted = PickOutputs(desired_outputs);
+        if (down_trial_until) {
+            if (now >= *down_trial_until) {
+                down_trial_until.reset();
+                if (wanted > held_outputs) {
+                    ++held_outputs;
+                    next_down_trial = now + DOWN_TRIAL_BACKOFF;
+                } else {
+                    next_down_trial = now + DOWN_TRIAL_PERIOD;
+                }
+            }
+        } else if (held_outputs == 0 || wanted < held_outputs) {
+            held_outputs = wanted;
+            step_up_since.reset();
+            next_down_trial = now + DOWN_TRIAL_PERIOD;
+        } else if (wanted > held_outputs) {
+            if (!step_up_since) {
+                step_up_since = now;
+            } else if (now - *step_up_since >= STEP_UP_DELAY) {
+                ++held_outputs;
+                step_up_since.reset();
+                next_down_trial = now + DOWN_TRIAL_PERIOD;
+            }
+        } else {
+            step_up_since.reset();
+            if (held_outputs > 2 && next_down_trial && now >= *next_down_trial) {
+                --held_outputs;
+                down_trial_until = now + DOWN_TRIAL_DURATION;
+            }
+        }
+        output_credit = 0.0f;
+        const size_t held_generations = std::min(held_outputs - 1, allowed);
+        issued_generations = held_generations;
+        return {.generations = held_generations, .warm = true};
     }
 
     output_credit += desired_outputs;
@@ -219,6 +287,10 @@ void FrameGenPacer::Stabilize(Clock::time_point now) {
     deficit_since.reset();
     smoothed_interval = 0.0f;
     output_credit = 0.0f;
+    held_outputs = 0;
+    down_trial_until.reset();
+    next_down_trial.reset();
+    step_up_since.reset();
 }
 
 void FrameGenPacer::Reset() {
@@ -235,6 +307,10 @@ void FrameGenPacer::Reset() {
     probe_previous_limit = 0;
     limit = 0;
     probe_failures = 0;
+    held_outputs = 0;
+    down_trial_until.reset();
+    next_down_trial.reset();
+    step_up_since.reset();
 }
 
 } // namespace Vulkan

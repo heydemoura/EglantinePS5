@@ -1364,6 +1364,84 @@ static void CheckSparseTables() {
               "six threads on shared slots, an unmap that touches only what was written");
 }
 
+// A JIT code cache that takes its memory as it fills (src/memory_pages.cpp, "A range that
+// fills"): address space alone when it is made, then memory behind both views for what the JIT
+// asks for and no more than a step over it (2 MiB; 16 MiB with EDEN_JIT_LAZY_CACHE=0), the same
+// bytes through the view that is written and the one that runs, a fault past the memory and for
+// a write to the view that runs, and all of it given back.
+namespace Common {
+void* ReserveCodeRange(std::size_t, void** executable) noexcept;
+bool CommitCodeRange(const void* executable, std::size_t bytes) noexcept;
+bool FreeCodeRange(void* executable) noexcept;
+void CodeRangeUsage(std::size_t* reserved, std::size_t* committed) noexcept;
+}
+static void CheckCodeRanges() {
+    const char* const lazy = std::getenv("EDEN_JIT_LAZY_CACHE");
+    constexpr std::size_t MiB = std::size_t{1} << 20, size = 320 * MiB;
+    const std::size_t step = (lazy != nullptr && lazy[0] == '0' ? 16 : 2) * MiB;
+    std::size_t span0 = 0, held0 = 0, span = 0, held = 0;
+    Common::CodeRangeUsage(&span0, &held0);
+    const auto faults = [](std::uint8_t* at) {
+        const pid_t child = fork();
+        require(child >= 0);
+        if (child == 0) {
+            *static_cast<volatile std::uint8_t*>(at) = 1;
+            _exit(0);
+        }
+        int status = 0;
+        return waitpid(child, &status, 0) == child && WIFSIGNALED(status) && WTERMSIG(status) == SIGSEGV;
+    };
+    // A cache below 32 MiB, or one that is no whole number of steps, is left to be taken whole.
+    void* executable = nullptr;
+    require(Common::ReserveCodeRange(16 * MiB, &executable) == nullptr &&
+            Common::ReserveCodeRange(33 * MiB, &executable) == nullptr);
+    // Two caches the size of a Switch 2 title's take no memory when they are made.
+    void* executables[2]{};
+    std::uint8_t* writables[2]{};
+    for (int i = 0; i < 2; ++i) {
+        writables[i] = static_cast<std::uint8_t*>(Common::ReserveCodeRange(size, &executables[i]));
+        require(writables[i] != nullptr && executables[i] != nullptr && writables[i] != executables[i]);
+    }
+    Common::CodeRangeUsage(&span, &held);
+    require(span - span0 == 2 * size && held == held0);
+    std::uint8_t* const writable = writables[0];
+    auto* const code = static_cast<std::uint8_t*>(executables[0]);
+    require(faults(writable));
+    // The first byte asked for brings one step, and asking again brings nothing.
+    for (int pass = 0; pass < 2; ++pass) require(Common::CommitCodeRange(code, 1));
+    Common::CodeRangeUsage(&span, &held);
+    require(held - held0 == step);
+    // What is written through one view runs from the other, which cannot be written.
+    writable[64] = 0xc3; // ret
+    require(code[64] == 0xc3 && faults(code + 64));
+    reinterpret_cast<void (*)()>(code + 64)();
+    // The JIT asks before every block for 1 MiB past where it writes: the memory follows it.
+    for (std::size_t at = 0; at < 40 * MiB; at += 300 * 1024) {
+        require(Common::CommitCodeRange(code, at + MiB));
+        writable[at + MiB - 1] = static_cast<std::uint8_t>(at >> 12);
+        require(code[at + MiB - 1] == static_cast<std::uint8_t>(at >> 12));
+        Common::CodeRangeUsage(&span, &held);
+        require(held - held0 == (at + MiB + step - 1) / step * step);
+    }
+    require(faults(writable + (held - held0)) && code[64] == 0xc3);
+    // The other cache has only what it asked for, and a range that is no cache has nothing to do.
+    require(Common::CommitCodeRange(executables[1], step + 1) && faults(writables[1] + 2 * step));
+    writables[1][step] = 7;
+    require(static_cast<const std::uint8_t*>(executables[1])[step] == 7);
+    require(Common::CommitCodeRange(&span, 1) && !Common::FreeCodeRange(&span));
+    // More than the cache is all of it.
+    require(Common::CommitCodeRange(code, size + MiB));
+    Common::CodeRangeUsage(&span, &held);
+    require(held - held0 == size + 2 * step);
+    writable[size - 1] = 9;
+    require(code[size - 1] == 9);
+    for (void* const view : executables) require(Common::FreeCodeRange(view) && !Common::FreeCodeRange(view));
+    Common::CodeRangeUsage(&span, &held);
+    require(span == span0 && held == held0);
+    std::printf("Code ranges PASS: two caches of 320 MiB, memory in %zu MiB steps as the JIT asks, one memory behind "
+                "both views, faults past it and for a write where code runs, all given back\n", step / MiB);
+}
+
 // The JIT's direct page table (headless/jit-page-table.cmake). Every PageEntryData write keeps a
 // page's direct value equal to the entry's pointer, 0 when marked or empty; a first write in an
 // untouched part of the table commits the mirror too (the mirror store would fault otherwise);
@@ -1839,9 +1917,34 @@ static void CheckReadTrapAreas() {
     std::printf("Read trap areas PASS: %u cases\n", cases);
 }
 
+// The swap store's own parts (src/guest_memory_service.inc, "Swap"): a slot there and back, its
+// units found again without a write in the same session and in the next, units of zeroes and twins,
+// scattered new units in one write, a changed byte in the store, the budget and its refill, the
+// store's limit and the storage's, an index ahead of its store, and a store that starts over:
+// nearly full only, once a day at most, and never without its time on the storage. Its steps are
+// numbered in eden_swap_check.
+extern "C" int eden_swap_check(const char* folder) noexcept;
+extern "C" int LZ4_versionNumber(void); // (a reference that links LZ4 in: the port's own are weak)
+extern "C" unsigned ZSTD_versionNumber(void); // (and zstd, for the slots in units)
+static void CheckSwapFile() {
+    require(LZ4_versionNumber() > 0);
+    require(ZSTD_versionNumber() > 0);
+    const char* const parent = std::getenv("TMPDIR");
+    char folder[512];
+    require(std::snprintf(folder, sizeof(folder), "%s/eden-swap-check-XXXXXX", parent != nullptr && *parent ? parent : "/tmp") <
+            static_cast<int>(sizeof(folder)));
+    require(mkdtemp(folder) != nullptr);
+    const int failed = eden_swap_check(folder);
+    if (failed != 0) std::fprintf(stderr, "Swap store: step %d failed\n", failed);
+    require(failed == 0);
+    require(rmdir(folder) == 0); // (the check removes its store)
+    std::printf("Swap store PASS: 66 steps\n");
+}
+
 int main(int argc, char** argv) {
     // The checks run with the defaults: direct table, page reuse and fast paths on.
     CheckSparseTables();
+    CheckCodeRanges();
     if (argc == 2 && std::strcmp(argv[1], "--link-check") == 0) {
         CheckLinks();
         return 0;
@@ -1906,6 +2009,7 @@ int main(int argc, char** argv) {
     CheckFastPaths();
     CheckWindow64();
     CheckReadTrapAreas();
+    CheckSwapFile();
     CheckAtomicLoop(backing, false);
     CheckAtomicLoopA32(backing, false);
     CheckSharedJit(2, true, 2, true);

@@ -1,0 +1,37 @@
+diff --git a/src/video_core/nx2_fast_draw.h b/src/video_core/nx2_fast_draw.h
+index 4108837389..6c6149508b 100644
+--- a/src/video_core/nx2_fast_draw.h
++++ b/src/video_core/nx2_fast_draw.h
+@@ -65,21 +65,25 @@ inline constexpr std::array<const char*, static_cast<size_t>(Reason::Count)> rea
+     "delta overflow", "memory map",
+ };
+ 
+-/// EDEN_NX2_FAST_DRAW=0 turns fast draws off; read once.
+-inline std::atomic<bool> g_enabled{[] {
+-    const char* const value = std::getenv("EDEN_NX2_FAST_DRAW");
+-    return value == nullptr || value[0] != '0';
+-}()};
++/// EDEN_NX2_FAST_DRAW=0 turns fast draws off. Read at the first use, not in a static initializer:
++/// the PS5 app sets its environment from env.txt in main.
++[[nodiscard]] inline std::atomic<bool>& EnabledFlag() {
++    static std::atomic<bool> enabled{[] {
++        const char* const value = std::getenv("EDEN_NX2_FAST_DRAW");
++        return value == nullptr || value[0] != '0';
++    }()};
++    return enabled;
++}
+ 
+ /// Any thread: whether fast draws run. The rasterizer latches it per draw (on the thread that
+ /// draws) and starts with a full resolve when it turns on.
+ [[nodiscard]] inline bool Enabled() {
+-    return g_enabled.load(std::memory_order_relaxed);
++    return EnabledFlag().load(std::memory_order_relaxed);
+ }
+ 
+ /// Tests only.
+ inline void SetEnabledForTest(bool on) {
+-    g_enabled.store(on, std::memory_order_relaxed);
++    EnabledFlag().store(on, std::memory_order_relaxed);
+ }
+ 
+ /// EDEN_NX2_FAST_DRAW_VERIFY=1, read once.

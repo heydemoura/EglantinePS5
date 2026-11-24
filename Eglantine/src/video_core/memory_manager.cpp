@@ -61,7 +61,11 @@ MemoryManager::MemoryManager(Core::System& system_, MaxwellDeviceMemoryManager& 
     big_page_table_dev.ResizeAndClear(big_page_table_size);
     big_entries.resize(big_page_table_size / 32, 0);
     big_page_continuous.resize(big_page_table_size / continuous_bits, 0);
+#if defined(__PROSPERO__) // PS5
+    entries.ResizeAndClear(page_table_size / 32);
+#else // PS5
     entries.resize(page_table_size / 32, 0);
+#endif // PS5
 }
 
 MemoryManager::MemoryManager(Core::System& system_, u64 address_space_bits_, GPUVAddr split_address_, u64 big_page_bits_, u64 page_bits_)
@@ -99,8 +103,15 @@ void MemoryManager::SetEntry(size_t position, MemoryManager::EntryType entry, bo
         position = position >> page_bits;
         const u64 entry_mask = entries[position / 32];
         const size_t sub_index = position % 32;
-        entries[position / 32] =
+        const u64 value =
             (~(3ULL << sub_index * 2) & entry_mask) | (static_cast<u64>(entry) << sub_index * 2);
+#if defined(__PROSPERO__) // PS5
+        if (value != entry_mask) {
+            entries.Set(position / 32, value);
+        }
+#else // PS5
+        entries[position / 32] = value;
+#endif // PS5
     }
 }
 
@@ -538,30 +549,29 @@ void MemoryManager::ReadWordsUnsafe(GPUVAddr gpu_src_addr, u32* dest, std::size_
     ReadBlockUnsafe(gpu_src_addr, dest, size, caller);
 }
 
+void MemoryManager::FinishReadsBefore(DAddr dev_addr, std::size_t size, bool unsafe) const {
+    if (VideoCore::g_read_downloads.load(std::memory_order_relaxed) == 0 || rasterizer == nullptr ||
+        !VideoCore::ReadDownloadsMayCover(dev_addr, size)) {
+        return;
+    }
+    if (VideoCore::ReadCheckWrites::Enabled()) {
+        VideoCore::ReadCheckWrites::Note(dev_addr, size,
+                                         unsafe ? "MemoryManager::WriteBlockUnsafe/Cached (inline-to-memory or "
+                                                  "constant buffer data)"
+                                                : "MemoryManager::WriteBlock");
+    }
+    rasterizer->FinishRead(dev_addr, size);
+}
+
 void MemoryManager::WriteBlockImpl(GPUVAddr gpu_dest_addr, const void* src_buffer, std::size_t size, [[maybe_unused]] VideoCommon::CacheType which, bool unsafe) {
     // Give Switch 2 sparse pages the write lands on their memory first (otherwise it is dropped).
     Tegra::Nx2BackSparseWrite(gpu_dest_addr, size, src_buffer);
     auto just_advance = [&]([[maybe_unused]] std::size_t page_index, [[maybe_unused]] std::size_t offset, std::size_t copy_amount) {
         src_buffer = static_cast<const u8*>(src_buffer) + copy_amount;
     };
-    // A download for a guest read not yet in guest memory would land over this write later.
-    const auto finish_reads = [this, unsafe](DAddr dev_addr, std::size_t amount) {
-        if (VideoCore::g_read_downloads.load(std::memory_order_relaxed) != 0) {
-            if (rasterizer != nullptr && VideoCore::ReadDownloadsMayCover(dev_addr, amount)) {
-                if (VideoCore::ReadCheckWrites::Enabled()) {
-                    VideoCore::ReadCheckWrites::Note(
-                        dev_addr, amount,
-                        unsafe ? "MemoryManager::WriteBlockUnsafe/Cached (inline-to-memory or "
-                                 "constant buffer data)"
-                               : "MemoryManager::WriteBlock");
-                }
-                rasterizer->FinishRead(dev_addr, amount);
-            }
-        }
-    };
     auto mapped_normal = [&](std::size_t page_index, std::size_t offset, std::size_t copy_amount) {
         const DAddr dev_addr_base = (DAddr(page_table[page_index]) << cpu_page_bits) + offset;
-        finish_reads(dev_addr_base, copy_amount);
+        FinishReadsBefore(dev_addr_base, copy_amount, unsafe);
         if (!unsafe) {
             rasterizer->PrepareRegionWrite(dev_addr_base, copy_amount, which);
         }
@@ -576,7 +586,7 @@ void MemoryManager::WriteBlockImpl(GPUVAddr gpu_dest_addr, const void* src_buffe
     };
     auto mapped_big = [&](std::size_t page_index, std::size_t offset, std::size_t copy_amount) {
         const DAddr dev_addr_base = (DAddr(big_page_table_dev[page_index]) << cpu_page_bits) + offset;
-        finish_reads(dev_addr_base, copy_amount);
+        FinishReadsBefore(dev_addr_base, copy_amount, unsafe);
         if (!unsafe) {
             rasterizer->PrepareRegionWrite(dev_addr_base, copy_amount, which);
         }
@@ -627,6 +637,32 @@ void MemoryManager::WriteWordsCached(GPUVAddr gpu_dest_addr, const u32* words, s
     for (std::size_t i = 0; i < count; ++i) {
         accumulator.Add(gpu_dest_addr + i * sizeof(u32), sizeof(u32));
     }
+}
+
+void MemoryManager::WriteConstantBufferData(DAddr device_addr, const void* data, std::size_t size) {
+    FinishReadsBefore(device_addr, size, true);
+    const auto* src = static_cast<const u8*>(data);
+    for (DAddr address = device_addr; address < device_addr + size;) {
+        const std::size_t amount = (std::min<std::size_t>)(
+            device_addr + size - address, Core::DEVICE_PAGESIZE - (address & Core::DEVICE_PAGEMASK));
+        // A page without memory (an unbacked sparse block) takes nothing: this tree has no kept
+        // pages (upstream 2b87033b95's DeviceMemoryManager::WriteKept).
+        if (u8* const physical = memory.GetPointer<u8>(address)) {
+            std::memcpy(physical, src, amount);
+        }
+        address += amount;
+        src += amount;
+    }
+    if (!constant_buffer_writes.empty()) {
+        auto& [last, last_size] = constant_buffer_writes.back();
+        if (device_addr <= last + last_size && last <= device_addr + size) {
+            const DAddr end = (std::max)(last + last_size, device_addr + size);
+            last = (std::min)(last, device_addr);
+            last_size = end - last;
+            return;
+        }
+    }
+    constant_buffer_writes.emplace_back(device_addr, size);
 }
 
 void MemoryManager::FlushRegion(GPUVAddr gpu_addr, size_t size,
@@ -1084,6 +1120,10 @@ void MemoryManager::FlushCaching() {
     })) {
         rasterizer->InnerInvalidation(page_stash2);
         page_stash2.clear();
+    }
+    if (!constant_buffer_writes.empty()) {
+        rasterizer->InvalidateConstantBufferData(constant_buffer_writes);
+        constant_buffer_writes.clear();
     }
 }
 

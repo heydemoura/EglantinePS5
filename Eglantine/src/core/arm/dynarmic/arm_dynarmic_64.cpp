@@ -18,6 +18,7 @@
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <array>
 #include <atomic>
 #include <cstdlib>
 #if defined(_M_X64) || defined(__x86_64__)
@@ -29,12 +30,19 @@
 #include "core/arm/dynarmic/dynarmic_exclusive_monitor.h"
 #include "core/arm/dynarmic/window_trace.h"
 #include "core/core_timing.h"
+#include "core/hardware_properties.h"
 #include "core/hle/kernel/k_process.h"
+#include "core/hle/kernel/nx2_thread_stats.h"
 #include "dynarmic/interface/A64/config.h"
 
 namespace Core {
 
 using namespace Common::Literals;
+
+namespace {
+// EDEN_NX2_GUEST_THREAD_STATS: the JIT's dispatcher counters of each core's JITs (one per process).
+std::array<Dynarmic::A64::UserConfig::Counters, Hardware::NUM_CPU_CORES> g_jit_counters{};
+} // Anonymous namespace
 
 DynarmicCallbacks64::DynarmicCallbacks64(ArmDynarmic64& parent, Kernel::KProcess* process)
     : m_parent{parent}, m_memory(process->GetMemory())
@@ -246,6 +254,13 @@ void DynarmicCallbacks64::ExceptionRaised(u64 pc, Dynarmic::A64::Exception excep
     case Dynarmic::A64::Exception::SendEvent:
     case Dynarmic::A64::Exception::SendEventLocal:
     case Dynarmic::A64::Exception::Yield:
+        if (Kernel::Nx2ThreadStats::g_enabled) {
+            Kernel::Nx2ThreadStats::CountHint(
+                Kernel::Nx2ThreadStats::t_run,
+                static_cast<size_t>(exception) -
+                    static_cast<size_t>(Dynarmic::A64::Exception::WaitForInterrupt),
+                m_parent.m_system.CoreTiming().GetClockTicks(), m_spin_ticks);
+        }
         LOG_TRACE(Core_ARM, "ExceptionRaised(exception = {}, pc = {:08X}, code = {:08X}, cached = {:08X})", std::size_t(exception), pc, m_memory.Read32(pc), MemoryReadCode(pc).value_or(0));
         return;
     case Dynarmic::A64::Exception::NoExecuteFault:
@@ -310,6 +325,9 @@ u64 DynarmicCallbacks64::GetCNTPCT() {
 #endif
     }
     m_last_cntpct = ticks;
+    if (Kernel::Nx2ThreadStats::g_enabled) {
+        Kernel::Nx2ThreadStats::CountRead(Kernel::Nx2ThreadStats::t_run, ticks, m_spin_ticks);
+    }
     return ticks;
 }
 
@@ -427,6 +445,35 @@ void ArmDynarmic64::MakeJit(Common::PageTable* page_table, std::size_t address_s
 #endif
 #else // PS5
     config.code_cache_size = std::uint32_t(m_cb->m_process->IsSwitch2() ? (m_core_index == 0 ? 160_MiB : m_core_index == 1 ? 144_MiB : m_core_index < 6 ? 96_MiB : 16_MiB) : (m_core_index == 0 ? 256_MiB : m_core_index < 3 ? 192_MiB : 128_MiB));
+    // A cache takes memory as code is written into it, 2 MiB at a time (src/memory_pages.cpp,
+    // "A range that fills"), so its size is only the most it may grow to. A Switch 2 title's
+    // cores get 320 MiB each; the figure and its switch are from PS5_Lichii (mihawk,
+    // codeberg.org/mihawk/PS5_Lichii), src/core/arm/dynarmic/arm_dynarmic_64.cpp. There a cache
+    // of 128 MiB filled every 40 s once Link moved in Ocarina of Time's field, with a full clear
+    // each time (16.6 fps, 327 frames over 100 ms in 220 s), and one of 320 MiB did not fill
+    // (21.9 fps, 106 such frames). Here the cores share their blocks, and one full cache clears
+    // them all. Six caches had to stay under 1 GiB together (the 688 MiB above) for a block in
+    // one to reach a block in any other with a 32-bit offset, as each cache's two views lay one
+    // after the other; the views that run now lie side by side, and six of 320 MiB are in reach.
+    // EDEN_PS5_CODE_CACHE_MIB=<n> (env.txt) is the size of every core's cache instead, for any
+    // 64-bit title, from 64 to 336: six larger ones do not fit that span of just under 2 GiB.
+    // EDEN_JIT_LAZY_CACHE=0 keeps the sizes above, and the memory behind them in 16 MiB steps.
+    {
+        static const bool by_piece = [] {
+            const char* const value = std::getenv("EDEN_JIT_LAZY_CACHE");
+            return value == nullptr || value[0] != '0';
+        }();
+        // (An even number of MiB: a cache is a whole number of 2 MiB pieces.)
+        static const u32 asked_mib = [] {
+            const char* const value = std::getenv("EDEN_PS5_CODE_CACHE_MIB");
+            return value != nullptr ? std::clamp<u32>(static_cast<u32>(std::atoi(value)), 64, 336) & ~1u : 0u;
+        }();
+        if (by_piece && asked_mib != 0) {
+            config.code_cache_size = asked_mib << 20;
+        } else if (by_piece && m_cb->m_process->IsSwitch2()) {
+            config.code_cache_size = std::uint32_t(320_MiB);
+        }
+    }
 #endif // PS5
 #endif
 
@@ -538,6 +585,51 @@ void ArmDynarmic64::MakeJit(Common::PageTable* page_table, std::size_t address_s
     std::printf("EDEN_DEV_JIT bits=64 core=%zu cache=%u\n", m_core_index, config.code_cache_size);
 #else // PS5
 #endif // PS5
+#if defined(ARCHITECTURE_x86_64)
+    // x86-64 host code generation options; Paranoid keeps dynarmic's defaults.
+    if (Settings::values.cpu_accuracy.GetValue() != Settings::CpuAccuracy::Paranoid) {
+        // The JIT spilled ~9% of its instructions to stack slots in Ocarina of Time's hot code
+        // while callee-saved GPRs sat empty: evictions go to a free callee-saved GPR first, and an
+        // operand that is overwritten but still needed is copied to a free register instead.
+        config.spill_to_free_gpr = true;
+        config.scratch_copy_to_free_reg = true;
+        // W-register writes and zero-extends of values a 32-bit instruction produced skip the
+        // second `mov r32, r32`.
+        config.elide_redundant_zext = true;
+        // ldr/str [xN, #imm]: the immediate goes into the fastmem addressing mode instead of a
+        // separate LEA (and often a register copy).
+        config.fold_address_offsets = true;
+        // The per-block %rbp frame is three instructions per block that nothing reads.
+        config.omit_block_frame = true;
+        // Fast dispatch table of 2^16 entries, 4-way set associative: 1 MiB per core instead of
+        // the 16 MiB direct-mapped 2^20 table.
+        config.fast_dispatch_table_bits = 16;
+        config.fast_dispatch_set_associative = true;
+        // A 32-entry return stack buffer: returns from deeper call chains skip the dispatcher.
+        config.rsb_size = 32;
+        // Unlinked exits jump to one shared stub per target: 5/6-byte patch sites instead of
+        // 22/23 bytes plus an inline exit stub.
+#if !defined(__PROSPERO__) // not PS5
+        config.compact_block_exits = true;
+#else // PS5
+        // Block links go through the JitGroup (jit_group.h), whose sites are 5/6-byte rel32 jumps
+        // already; dynarmic's own patch sites, which this option compacts, are not used.
+#endif // PS5
+        // Fault/abort paths, atomic fallbacks and exit stubs go to a cold region at the end of
+        // the code cache, so hot blocks sit densely.
+        config.far_code = true;
+        // Branches, CSEL and CBZ/TBZ read the host flags left by the instruction before them
+        // instead of reloading NZCV from the guest state.
+        config.reuse_host_flags = !config.enable_cycle_counting;
+        // Halt checks on links to lower PCs and on indirect branches instead of every linked
+        // branch (multicore only: dynarmic counts no cycles there).
+        config.halt_check_on_back_edges = !config.enable_cycle_counting;
+        // BL/BLR as host calls and RET as a host return checked against the guest return
+        // address: the CPU's return predictor predicts guest returns instead of one shared
+        // indirect jump through the return stack buffer (multicore only, no cycle counter).
+        config.host_call_return = !config.enable_cycle_counting;
+    }
+#endif
     m_jit.emplace(config);
 }
 

@@ -370,9 +370,10 @@ int main() {
     assert(Eden::SaveGameSettings(racer, game, file));
 
     // Performance ("performance", and one per title): the block list and the trade-offs off
-    // unless chosen. A title's own values go before the general ones, one value at a time.
+    // unless chosen, except asynchronous shaders, which are on (a new shader pops in instead of
+    // freezing the game). A title's own values go before the general ones, one value at a time.
     auto speed = Eden::LoadPerformance(racer, file);
-    assert(!speed.block_list && !speed.async_shaders && !speed.fast_gpu && !speed.unsafe_cpu && !speed.unsafe_dma);
+    assert(!speed.block_list && speed.async_shaders && !speed.fast_gpu && !speed.unsafe_cpu && !speed.unsafe_dma);
     assert(Eden::SavePerformance(0, {true, true, false, false, false}, file));  // title 0: general
     speed = Eden::LoadPerformance(racer, file);
     assert(speed.block_list && speed.async_shaders && !speed.fast_gpu);
@@ -390,7 +391,7 @@ int main() {
     std::ofstream(by_hand) << R"({"performance": {"fast_gpu": true, "unsafe_cpu": "yes"},
         "games": {"0100000000010000": {"performance": {"block_list": true}}}})";
     speed = Eden::LoadPerformance(racer, by_hand);
-    assert(speed.block_list && speed.fast_gpu && !speed.unsafe_cpu && !speed.async_shaders);
+    assert(speed.block_list && speed.fast_gpu && !speed.unsafe_cpu && speed.async_shaders);
     assert(!Eden::LoadPerformance(quest, by_hand).block_list);
     // Reactive flushing is on and skipping the CPU's invalidation off unless chosen; both are
     // saved with the rest and a title can have its own.
@@ -408,6 +409,30 @@ int main() {
     speed = Eden::LoadPerformance(racer, by_hand);
     assert(!speed.skip_invalidation && !speed.reactive_flushing);
     assert(Eden::LoadPerformance(quest, by_hand).skip_invalidation && Eden::LoadPerformance(quest, by_hand).reactive_flushing);
+    // The GPU clock ("gpu_clock", settings file only): nothing set leaves the core's default, except
+    // for Mario Kart World, which gets fixed; a general value is for every game, a title's own
+    // goes before it, a value that is not one of the four reads as absent, and saving the
+    // performance switches keeps it.
+    assert(Eden::LoadGpuClock(racer, by_hand).empty() && Eden::LoadGpuClock(0, by_hand).empty());
+    assert(Eden::LoadGpuClock(Eden::kMarioKartWorld, by_hand) == "fixed");
+    std::ofstream(by_hand) << R"({"performance": {"gpu_clock": "normal"},
+        "games": {"0100000000010000": {"performance": {"gpu_clock": "overclock", "block_list": true}},
+                  "0100000000030000": {"performance": {"gpu_clock": "faster"}}}})";
+    assert(Eden::LoadGpuClock(racer, by_hand) == "overclock" && Eden::LoadGpuClock(quest, by_hand) == "normal");
+    assert(Eden::LoadGpuClock(Eden::kMarioKartWorld, by_hand) == "normal");
+    speed = Eden::LoadPerformance(racer, by_hand);
+    assert(Eden::SavePerformance(racer, speed, by_hand) && Eden::SavePerformance(0, Eden::LoadPerformance(0, by_hand), by_hand));
+    assert(Eden::LoadGpuClock(racer, by_hand) == "overclock" && Eden::LoadGpuClock(quest, by_hand) == "normal");
+    assert(Eden::LoadPerformance(racer, by_hand).block_list);
+    // The swap store ("swap_file", settings file only, for every game): on unless the file says
+    // false, and saving the performance switches keeps what it says.
+    assert(Eden::LoadSwapFile(by_hand));
+    std::ofstream(by_hand) << R"({"performance": {"swap_file": false, "fast_gpu": true}})";
+    assert(!Eden::LoadSwapFile(by_hand));
+    assert(Eden::SavePerformance(0, Eden::LoadPerformance(0, by_hand), by_hand));
+    assert(!Eden::LoadSwapFile(by_hand) && Eden::LoadPerformance(0, by_hand).fast_gpu);
+    std::ofstream(by_hand) << R"({"performance": {"swap_file": "no"}})";
+    assert(Eden::LoadSwapFile(by_hand));
 
     // Button mapping (button_mapping.h): the usual one, a changed one, and one the file names
     // badly. Choosing a button another game button has swaps the two.

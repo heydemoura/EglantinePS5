@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <random>
@@ -76,10 +78,36 @@ struct Member {
     u64 size;
     u8 codec;
     std::string name{};
+    std::array<u8, 0x20> sha256{};
 };
 
 Member ZstdMember(const std::vector<u8>& content) {
     return {Zstd(content), content.size(), 1};
+}
+
+std::array<u8, 0x20> Sha256Of(const std::vector<u8>& data) {
+    std::array<u8, 0x20> digest{};
+    unsigned int length{};
+    EVP_Digest(data.data(), data.size(), digest.data(), &length, EVP_sha256(), nullptr);
+    return digest;
+}
+
+// A zstd member whose record holds the SHA-256 of its content, as packers write it.
+Member HashedMember(const std::vector<u8>& content) {
+    Member member = ZstdMember(content);
+    member.sha256 = Sha256Of(content);
+    return member;
+}
+
+// Where a container keeps a decoded member: the cache folder, named after its SHA-256.
+fs::path KeptPath(const fs::path& dir, const std::array<u8, 0x20>& sha256) {
+    std::string name;
+    for (const u8 byte : sha256) {
+        char hex[3];
+        std::snprintf(hex, sizeof(hex), "%02x", byte);
+        name += hex;
+    }
+    return dir / (name + ".bin");
 }
 
 // A single-package container whose root directory holds the members as files 0..n-1.
@@ -128,6 +156,7 @@ std::vector<u8> BuildNup(const std::vector<Member>& members) {
         Put(bytes, record + 0x08, members[i].size, 8);
         Put(bytes, record + 0x10, extent_offsets[i], 8);
         Put(bytes, record + 0x18, members[i].extent.size(), 8);
+        std::copy(members[i].sha256.begin(), members[i].sha256.end(), bytes.begin() + record + 0x20);
         bytes[record + 0x40] = members[i].codec;
         Put(bytes, toc + children_at + i * 4, 1 + i, 4);
     }
@@ -158,6 +187,14 @@ std::size_t DirectoryBytes(const fs::path& dir) {
         total += static_cast<std::size_t>(stream.tellg());
     }
     return total;
+}
+
+std::vector<fs::path> Files(const fs::path& dir) {
+    std::vector<fs::path> files;
+    for (const auto& entry : fs::directory_iterator(dir)) {
+        files.push_back(entry.path());
+    }
+    return files;
 }
 
 } // namespace
@@ -405,4 +442,101 @@ TEST_CASE("NUP serves a sound sibling in place of a .zs member with no zstd head
     const auto package = nup.GetPackageDir(0);
     REQUIRE(package != nullptr);
     REQUIRE(package->GetFile("Rock_WaterTemple_Gate_M_01_Nrm.bntx.zs")->ReadAllBytes() == damaged);
+}
+
+TEST_CASE("NUP zstd members with a recorded SHA-256 are kept for later containers",
+          "[nup][nup-read]") {
+    const auto big = Content(std::size_t{6} << 20, 21);
+    const auto small = Content(std::size_t{1} << 20, 22);
+    const Member kept = HashedMember(big);
+    // The same member with its frames damaged: only the kept copy can still serve it.
+    Member damaged = kept;
+    std::fill(damaged.extent.begin() + 16, damaged.extent.end(), u8{0xA5});
+    // 64 MiB decodes the members in memory; 1 MiB spills the big one.
+    for (const std::size_t cap : {std::size_t{64} << 20, std::size_t{1} << 20}) {
+        TempDir t;
+        {
+            NupContainer nup{Backing(BuildNup({kept, HashedMember(small)})), cap, t.path};
+            REQUIRE(nup.GetStatus() == Loader::ResultStatus::Success);
+            const auto file = nup.OpenFile(0);
+            REQUIRE(file->ReadAllBytes() == big);
+            // Reads after the member was kept still find its bytes.
+            REQUIRE(ReadMatches(file, big, 4096, 64 * 1024));
+            REQUIRE(nup.OpenFile(1)->ReadAllBytes() == small);
+        }
+        // Only the big member is kept, and nothing else is left behind.
+        const auto files = Files(t.path);
+        REQUIRE(files.size() == 1);
+        REQUIRE(files[0] == KeptPath(t.path, kept.sha256));
+        REQUIRE(fs::file_size(files[0]) == big.size());
+
+        NupContainer later{Backing(BuildNup({damaged})), cap, t.path};
+        REQUIRE(later.GetStatus() == Loader::ResultStatus::Success);
+        REQUIRE(ReadMatches(later.OpenFile(0), big, big.size() - 4096, 4096));
+        REQUIRE(later.OpenFile(0)->ReadAllBytes() == big);
+    }
+}
+
+TEST_CASE("NUP zstd members are not kept when they don't match their recorded SHA-256",
+          "[nup][nup-read]") {
+    const auto content = Content(std::size_t{6} << 20, 23);
+    Member member = ZstdMember(content);
+    member.sha256 = Sha256Of(Content(4096, 24));
+    for (const std::size_t cap : {std::size_t{64} << 20, std::size_t{1} << 20}) {
+        TempDir t;
+        {
+            NupContainer nup{Backing(BuildNup({member})), cap, t.path};
+            REQUIRE(nup.GetStatus() == Loader::ResultStatus::Success);
+            REQUIRE(nup.OpenFile(0)->ReadAllBytes() == content);
+        }
+        REQUIRE(Files(t.path).empty());
+    }
+}
+
+TEST_CASE("NUP zstd members replace a kept copy of the wrong size", "[nup][nup-read]") {
+    const auto content = Content(std::size_t{6} << 20, 25);
+    const Member member = HashedMember(content);
+    for (const std::size_t cap : {std::size_t{64} << 20, std::size_t{1} << 20}) {
+        TempDir t;
+        const auto kept = KeptPath(t.path, member.sha256);
+        std::ofstream{kept, std::ios::binary} << "cut short";
+        {
+            NupContainer nup{Backing(BuildNup({member})), cap, t.path};
+            REQUIRE(nup.GetStatus() == Loader::ResultStatus::Success);
+            REQUIRE(nup.OpenFile(0)->ReadAllBytes() == content);
+        }
+        REQUIRE(Files(t.path).size() == 1);
+        REQUIRE(fs::file_size(kept) == content.size());
+    }
+}
+
+TEST_CASE("NUP zstd spilled members are kept after their decoder restarted", "[nup][nup-read]") {
+    std::vector<std::vector<u8>> contents;
+    std::vector<Member> members;
+    for (int i = 0; i < 4; ++i) {
+        contents.push_back(Content(std::size_t{4} << 20, 300 + i));
+        members.push_back(HashedMember(contents.back()));
+    }
+    TempDir t;
+    {
+        NupContainer nup{Backing(BuildNup(members)), 1 << 20, t.path};
+        REQUIRE(nup.GetStatus() == Loader::ResultStatus::Success);
+        // More members than live decoders: the older ones decode again from their first frame.
+        for (int round = 0; round < 3; ++round) {
+            for (std::size_t i = 0; i < contents.size(); ++i) {
+                const std::size_t offset = static_cast<std::size_t>(round) * 1024 * 1024;
+                REQUIRE(ReadMatches(nup.OpenFile(i), contents[i], offset, 4096));
+            }
+        }
+        for (std::size_t i = 0; i < contents.size(); ++i) {
+            REQUIRE(nup.OpenFile(i)->ReadAllBytes() == contents[i]);
+        }
+    }
+    REQUIRE(Files(t.path).size() == contents.size());
+    for (std::size_t i = 0; i < contents.size(); ++i) {
+        std::ifstream stream{KeptPath(t.path, members[i].sha256), std::ios::binary};
+        const std::vector<u8> kept(std::istreambuf_iterator<char>{stream},
+                                   std::istreambuf_iterator<char>{});
+        REQUIRE(kept == contents[i]);
+    }
 }

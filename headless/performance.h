@@ -562,6 +562,10 @@ inline std::atomic<void (*)()> guest_pool_report{nullptr};
 // the driver's count.
 inline std::atomic<unsigned long long (*)()> graphics_memory_free{nullptr};
 inline std::atomic<bool> graphics_usage_from_pool{true};
+// How many times shorter the GPU's time since the last present looks to a Switch 2 game, when the
+// core's own GPU clock levels (4 with boost, 16 with overclock) are not enough: 0 leaves them.
+// Set from the "fixed" GPU clock (settings_store.h, LoadGpuClock; main.cpp), read in GPU::GetTicks.
+inline std::atomic<unsigned long long> gpu_clock_divisor{0};
 // The pool is short now (the probe above): the texture collector then collects as if past its
 // first mark. Switch 2 titles set the marks near the driver's device memory, which on the console
 // is the pool the guest's memory also takes, so use stayed under them while the pool ran out

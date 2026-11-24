@@ -337,8 +337,12 @@ private:
         const std::size_t bytes = count * Granule;
         return Kernel([&] {
 #ifdef PS5_NATIVE
-            if (munmap(at, bytes) != 0) return false;
+            // Reserved straight over the mapping (src/memory_pages.cpp, ReserveOver): unmapped first,
+            // the range is free for a moment and another thread's mapping can land in it.
             void* address = at;
+            if (sceKernelReserveVirtualRange(&address, bytes, MAP_FIXED, Granule) == 0 && address == at) return true;
+            if (munmap(at, bytes) != 0) return false;
+            address = at;
             return sceKernelReserveVirtualRange(&address, bytes, MAP_FIXED, Granule) == 0 && address == at;
 #else
             return mmap(at, bytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED | MAP_NORESERVE,
@@ -533,9 +537,9 @@ struct Window64 {
     }
     // A slot without a block of its own, written through the window: take one as a write to the
     // backing would (guest_memory_service.inc).
-    static bool Promote(std::uintptr_t backing) {
+    static bool Promote(std::uintptr_t backing, bool write) {
         const auto take = Eden::Fastmem::guest_write_fault.load(std::memory_order_acquire);
-        if (!take || !take(reinterpret_cast<void*>(backing))) return false;
+        if (!take || !take(reinterpret_cast<void*>(backing), write ? 1 : 0)) return false;
         window64_counts.promoted.fetch_add(1, std::memory_order_relaxed);
         return true;
     }
@@ -588,7 +592,7 @@ struct Window64 {
         bool promote = false;
         const std::uintptr_t at = region_at + first * GuestPage;
         if (!Common::AliasGuestPage(backing, at, region_at, writable, write, &promote)) {
-            if (!promote || !Promote(backing) || (promote = false, !Common::AliasGuestPage(backing, at, region_at, writable, write, &promote)))
+            if (!promote || !Promote(backing, write) || (promote = false, !Common::AliasGuestPage(backing, at, region_at, writable, write, &promote)))
                 return counts.piece_slot.fetch_add(1, std::memory_order_relaxed), false;
             // The promotion voided the region's other pieces (DropSlotAliases).
             state.pieces.reset();
@@ -713,7 +717,7 @@ struct Window64 {
         if ((state.start - backing_base) % Region) return refuse(counts.unaligned);
         bool promote = false;
         bool shown = Common::AliasGuestSlot(state.start, RegionAt(region), writable, write, &promote);
-        if (!shown && promote && Promote(state.start + (address - RegionAt(region)))) {
+        if (!shown && promote && Promote(state.start + (address - RegionAt(region)), write)) {
             promote = false;
             shown = Common::AliasGuestSlot(state.start, RegionAt(region), writable, write, &promote);
         }

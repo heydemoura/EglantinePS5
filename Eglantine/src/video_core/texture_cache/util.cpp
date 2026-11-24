@@ -1456,6 +1456,7 @@ void MarkSubresourcesWrittenWhole(const ImageBase& dst, const ImageBase& src,
                                        ImageFlagBits::SparseLayers | ImageFlagBits::SparseTiles;
     if (dst.info.type != ImageType::e2D || src.info.type != ImageType::e2D ||
         src.info.format != dst.info.format || src.info.astc_opaque != dst.info.astc_opaque ||
+        (src.info.astc_store_key != 0) != (dst.info.astc_store_key != 0) ||
         True((src.flags | dst.flags) & excluded)) {
         return;
     }

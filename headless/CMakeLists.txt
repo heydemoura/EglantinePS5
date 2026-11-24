@@ -267,7 +267,7 @@ if(PS5_NATIVE)
         "${EDEN_PORT_DIR}/crash_report.cpp" "${EDEN_PORT_DIR}/stop_limit.cpp"
         "${EDEN_PORT_DIR}/elevation/elevation.cpp"
         "${eden_app_crt}" "${PORT_ROOT}/src/lifecycle.c" "${PORT_ROOT}/src/direct_memory.c"
-        "${PORT_BUILD_DIR}/app_heap.c")
+        "${PORT_ROOT}/src/fast_memcmp.c" "${PORT_BUILD_DIR}/app_heap.c")
     target_compile_definitions(eden-headless PRIVATE PS5_NATIVE=1
         $<$<BOOL:${EDEN_MKW_DIAGNOSTICS}>:EDEN_MKW_DIAGNOSTICS=1>
         $<$<BOOL:${EDEN_SCRIPTED_INPUT}>:MKW_DIAGNOSTIC_INPUT=1>)

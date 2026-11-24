@@ -56,6 +56,11 @@ struct ImageInfo {
     bool is_sparse = false;
     // ASTC data whose blocks carry no alpha: re-compressed to BC1 instead of BC3 (half the size).
     bool astc_opaque = false;
+    // ASTC data whose BC7 copy, converted ahead of time, is in the texture store (the Vulkan
+    // runtime's FindStoredAstc): its key there, 0 when it has none. The host image is BC7,
+    // uploaded from the store. From PS5_Lichii (mihawk, codeberg.org/mihawk/PS5_Lichii),
+    // src/video_core/texture_cache/image_info.h.
+    u64 astc_store_key = 0;
 };
 
 } // namespace VideoCommon

@@ -48,6 +48,13 @@ public:
     // Switch 2: GPU address of the read-only syncpoint shim (u32 per syncpoint); 0 = none.
     void SetNativeSyncpointShim(GPUVAddr address);
     static constexpr u32 NumShimSyncpoints = 192; // Tegra::Host1x::SyncpointManager
+    /// Whether [address, address + size) overlaps the syncpoint shim, whose words Read serves
+    /// from the guest syncpoints instead of memory.
+    [[nodiscard]] bool OverlapsSyncpointShim(GPUVAddr address, u64 size) const {
+        const GPUVAddr shim = native_syncpoint_shim.load(std::memory_order_acquire);
+        return shim != 0 && address < shim + NumShimSyncpoints * sizeof(u32) &&
+               address + size > shim;
+    }
 
     /// Switch 2 lays out block-linear surfaces with the console's GOB swizzle.
     void EnableNativeTiling() {
@@ -125,6 +132,10 @@ public:
     void WriteBlockCached(GPUVAddr gpu_dest_addr, const void* src_buffer, std::size_t size);
     /// WriteBlockCached of `count` consecutive words within one device page, in a single write.
     void WriteWordsCached(GPUVAddr gpu_dest_addr, const u32* words, std::size_t count);
+    /// Constant buffer data to device memory the caller translated (not Switch 2 sparse memory).
+    /// FlushCaching hands the written ranges, merged, to the rasterizer's
+    /// InvalidateConstantBufferData instead of InnerInvalidation.
+    void WriteConstantBufferData(DAddr device_addr, const void* data, std::size_t size);
 
     /**
      * Checks if a gpu region can be simply read with a pointer.
@@ -227,6 +238,8 @@ private:
 
     void ReadBlockImpl(GPUVAddr gpu_src_addr, void* dest_buffer, std::size_t size, VideoCommon::CacheType which, bool unsafe,
                        std::source_location caller) const;
+    /// A download for a guest read not yet in guest memory would land over this write later.
+    void FinishReadsBefore(DAddr dev_addr, std::size_t size, bool unsafe) const;
     void WriteBlockImpl(GPUVAddr gpu_dest_addr, const void* src_buffer, std::size_t size, VideoCommon::CacheType which, bool unsafe);
 
     [[nodiscard]] std::size_t PageEntryIndex(GPUVAddr gpu_addr, bool is_big_page) const {
@@ -271,7 +284,12 @@ private:
         Mapped = 2,
     };
 
+#if defined(__PROSPERO__) // PS5
+    // 2 bits per 4 KiB page of the 40-bit space (64 MiB dense); backed only where it is mapped.
+    Common::SparseLargeVector<u64> entries;
+#else // PS5
     std::vector<u64> entries;
+#endif // PS5
     std::vector<u64> big_entries;
 
     GPUVAddr PageTableOp(GPUVAddr gpu_addr, [[maybe_unused]] DAddr dev_addr, size_t size, PTEKind kind, EntryType entry_type);
@@ -308,6 +326,7 @@ private:
 
     const size_t unique_identifier;
     VideoCommon::InvalidationAccumulator accumulator;
+    boost::container::small_vector<std::pair<DAddr, std::size_t>, 32> constant_buffer_writes;
 
     static std::atomic<size_t> unique_identifier_generator;
 

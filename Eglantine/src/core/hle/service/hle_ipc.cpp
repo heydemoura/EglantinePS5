@@ -338,14 +338,36 @@ std::vector<u8> HLERequestContext::ReadBufferCopy(std::size_t buffer_index) cons
     }
 }
 
+namespace {
+// An input buffer of a request. On the console it is always a copy and never the guest's memory
+// itself: a service may hand the buffer to the system (a file write, a socket send), and the system
+// cannot read guest memory that the memory service (src/guest_memory_service.inc) has packed, or
+// has taken access from for a moment to learn whether anything uses it: the call fails with EFAULT.
+// The copy is made by the emulator's own read, which faults such memory back in.
+template <typename GuestMemory>
+std::span<const u8> ReadGuestBuffer([[maybe_unused]] Core::Memory::Memory& memory, GuestMemory& gm, u64 address,
+                                    std::size_t size, Common::ScratchBuffer<u8>& scratch) {
+#if defined(__PROSPERO__) // PS5
+    (void)gm;
+    scratch.resize_destructive(size);
+    if (size != 0) {
+        memory.ReadBlockUnsafe(address, scratch.data(), size);
+    }
+    return std::span<const u8>{scratch.data(), size};
+#else // PS5
+    return gm.Read(address, size, &scratch);
+#endif // PS5
+}
+} // namespace
+
 std::span<const u8> HLERequestContext::ReadBufferA(std::size_t buffer_index) const {
     Core::Memory::CpuGuestMemory<u8, Core::Memory::GuestMemoryFlags::UnsafeRead> gm(memory, 0, 0);
 
     ASSERT_OR_EXECUTE_MSG(
         BufferDescriptorA().size() > buffer_index, { return {}; },
         "BufferDescriptorA invalid buffer_index {}", buffer_index);
-    return gm.Read(BufferDescriptorA()[buffer_index].Address(),
-                   BufferDescriptorA()[buffer_index].Size(), &read_buffer_data_a[buffer_index]);
+    return ReadGuestBuffer(memory, gm, BufferDescriptorA()[buffer_index].Address(),
+                           BufferDescriptorA()[buffer_index].Size(), read_buffer_data_a[buffer_index]);
 }
 
 std::span<const u8> HLERequestContext::ReadBufferX(std::size_t buffer_index) const {
@@ -354,8 +376,8 @@ std::span<const u8> HLERequestContext::ReadBufferX(std::size_t buffer_index) con
     ASSERT_OR_EXECUTE_MSG(
         BufferDescriptorX().size() > buffer_index, { return {}; },
         "BufferDescriptorX invalid buffer_index {}", buffer_index);
-    return gm.Read(BufferDescriptorX()[buffer_index].Address(),
-                   BufferDescriptorX()[buffer_index].Size(), &read_buffer_data_x[buffer_index]);
+    return ReadGuestBuffer(memory, gm, BufferDescriptorX()[buffer_index].Address(),
+                           BufferDescriptorX()[buffer_index].Size(), read_buffer_data_x[buffer_index]);
 }
 
 std::span<const u8> HLERequestContext::ReadBuffer(std::size_t buffer_index) const {
@@ -376,14 +398,14 @@ std::span<const u8> HLERequestContext::ReadBuffer(std::size_t buffer_index) cons
         ASSERT_OR_EXECUTE_MSG(
             BufferDescriptorA().size() > buffer_index, { return {}; },
             "BufferDescriptorA invalid buffer_index {}", buffer_index);
-        return gm.Read(BufferDescriptorA()[buffer_index].Address(),
-                       BufferDescriptorA()[buffer_index].Size(), &read_buffer_data_a[buffer_index]);
+        return ReadGuestBuffer(memory, gm, BufferDescriptorA()[buffer_index].Address(),
+                               BufferDescriptorA()[buffer_index].Size(), read_buffer_data_a[buffer_index]);
     } else {
         ASSERT_OR_EXECUTE_MSG(
             BufferDescriptorX().size() > buffer_index, { return {}; },
             "BufferDescriptorX invalid buffer_index {}", buffer_index);
-        return gm.Read(BufferDescriptorX()[buffer_index].Address(),
-                       BufferDescriptorX()[buffer_index].Size(), &read_buffer_data_x[buffer_index]);
+        return ReadGuestBuffer(memory, gm, BufferDescriptorX()[buffer_index].Address(),
+                               BufferDescriptorX()[buffer_index].Size(), read_buffer_data_x[buffer_index]);
     }
 }
 

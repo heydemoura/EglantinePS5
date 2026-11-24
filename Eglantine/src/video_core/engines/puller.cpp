@@ -59,14 +59,21 @@ u32 ReadSemaphoreWord(DmaPusher& dma_pusher, GPUVAddr address) {
 
 // With the GPU thread split (gpu_split.h) the rasterizer belongs to the back thread: work that
 // only feeds it runs there in order; reads of what it wrote first wait for it (DrainBack).
+// `writes`: what it writes to guest memory (GpuSplit::Writes).
 template <typename Func>
-void OnBack(const Func& func) {
+void OnBack(const Func& func,
+            VideoCommon::GpuSplit::Writes writes = VideoCommon::GpuSplit::Writes::Anywhere) {
     if (auto& split = VideoCommon::GpuSplit::Get(); split.Active()) {
-        split.Defer(func);
+        split.Defer(func, 0, writes);
     } else {
+        VideoCommon::Nx2FastDraw::BreakUnsplit(VideoCommon::Nx2FastDraw::Reason::Call);
         func();
     }
 }
+
+// Fence work (ReleaseFences, SignalSyncPoint, SignalReference) writes guest memory through fence
+// operations and the caches' downloads only.
+constexpr auto FenceWrites = VideoCommon::GpuSplit::Writes::Caches;
 
 void DrainBack() {
     VideoCommon::GpuSplit::Get().Drain(VideoCommon::DrainSite::Acquire);
@@ -81,19 +88,21 @@ void ReleaseFences(DmaPusher& dma_pusher) {
 }
 
 // A release was just sent to the back: tell the front what it writes (CheckWithoutDrain).
-void NoteRelease(DmaPusher& dma_pusher, GPUVAddr address, u32 payload, bool four_words) {
+void NoteRelease(DmaPusher& dma_pusher, GPUVAddr address, u32 payload, bool four_words,
+                 VideoCommon::GpuSplit::Landing landing) {
     auto& split = VideoCommon::GpuSplit::Get();
     if (!split.Active()) {
         return;
     }
+    split.NoteWrite(dma_pusher.memory_manager, address, four_words ? 16 : 4);
     const auto device = dma_pusher.memory_manager.GpuToCpuAddress(address);
     if (!device) {
         return;
     }
-    split.NoteSemaphoreWrite(*device, payload, true);
+    split.NoteSemaphoreWrite(*device, payload, true, false, landing);
     if (four_words) {
         // The payload as 64 bits (a timestamp follows).
-        split.NoteSemaphoreWrite(*device + 4, 0, true);
+        split.NoteSemaphoreWrite(*device + 4, 0, true, false, landing);
     }
 }
 
@@ -139,8 +148,18 @@ AcquireCheck CheckWithoutDrain(DmaPusher& dma_pusher, const Puller::PendingAcqui
         if (queued->known && acquire.Matches(queued->payload)) {
             return AcquireCheck::MetByQueued;
         }
-        VideoCommon::Count(stats.drain_queued);
-        return AcquireCheck::Drain;
+        // Else a fenced release the back ran whose fence has yet to run decides nothing: memory
+        // does, as once it landed.
+        if (!split.Ran(queued->position)) {
+            VideoCommon::Count(stats.drain_queued);
+            if (VideoCommon::g_acquire_counting && !queued->known) {
+                VideoCommon::Count(stats.queued_unknown);
+                if (acquire.Matches(dma_pusher.memory_manager.Read<u32>(acquire.address))) {
+                    VideoCommon::Count(stats.queued_unknown_met);
+                }
+            }
+            return AcquireCheck::Drain;
+        }
     }
     return acquire.Matches(dma_pusher.memory_manager.Read<u32>(acquire.address))
                ? AcquireCheck::Met
@@ -181,6 +200,10 @@ void VerifyWithoutDrain(DmaPusher& dma_pusher, const Puller::PendingAcquire& acq
 }
 
 } // Anonymous namespace
+
+Puller::~Puller() {
+    Nx2SemaphoreWaiters::Get().Remove(this);
+}
 
 bool Puller::PendingAcquire::Matches(u32 current) const {
     switch (static_cast<GpuSemaphoreOperation>(operation)) {
@@ -362,13 +385,14 @@ void Puller::ProcessFenceActionMethod(DmaPusher& dma_pusher) {
     case Puller::FenceOperation::Acquire:
         // UNIMPLEMENTED_MSG("Channel Scheduling pending.");
         // WaitFence(regs.fence_action.syncpoint_id, regs.fence_value);
-        OnBack([rasterizer = dma_pusher.rasterizer] { rasterizer->ReleaseFences(); });
+        OnBack([rasterizer = dma_pusher.rasterizer] { rasterizer->ReleaseFences(); }, FenceWrites);
         VideoCommon::GpuSplit::Get().NoteSync();
+        VideoCommon::Nx2FastDraw::NoteSync();
         break;
     case Puller::FenceOperation::Increment:
         OnBack([rasterizer = dma_pusher.rasterizer, id = static_cast<u32>(regs.fence_action.syncpoint_id.Value())] {
             rasterizer->SignalSyncPoint(id);
-        });
+        }, FenceWrites);
         break;
     default:
         UNIMPLEMENTED_MSG("Unimplemented operation {}", regs.fence_action.op.Value());
@@ -410,13 +434,24 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
                 rasterizer->Query(mirror, VideoCommon::QueryType::Payload,
                                   properties | VideoCommon::QueryPropertiesFlags::Nx2Mirror, payload, 0);
             }
-        });
+        }, VideoCommon::GpuSplit::Writes::Noted);
         NoteRelease(dma_pusher, sequence_address, payload,
-                    properties == VideoCommon::QueryPropertiesFlags::HasTimeout);
+                    properties == VideoCommon::QueryPropertiesFlags::HasTimeout,
+                    VideoCommon::GpuSplit::ReportLanding(
+                        properties == VideoCommon::QueryPropertiesFlags::IsAFence));
+        if (mirror != 0 && VideoCommon::GpuSplit::Get().Active()) {
+            VideoCommon::GpuSplit::Get().NoteWrite(
+                dma_pusher.memory_manager, mirror,
+                properties == VideoCommon::QueryPropertiesFlags::HasTimeout ? 16 : 4);
+        }
     } else if (g_nx2_ampere) {
         // Switch 2 waits on semaphores the CPU (or another channel) releases, e.g. once it has
         // written the commands this channel runs next: suspend the channel until the value is
         // met instead of reading ahead (approach from changes.patch).
+        // Without the split the draws before it already ran: this ends their uniform keeps. On the
+        // split's back they may run after it, so the paths below note it again once the acquire is
+        // met, or send the fences (a deferred call) before it waits.
+        VideoCommon::Nx2FastDraw::NoteSync();
         PendingAcquire acquire{
             .address = regs.semaphore_address.SemaphoreAddress(),
             .value = regs.semaphore_sequence,
@@ -433,8 +468,8 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
         }
         VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::AcquireChecks, 1);
         auto& stats = VideoCommon::g_acquire_stats;
-        if (const AcquireCheck without_drain = CheckWithoutDrain(dma_pusher, acquire);
-            without_drain == AcquireCheck::Met || without_drain == AcquireCheck::MetByQueued) {
+        const AcquireCheck without_drain = CheckWithoutDrain(dma_pusher, acquire);
+        if (without_drain == AcquireCheck::Met || without_drain == AcquireCheck::MetByQueued) {
             if (without_drain == AcquireCheck::MetByQueued) {
                 // What the front reads after the acquire waits for the work sent before the
                 // release (GpuSplit::NoteSync).
@@ -443,18 +478,33 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
             }
             VideoCommon::Count(stats.passed);
             VerifyWithoutDrain(dma_pusher, acquire, without_drain);
+            // Found met: the CPU may have rewritten what the next draws read before it released.
+            VideoCommon::Nx2FastDraw::NoteSync();
             return;
+        }
+        const bool not_met = without_drain == AcquireCheck::NotMet;
+        if (not_met) {
+            VideoCommon::Count(stats.trigger_not_met);
         }
         VideoCommon::Count(stats.drained);
         DrainBack();
         if (acquire.Matches(ReadSemaphoreWord(dma_pusher, acquire.address))) {
+            VideoCommon::Nx2FastDraw::NoteSync();
             return;
         }
+        if (not_met) {
+            VideoCommon::Count(stats.trigger_not_met_twice);
+        }
         // Registered before the fences run, so a release among them that meets the value counts
-        // even if a later one overwrites it.
+        // even if a later one overwrites it. The word in memory is watched for the guest CPU's
+        // stores (Nx2SemaphoreWaiters::WordStored).
         auto& waiters = Nx2SemaphoreWaiters::Get();
+        u32* word = reinterpret_cast<u32*>(dma_pusher.memory_manager.GetPointer(acquire.address));
+        if (reinterpret_cast<uintptr_t>(word) % alignof(u32) != 0) {
+            word = nullptr;
+        }
         if (const auto device = dma_pusher.memory_manager.GpuToCpuAddress(acquire.address);
-            device && !waiters.Add(this, *device, acquire.value, acquire.operation)) {
+            device && !waiters.Add(this, *device, acquire.value, acquire.operation, word)) {
             if (static std::atomic<u32> full{}; full.fetch_add(1) < 8) {
                 LOG_ERROR(HW_GPU, "Channel {} waits on semaphore {:#x} unlatched: {} channels wait",
                           dma_pusher.channel_state.bind_id, acquire.address,
@@ -471,6 +521,7 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
         }
     } else {
         DrainBack();
+        VideoCommon::Nx2FastDraw::NoteSync();
         do {
             const u32 word = dma_pusher.memory_manager.Read<u32>(regs.semaphore_address.SemaphoreAddress());
             regs.acquire_source = true;
@@ -507,8 +558,9 @@ void Puller::ProcessSemaphoreRelease(DmaPusher& dma_pusher) {
     OnBack([rasterizer = dma_pusher.rasterizer, sequence_address, payload] {
         rasterizer->Query(sequence_address, VideoCommon::QueryType::Payload,
                           VideoCommon::QueryPropertiesFlags::IsAFence, payload, 0);
-    });
-    NoteRelease(dma_pusher, sequence_address, payload, false);
+    }, VideoCommon::GpuSplit::Writes::Noted);
+    NoteRelease(dma_pusher, sequence_address, payload, false,
+                VideoCommon::GpuSplit::Landing::Fenced);
 }
 
 void Puller::ProcessSemaphoreAcquire(DmaPusher& dma_pusher) {
@@ -543,8 +595,8 @@ void Puller::ProcessSemaphoreExecute(DmaPusher& dma_pusher, u32 argument) {
         OnBack([rasterizer = dma_pusher.rasterizer, address, payload] {
             rasterizer->Query(address, VideoCommon::QueryType::Payload,
                               VideoCommon::QueryPropertiesFlags::IsAFence, payload, 0);
-        });
-        NoteRelease(dma_pusher, address, payload, false);
+        }, VideoCommon::GpuSplit::Writes::Noted);
+        NoteRelease(dma_pusher, address, payload, false, VideoCommon::GpuSplit::Landing::Fenced);
         return;
     }
     // Acquires: check once after flushing pending fences; never block the GPU thread on them.
@@ -593,13 +645,14 @@ void Puller::CallPullerMethod(DmaPusher& dma_pusher, const MethodCall& method_ca
     case BufferMethods::WrcacheFlush:
         break;
     case BufferMethods::RefCnt:
-        OnBack([rasterizer = dma_pusher.rasterizer] { rasterizer->SignalReference(); });
+        OnBack([rasterizer = dma_pusher.rasterizer] { rasterizer->SignalReference(); }, FenceWrites);
         break;
     case BufferMethods::SyncpointOperation:
         ProcessFenceActionMethod(dma_pusher);
         break;
     case BufferMethods::WaitForIdle:
-        OnBack([rasterizer = dma_pusher.rasterizer] { rasterizer->WaitForIdle(); });
+        OnBack([rasterizer = dma_pusher.rasterizer] { rasterizer->WaitForIdle(); },
+               VideoCommon::GpuSplit::Writes::Caches);
         VideoCommon::GpuSplit::Get().NoteSync();
         break;
     case BufferMethods::SemaphoreOperation: {
@@ -616,7 +669,8 @@ void Puller::CallPullerMethod(DmaPusher& dma_pusher, const MethodCall& method_ca
     }
     case BufferMethods::MemOpB: {
         // Implement this better.
-        OnBack([rasterizer = dma_pusher.rasterizer] { rasterizer->InvalidateGPUCache(); });
+        OnBack([rasterizer = dma_pusher.rasterizer] { rasterizer->InvalidateGPUCache(); },
+               VideoCommon::GpuSplit::Writes::Caches);
         break;
     }
     case BufferMethods::MemOpC:

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "common/sparse_large_vector.h"
+#include <time.h>
 
 namespace Common {
 void* ReserveMemoryRange(std::size_t size) noexcept;
@@ -20,15 +21,34 @@ extern "C" [[gnu::weak]] std::size_t eden_memory_recover_try(std::size_t bytes) 
 template <typename Try>
 static auto WithRecovery(std::size_t size, Try&& attempt) {
     auto result = attempt();
-    if (!result && &eden_memory_recover_try != nullptr &&
-        eden_memory_recover_try(size + (std::size_t{8} << 20)) != 0)
+    // More than once: what came back can go to another taker (a guest write, the driver) before the
+    // heap asks again, and when nothing came back the service may find memory nothing touches a
+    // moment later (it looks every second). Half a second when the service answers at once, and
+    // 2 s at most: a request may wait half a second for whoever is packing, or write hundreds of
+    // MiB to the swap file, and the heap may hold its lock here.
+    timespec start{};
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    for (int tries = 0; tries < 20 && !result && &eden_memory_recover_try != nullptr; ++tries) {
+        if (eden_memory_recover_try(size + (std::size_t{8} << 20)) == 0) {
+            const timespec pause{0, 25'000'000};
+            nanosleep(&pause, nullptr);
+        }
         result = attempt();
+        timespec now{};
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        if ((now.tv_sec - start.tv_sec) * 1000 + (now.tv_nsec - start.tv_nsec) / 1000000 >= 2000) break;
+    }
     return result;
 }
 
-// Reuse the qualified, owned direct-memory backend for the C mspace heap.
+// Reuse the qualified, owned direct-memory backend for the C mspace heap. One block of the pool, and
+// no memory asked back when the pool has no free block that large: what the service gives back are
+// 2 MiB blocks from all over the pool, which do not make one, and the heap then takes the block in
+// pieces anyway (eden_heap_split_pages, which does ask). For an 88 MiB block that Mario Kart World
+// allocates when it streams a part of a track in, 93 MiB of guest memory was packed or written to
+// the swap file, up to twenty times over, while the thread that asked waited.
 extern "C" void* eden_heap_pages(std::size_t size) {
-    return WithRecovery(size, [&] { return Common::AllocateMemoryPages(size); });
+    return Common::AllocateMemoryPages(size);
 }
 extern "C" void eden_heap_pages_free(void* base, std::size_t size) {
     Common::FreeMemoryPages(base, size);

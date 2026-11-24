@@ -30,6 +30,9 @@ std::int64_t sceKernelGetDirectMemorySize();
 std::int32_t sceKernelAvailableDirectMemorySize(std::int64_t, std::int64_t, std::size_t, std::int64_t*, std::size_t*);
 std::size_t eden_heap_committed(void);
 std::size_t eden_heap_large_held(unsigned* blocks);
+// src/guest_memory_service.inc: the swap store, as numbers (MiB held, MiB it may hold, MiB written
+// this session, slots the budget refused, slots its size refused); 0 not opened, 1 on, 2 off.
+int eden_swap_numbers(unsigned long long numbers[5]);
 #endif
 // The app's code, from the link (tools/unwind.ld).
 extern const char __eden_text_start[];
@@ -361,6 +364,27 @@ void Compose(const Kind* kind, int code, std::uint64_t address, const Registers&
         t.Put(" MiB in ");
         t.Dec(blocks);
         t.Put(" large blocks\n");
+        // The swap store: a session that ends for want of memory with its budget or its size used
+        // up is one more budget or a larger store would have carried further.
+        unsigned long long swap[5] = {};
+        const int state = eden_swap_numbers(swap);
+        t.Put("swap: ");
+        if (state == 0) {
+            t.Put("not opened (the pool was never short, or no storage access)\n");
+        } else {
+            t.Put(state == 1 ? "on" : "off");
+            t.Put(", the store holds ");
+            t.Dec(swap[0]);
+            t.Put(" MiB of ");
+            t.Dec(swap[1]);
+            t.Put(", ");
+            t.Dec(swap[2]);
+            t.Put(" MiB written this session, ");
+            t.Dec(swap[3]);
+            t.Put(" slots refused by the budget and ");
+            t.Dec(swap[4]);
+            t.Put(" by the store's size\n");
+        }
     }
 #endif
     t.Put("registers:");

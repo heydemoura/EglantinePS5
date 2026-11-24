@@ -522,6 +522,8 @@ extern "C" std::size_t eden_heap_arena_live __attribute__((weak));
 extern "C" unsigned eden_heap_arena_empty __attribute__((weak)), eden_heap_arena_quarter __attribute__((weak));
 extern "C" unsigned eden_guest_memory_wanted(void) __attribute__((weak));
 extern "C" void eden_guest_memory_reserve(std::size_t* held, std::size_t* target) __attribute__((weak));
+// What the pool has free in 2 MiB pieces, counted by the guest memory service's keeper (0: not counted lately).
+extern "C" std::size_t eden_pool_free_pieces(void) __attribute__((weak));
 #ifdef PS5_NATIVE
 extern "C" std::int64_t sceKernelGetDirectMemorySize();
 extern "C" std::int32_t sceKernelAvailableDirectMemorySize(std::int64_t, std::int64_t, std::size_t, std::int64_t*,
@@ -576,7 +578,17 @@ static void RefreshFreeMemory() {
     const bool known = total > 0 && sceKernelAvailableDirectMemorySize(0, total, 0x4000, &start, &largest) == 0;
     std::size_t held = 0, target = 0;
     if (eden_guest_memory_reserve) eden_guest_memory_reserve(&held, &target);
-    const PoolView view = ViewOfPool(known, largest, held, target);
+    // What the driver can be given is what the pool has free in 2 MiB pieces, not only its largest
+    // free block (it builds a buffer from pieces when no run is that long). Late in a Mario Kart
+    // World session the largest block was 4 to 10 MiB with 200 to 570 MiB free in pieces, and the
+    // caches were told that nothing was free at all. EDEN_POOL_FREE_PIECES=0: the largest block, as before.
+    static const bool pieces_wanted = [] {
+        const char* value = std::getenv("EDEN_POOL_FREE_PIECES");
+        return value == nullptr || value[0] != '0';
+    }();
+    std::size_t free_now = largest;
+    if (pieces_wanted && eden_pool_free_pieces) free_now = std::max(free_now, eden_pool_free_pieces());
+    const PoolView view = ViewOfPool(known, free_now, held, target);
     largest_free_block.store(known ? (view.free != 0 ? view.free : 1) : 0, std::memory_order_relaxed);
     graphics_memory_short.store(view.short_memory, std::memory_order_relaxed);
     // The pool, the guest's memory and the heap in stderr.log every 20 s, to see what holds it.

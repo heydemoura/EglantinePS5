@@ -12,6 +12,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <atomic>
+#include <chrono>
+#include <unordered_map>
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
@@ -34,15 +36,18 @@
 #include "common/settings.h"
 #include "common/swap.h"
 #include "core/core.h"
+#include "core/core_timing.h"
 #include "core/device_memory.h"
 #include "core/gpu_dirty_memory_manager.h"
 #include "core/hardware_properties.h"
 #include "core/hle/kernel/k_page_table.h"
 #include "core/hle/kernel/k_process.h"
+#include "core/hle/kernel/nx2_thread_stats.h"
 #include "core/memory.h"
 #include "video_core/gpu.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/host1x/host1x.h"
+#include "video_core/nx2_async_readback.h"
 #include "video_core/rasterizer_download_area.h"
 
 namespace Core::Memory {
@@ -95,6 +100,7 @@ struct Memory::Impl {
                  Common::PageType::Memory);
 
         if (current_page_table->fastmem_arena) {
+            LazyForget(GetInteger(base), size);
             host_buffer->Map(GetInteger(base), GetInteger(target) - DramMemoryMap::Base, size, perms, separate_heap);
         }
     }
@@ -107,6 +113,7 @@ struct Memory::Impl {
                  Common::PageType::Unmapped);
 
         if (current_page_table->fastmem_arena) {
+            LazyForget(GetInteger(base), size);
             host_buffer->Unmap(GetInteger(base), size, separate_heap);
         }
     }
@@ -119,6 +126,7 @@ struct Memory::Impl {
         if (!current_page_table->fastmem_arena) {
             return;
         }
+        LazyForget(vaddr, size);
 
         u64 protect_bytes = 0, protect_begin = 0;
 
@@ -455,6 +463,7 @@ struct Memory::Impl {
         if (current_page_table->fastmem_arena) {
             const auto perm{debug ? Common::MemoryPermission{}
                                   : Common::MemoryPermission::ReadWrite};
+            LazyForget(vaddr, size);
             host_buffer->Protect(vaddr, size, perm);
         }
 
@@ -504,6 +513,132 @@ struct Memory::Impl {
         }
     }
 
+    /// Lazy unprotect (EDEN_LAZY_UNPROTECT=0 turns it off), for reactive flushing, where a cached
+    /// page has no host access at all. Guest code rewrites the same buffer pages every frame: each
+    /// write uncached its pages (mprotect RW) and the next upload cached them again (mprotect
+    /// NONE), ~35k mprotects/s in Zelda OoT on BC250, each taking the mm write lock and a TLB
+    /// shootdown of every emulator thread. An uncached page now keeps its protection for a while:
+    /// cached again soon (the usual case), it needs no syscall either way. Extra protection only
+    /// adds traps: a fastmem access that faults on it moves to the page-table path, which reads the
+    /// page type (Memory once uncached) and so never misses a write. Pages left uncached are
+    /// unprotected in coalesced runs after kLazyDelay. Map, Unmap, ProtectRegion and debug marks
+    /// set host protection themselves and drop their pages from the pending set.
+    static bool LazyUnprotectEnabled() {
+        static const bool enabled = [] {
+            const char* value = std::getenv("EDEN_LAZY_UNPROTECT");
+            const bool on = value == nullptr || value[0] != '0';
+            LOG_INFO(HW_Memory, "Lazy unprotect of uncached pages: {}", on ? "on" : "off");
+            return on;
+        }();
+        return enabled;
+    }
+
+    static u64 LazyNow() {
+        return static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                    std::chrono::steady_clock::now().time_since_epoch())
+                                    .count());
+    }
+
+    void LazyMarkCached(u64 vaddr, u64 size, bool cached) {
+        static constexpr u64 kLazyDelay = 250'000'000;   // ns a page may stay protected uncached
+        static constexpr u64 kSweepPeriod = 50'000'000;  // ns between sweeps
+        const u64 first = vaddr >> YUZU_PAGEBITS;
+        const u64 end = (vaddr + size + YUZU_PAGEMASK) >> YUZU_PAGEBITS;
+        const u64 now = LazyNow();
+        std::scoped_lock lk{lazy_mutex};
+        if (cached) {
+            u64 run_begin = 0;
+            u64 run_pages = 0;
+            const auto protect_run = [&] {
+                if (run_pages > 0) {
+                    host_buffer->Protect(run_begin << YUZU_PAGEBITS, run_pages << YUZU_PAGEBITS,
+                                         Common::MemoryPermission{});
+                    run_pages = 0;
+                }
+            };
+            for (u64 page = first; page != end; ++page) {
+                if (lazy_pending.erase(page) != 0) {
+                    protect_run();  // still protected from its last cached period
+                    continue;
+                }
+                if (run_pages == 0) {
+                    run_begin = page;
+                }
+                ++run_pages;
+            }
+            protect_run();
+        } else {
+            for (u64 page = first; page != end; ++page) {
+                lazy_pending.insert_or_assign(page, now);
+            }
+        }
+        if (now < lazy_next_sweep) {
+            return;
+        }
+        lazy_next_sweep = now + kSweepPeriod;
+        lazy_sweep.clear();
+        for (auto it = lazy_pending.begin(); it != lazy_pending.end();) {
+            if (now - it->second >= kLazyDelay) {
+                lazy_sweep.push_back(it->first);
+                it = lazy_pending.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        std::sort(lazy_sweep.begin(), lazy_sweep.end());
+        u64 run_begin = 0;
+        u64 run_pages = 0;
+        const auto unprotect_run = [&] {
+            if (run_pages > 0) {
+                host_buffer->Protect(run_begin << YUZU_PAGEBITS, run_pages << YUZU_PAGEBITS,
+                                     Common::MemoryPermission::ReadWrite);
+                run_pages = 0;
+            }
+        };
+        for (const u64 page : lazy_sweep) {
+            // Only mapped, uncached pages get their access back (others keep what they have).
+            const auto type = std::as_const(current_page_table->entries)[page].Type();
+            const bool open = type == Common::PageType::Memory;
+            if (!open || (run_pages > 0 && run_begin + run_pages != page)) {
+                unprotect_run();
+            }
+            if (!open) {
+                continue;
+            }
+            if (run_pages == 0) {
+                run_begin = page;
+            }
+            ++run_pages;
+        }
+        unprotect_run();
+    }
+
+    void LazyForget(u64 vaddr, u64 size) {
+        if (size == 0) {
+            return;
+        }
+        std::scoped_lock lk{lazy_mutex};
+        if (lazy_pending.empty()) {
+            return;
+        }
+        const u64 first = vaddr >> YUZU_PAGEBITS;
+        const u64 end = (vaddr + size + YUZU_PAGEMASK) >> YUZU_PAGEBITS;
+        if (end - first > lazy_pending.size()) {
+            std::erase_if(lazy_pending, [&](const auto& entry) {
+                return entry.first >= first && entry.first < end;
+            });
+        } else {
+            for (u64 page = first; page != end; ++page) {
+                lazy_pending.erase(page);
+            }
+        }
+    }
+
+    std::mutex lazy_mutex;
+    std::unordered_map<u64, u64> lazy_pending;  ///< uncached page -> when it was uncached (ns)
+    std::vector<u64> lazy_sweep;
+    u64 lazy_next_sweep = 0;
+
     void RasterizerMarkRegionCached(u64 vaddr, u64 size, bool cached) {
         if (vaddr == 0 || !AddressSpaceContains(*current_page_table, vaddr, size)) {
             return;
@@ -526,9 +661,13 @@ struct Memory::Impl {
             if (!cached) {
                 perm |= Common::MemoryPermission::Write;
             }
-            host_buffer->Protect(vaddr, size, perm);
-            if (cached && perm != Common::MemoryPermission{}) {
-                ProtectArmedPages(vaddr, size);
+            if (reactive_flushing && LazyUnprotectEnabled()) {
+                LazyMarkCached(vaddr, size, cached);
+            } else {
+                host_buffer->Protect(vaddr, size, perm);
+                if (cached && perm != Common::MemoryPermission{}) {
+                    ProtectArmedPages(vaddr, size);
+                }
             }
         }
 
@@ -893,6 +1032,20 @@ struct Memory::Impl {
     }
 
     void HandleRasterizerDownload(VAddr v_address, size_t size) {
+        if (!Kernel::Nx2ThreadStats::g_enabled) {
+            DownloadFromRasterizer(v_address, size);
+            return;
+        }
+        auto& timing = system.CoreTiming();
+        const u64 start = timing.GetClockTicks();
+        const u64 reads = VideoCore::AsyncReadback::t_reads;
+        DownloadFromRasterizer(v_address, size);
+        Kernel::Nx2ThreadStats::CountMemory(Kernel::Nx2ThreadStats::t_run,
+                                            timing.GetClockTicks() - start,
+                                            VideoCore::AsyncReadback::t_reads != reads);
+    }
+
+    void DownloadFromRasterizer(VAddr v_address, size_t size) {
         const auto* p = GetPointerImpl(
             v_address, []() {}, []() {});
         if (!gpu_device_memory) [[unlikely]] {
@@ -934,6 +1087,18 @@ struct Memory::Impl {
     }
 
     void HandleRasterizerWrite(VAddr v_address, size_t size) {
+        if (!Kernel::Nx2ThreadStats::g_enabled) {
+            WriteToRasterizer(v_address, size);
+            return;
+        }
+        auto& timing = system.CoreTiming();
+        const u64 start = timing.GetClockTicks();
+        WriteToRasterizer(v_address, size);
+        Kernel::Nx2ThreadStats::CountMemory(Kernel::Nx2ThreadStats::t_run,
+                                            timing.GetClockTicks() - start, false);
+    }
+
+    void WriteToRasterizer(VAddr v_address, size_t size) {
         const auto* p = GetPointerImpl(
             v_address, []() {}, []() {});
         constexpr size_t sys_core = Core::Hardware::NUM_CPU_CORES - 1;

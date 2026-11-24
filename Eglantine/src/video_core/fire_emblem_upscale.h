@@ -16,6 +16,9 @@ constexpr u64 ProgramId = 0x04007EF01F8AE000ULL;
 // NativeProgramKey of the captured DLSS final output pass, not its lowered shader hash.
 constexpr u64 OutputProgramKey = 0x14b4222bbe23abeeULL;
 constexpr u64 PrepassProgramKey = 0x4cbf6eff32525aecULL;
+// The prepass of other game versions, with the same output pass (#450): a shader dump of 1.0.0
+// has this one and not PrepassProgramKey.
+constexpr u64 PrepassProgramKeyV111 = 0x5e8d8dc58bed8ba4ULL;
 constexpr u64 StarFoxProgramId = 0x0400E88025B1A000ULL;
 constexpr u64 StarFoxPrepassProgramKey = 0xd686ca0b9fad9e6dULL;
 constexpr u64 StarFoxOutputProgramKey = 0x7d3764ff101bec27ULL;
@@ -36,11 +39,17 @@ struct Passes {
     // The game renders a varying region of a target the size of the output, and the network's
     // constants give that region.
     bool render_region = false;
+    u64 alternate_prepass{};
+
+    /// Match either captured prepass; a zero alternate key means no alternate is configured.
+    constexpr bool IsPrepass(u64 key) const {
+        return key == prepass || (alternate_prepass != 0 && key == alternate_prepass);
+    }
 };
 
 constexpr std::optional<Passes> CapturedPasses(u64 program_id) {
     if (program_id == ProgramId) {
-        return Passes{PrepassProgramKey, OutputProgramKey, false};
+        return Passes{PrepassProgramKey, OutputProgramKey, false, false, PrepassProgramKeyV111};
     }
     if (program_id == StarFoxProgramId) {
         return Passes{StarFoxPrepassProgramKey, StarFoxOutputProgramKey, true};
@@ -81,7 +90,8 @@ private:
 inline bool UseReplacement(u64 program_id, u64 native_key, const char* option) {
     const auto passes = CapturedPasses(program_id);
     return passes && native_key == passes->output &&
-           (option == nullptr || (std::string_view{option} == "fsr" || std::string_view{option} == "dlss"));
+           (option == nullptr || std::string_view{option} == "fsr" || std::string_view{option} == "dlss" ||
+            std::string_view{option} == "spatial");
 }
 
 inline bool PlainImage(const Tegra::Texture::TICEntry& image) {

@@ -15,9 +15,10 @@
 //     "accessibility": { "large_text": false, "high_contrast": false, "reduce_motion": false },
 //     "launcher": { "theme": "eglantine", "accent": "" },
 //     "diagnostics": { "detailed_logging": false, "immediate_logs": false },
-//     "performance": { "block_list": false, "async_shaders": false, "fast_gpu": false,
+//     "performance": { "block_list": false, "async_shaders": true, "fast_gpu": false,
 //                      "unsafe_cpu": false, "unsafe_dma": false, "reactive_flushing": true,
-//                      "skip_invalidation": false },
+//                      "skip_invalidation": false, "gpu_clock": "boost", "swap_file": true },
+//                      ("gpu_clock": "normal", "boost", "overclock" or "fixed")
 //     "game_files": "/mnt/ext1/eden",
 //     "library": { "last_game": "Game [id].nsp", "recent": ["Game [id].nsp"] },
 //     "games": { "0100000000010000": { "console_mode": "handheld", "renderer": "opengl",
@@ -667,7 +668,7 @@ inline std::atomic<uint64_t> session_title{0};
 // game's own.
 struct PerformanceSettings {
     bool block_list = false;     // compile the blocks of earlier sessions ahead (jit_list.h)
-    bool async_shaders = false;  // draw before a new shader is ready: no pause, things missing meanwhile
+    bool async_shaders = true;   // draw before a new shader is ready: no pause, things missing meanwhile
     bool fast_gpu = false;       // Eden's lowest GPU accuracy
     bool unsafe_cpu = false;     // dynarmic's inexact floating-point shortcuts
     bool unsafe_dma = false;     // Eden's unsafe DMA accuracy
@@ -711,11 +712,61 @@ inline bool SavePerformance(uint64_t title_id, const PerformanceSettings& value,
     document["version"] = 1;
     auto& owner = title_id ? document["games"][Settings::TitleKey(title_id)] : document;
     if (!owner.is_object()) owner = Settings::Json::object();
+    // "gpu_clock" and "swap_file" have no switch in the launcher: values set by hand stay
+    // (LoadGpuClock, LoadSwapFile).
+    const std::string gpu_clock = Settings::String(owner, Settings::Json::json_pointer("/performance/gpu_clock"));
+    const Settings::Json::json_pointer swap_at("/performance/swap_file");
+    const bool has_swap = owner.contains(swap_at) && owner.at(swap_at).is_boolean();
+    const bool swap_file = has_swap && owner.at(swap_at).get<bool>();
     owner["performance"] = {{"block_list", value.block_list}, {"async_shaders", value.async_shaders},
                             {"fast_gpu", value.fast_gpu}, {"unsafe_cpu", value.unsafe_cpu},
                             {"unsafe_dma", value.unsafe_dma}, {"reactive_flushing", value.reactive_flushing},
                             {"skip_invalidation", value.skip_invalidation}};
+    if (!gpu_clock.empty()) owner["performance"]["gpu_clock"] = gpu_clock;
+    if (has_swap) owner["performance"]["swap_file"] = swap_file;
     return Settings::Write(document, file);
+}
+
+// The swap store for a game's memory (src/guest_memory_service.inc, docs/GUEST-MEMORY-SWAP.md):
+// "performance/swap_file", on unless the settings file says false. For every game: it is the
+// console's storage that it writes to.
+inline bool LoadSwapFile(const std::string& file = SettingsFile()) {
+    return Settings::Bool(Settings::Load(file), Settings::Json::json_pointer("/performance/swap_file"), true);
+}
+
+// How fast the GPU looks to a game: Eden's GPU clock, "normal", "boost" or "overclock", and the
+// port's "fixed". A Switch 2 game reads the GPU's time for a frame 4 times shorter with boost (the
+// core's default), 16 times with overclock and 256 times with fixed. Games that choose their render
+// resolution by that time keep the highest one for as long as the frame seems to fit: with fixed,
+// through frames of seconds.
+//
+// Mario Kart World gets fixed unless the file says otherwise. With boost, any frame that came late
+// made it change its render resolution, then again every frame: each size has render targets of
+// its own, the texture cache made 25,000 images in 600 frames instead of 3,000, graphics memory
+// went from 4.5 GB to 6-7 GB within seconds, and the pool the game's own memory shares with it ran
+// out (docs/GUEST-MEMORY-SWAP.md). Overclock holds the resolution through frames of up to about
+// 270 ms, which was enough for a race but not for a session: 9 of 9 five-minute runs were fine,
+// and 6 of 7 longer ones ended after 8 to 17 minutes, two of them seconds after a frame that had
+// waited 300 ms for memory. With fixed a 30-minute session ran through frames of up to 11 s.
+//
+// "performance/gpu_clock" sets it for every game, "games/<title>/performance/gpu_clock" for one.
+// Empty when nothing is set: the core's default then stays.
+inline constexpr uint64_t kMarioKartWorld = 0x0400c3f00006e000ull;
+inline std::string LoadGpuClock(uint64_t title_id, const std::string& file = SettingsFile()) {
+    using Settings::Json;
+    const Json document = Settings::Load(file);
+    const auto valid = [](const std::string& value) {
+        return value == "normal" || value == "boost" || value == "overclock" || value == "fixed";
+    };
+    std::string clock = title_id == kMarioKartWorld ? "fixed" : "";
+    if (const std::string general = Settings::String(document, Json::json_pointer("/performance/gpu_clock")); valid(general))
+        clock = general;
+    if (title_id) {
+        const std::string own = Settings::String(
+            document, Json::json_pointer("/games/" + Settings::TitleKey(title_id) + "/performance/gpu_clock"));
+        if (valid(own)) clock = own;
+    }
+    return clock;
 }
 
 // Library > Game settings > Mods: the names of the game's mods that are switched off (mods.h). A

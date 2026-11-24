@@ -20,9 +20,24 @@
 #include <boost/container/small_vector.hpp>
 #include <bit>
 #include <numeric>
+#include <chrono>
+#include <cstring>
+#include <filesystem>
+#include <string>
+#include <system_error>
+#include <unordered_map>
+#ifndef _WIN32
+#include <fcntl.h>
+#include <unistd.h>
+#endif
+#include <fmt/format.h>
 #include "common/alignment.h"
 #include "common/bit_util.h"
+#include "common/cityhash.h"
 #include "common/div_ceil.h"
+#ifdef _WIN32
+#include "common/fs/file.h"
+#endif
 #include "common/literals.h"
 #include "common/settings.h"
 #include "shader_recompiler/byte_addressed_image.h"
@@ -192,12 +207,109 @@ constexpr VkBorderColor ConvertBorderColor(const std::array<float, 4>& color) {
     return usage;
 }
 
+// ASTC whose BC7 copy is in the texture store (ImageInfo::astc_store_key): the host image is BC7
+// with every level, uploaded from the store, and none of the decode paths' special shapes apply
+// to it. From PS5_Lichii (mihawk, codeberg.org/mihawk/PS5_Lichii),
+// src/video_core/renderer_vulkan/vk_texture_cache.cpp, as are the places below that ask it.
+[[nodiscard]] bool IsStoredAstc(const ImageInfo& info) {
+    return info.astc_store_key != 0 && IsPixelFormatASTC(info.format);
+}
+
+constexpr std::array<VkFormat, 2> StoredAstcViewFormats{VK_FORMAT_BC7_UNORM_BLOCK,
+                                                         VK_FORMAT_BC7_SRGB_BLOCK};
+
+// A texture store file (tools/texture-store, PS5_Lichii's format), little endian: this header,
+// then for each level u64 offset and size in the file (its layers one after another, 4x4 blocks
+// in rows, no padding), then the BC7 data.
+struct StoredAstcHeader {
+    char magic[8]; // "PS5BC7T1"
+    u32 width, height, depth, layers, levels;
+    u32 guest_bytes; // the length of the guest's ASTC data the key was taken from
+    u64 key;
+};
+static_assert(sizeof(StoredAstcHeader) == 40);
+
+// Whether a store file's header describes `info` with at least `levels` levels.
+[[nodiscard]] bool StoredAstcFits(const StoredAstcHeader& header, const ImageInfo& info,
+                                  u32 levels) {
+    return std::memcmp(header.magic, "PS5BC7T1", 8) == 0 && info.type == ImageType::e2D &&
+           info.size.depth == 1 && info.num_samples == 1 && header.width == info.size.width &&
+           header.height == info.size.height &&
+           header.layers == static_cast<u32>(info.resources.layers) && levels != 0 &&
+           header.levels >= levels && header.levels <= 32;
+}
+
+// A store file read at offsets. With the system's own call: through IOFile's stream buffer the
+// console gave 92 MiB/s (PS5_Lichii's measurement).
+class StoredAstcFile {
+public:
+    explicit StoredAstcFile(const std::string& path) {
+        std::error_code error;
+        const auto bytes = std::filesystem::file_size(path, error);
+        size = error ? 0 : static_cast<u64>(bytes);
+#ifdef _WIN32
+        file.Open(path, Common::FS::FileAccessMode::Read, Common::FS::FileType::BinaryFile);
+#else
+        descriptor = ::open(path.c_str(), O_RDONLY);
+#endif
+    }
+
+    ~StoredAstcFile() {
+#ifndef _WIN32
+        if (descriptor >= 0) {
+            ::close(descriptor);
+        }
+#endif
+    }
+
+    StoredAstcFile(const StoredAstcFile&) = delete;
+    StoredAstcFile& operator=(const StoredAstcFile&) = delete;
+
+    [[nodiscard]] u64 Size() const noexcept {
+        return size;
+    }
+
+    [[nodiscard]] bool Read(void* out, u64 bytes, u64 offset) {
+        if (offset > size || bytes > size - offset) {
+            return false;
+        }
+#ifdef _WIN32
+        return file.IsOpen() && file.Seek(static_cast<s64>(offset)) &&
+               file.ReadSpan(std::span<u8>{static_cast<u8*>(out), static_cast<size_t>(bytes)}) ==
+                   bytes;
+#else
+        if (descriptor < 0) {
+            return false;
+        }
+        u64 done = 0;
+        while (done < bytes) {
+            const ssize_t got = ::pread(descriptor, static_cast<u8*>(out) + done,
+                                        static_cast<size_t>((std::min)(bytes - done, u64{8} << 20)),
+                                        static_cast<off_t>(offset + done));
+            if (got <= 0) {
+                break;
+            }
+            done += static_cast<u64>(got);
+        }
+        return done == bytes;
+#endif
+    }
+
+private:
+    u64 size = 0;
+#ifdef _WIN32
+    Common::FS::IOFile file;
+#else
+    int descriptor = -1;
+#endif
+};
+
 // An ASTC 2D array whose RGBA8 decode exceeds 1 GiB (title 1's 8192x8192x68 terrain textures).
 // These stay on the GPU decoder as RGBA8 with trimmed levels (TrimmedHostInfo) even when other
 // ASTC images are re-compressed to BC1/BC3 on the CPU: re-compressing them would not fit either.
 [[nodiscard]] bool IsHugeAstcArray(const Device& device, const ImageInfo& info) {
     if (!IsPixelFormatASTC(info.format) || device.IsOptimalAstcSupported() ||
-        info.type != ImageType::e2D || info.size.depth != 1) {
+        info.type != ImageType::e2D || info.size.depth != 1 || IsStoredAstc(info)) {
         return false;
     }
     u64 bytes = 0;
@@ -230,7 +342,7 @@ constexpr VkBorderColor ConvertBorderColor(const std::array<float, 4>& color) {
 // an AMD driver, which samples those wrong: kept as the GPU decoder's RGBA8 instead, like huge
 // arrays.
 [[nodiscard]] bool IsUnevenMipRgba8Astc(const Device& device, const ImageInfo& info) {
-    if (!IsPixelFormatASTC(info.format) || device.IsOptimalAstcSupported() ||
+    if (!IsPixelFormatASTC(info.format) || device.IsOptimalAstcSupported() || IsStoredAstc(info) ||
         info.type != ImageType::e2D || info.size.depth != 1 || info.resources.levels <= 1 ||
         Settings::values.accelerate_astc.GetValue() != Settings::AstcDecodeMode::Gpu ||
         Settings::GetAstcRecompression() == Settings::AstcRecompression::Uncompressed) {
@@ -389,6 +501,10 @@ constexpr std::array<VkFormat, 2> OpaqueAstcViewFormats{VK_FORMAT_BC1_RGBA_UNORM
                                                          VK_FORMAT_BC1_RGBA_SRGB_BLOCK};
 
 [[nodiscard]] std::optional<VkFormat> AstcHostFormat(const Device& device, const ImageInfo& info) {
+    if (IsStoredAstc(info)) {
+        return VideoCore::Surface::IsPixelFormatSRGB(info.format) ? VK_FORMAT_BC7_SRGB_BLOCK
+                                                                  : VK_FORMAT_BC7_UNORM_BLOCK;
+    }
     if (IsOpaqueBc1Astc(device, info)) {
         return VideoCore::Surface::IsPixelFormatSRGB(info.format) ? VK_FORMAT_BC1_RGBA_SRGB_BLOCK
                                                                   : VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
@@ -401,7 +517,7 @@ constexpr std::array<VkFormat, 2> OpaqueAstcViewFormats{VK_FORMAT_BC1_RGBA_UNORM
 [[nodiscard]] bool WillUseGpuBcnTranscode(const Device& device, const ImageInfo& info) {
     if (!IsPixelFormatASTC(info.format) || device.IsOptimalAstcSupported() ||
         IsHugeAstcArray(device, info) || IsUnevenMipRgba8Astc(device, info) ||
-        info.type != ImageType::e2D || info.size.depth != 1) {
+        info.type != ImageType::e2D || info.size.depth != 1 || IsStoredAstc(info)) {
         return false;
     }
     return Settings::values.accelerate_astc.GetValue() == Settings::AstcDecodeMode::Gpu &&
@@ -409,7 +525,7 @@ constexpr std::array<VkFormat, 2> OpaqueAstcViewFormats{VK_FORMAT_BC1_RGBA_UNORM
 }
 
 [[nodiscard]] bool WillUseAcceleratedAstcDecode(const Device& device, const ImageInfo& info) {
-    if (!IsPixelFormatASTC(info.format) || device.IsOptimalAstcSupported()) {
+    if (!IsPixelFormatASTC(info.format) || device.IsOptimalAstcSupported() || IsStoredAstc(info)) {
         return false;
     }
     if (IsHugeAstcArray(device, info) || IsUnevenMipRgba8Astc(device, info)) {
@@ -1314,6 +1430,35 @@ TextureCacheRuntime::TextureCacheRuntime(const Device& device_, Scheduler& sched
       resolution{Settings::values.resolution_info} {
     // Before anything below reads astc_recompression (passes, view formats).
     UseBc3ForSwitch2OnSmallCards(device);
+    // The texture store's files by key (FindStoredAstc): <16 hex digits>.bc7 in the running
+    // title's folder, or in the folder EDEN_NX2_TEXTURE_STORE_DIR names. Without the folder there
+    // is no store and nothing below asks for one; EDEN_NX2_TEXTURE_STORE=0 leaves it out too.
+    // From PS5_Lichii (mihawk, codeberg.org/mihawk/PS5_Lichii),
+    // src/video_core/renderer_vulkan/vk_texture_cache.cpp, which reads one folder for all titles.
+    if (const char* const off = std::getenv("EDEN_NX2_TEXTURE_STORE");
+        !(off && off[0] == '0') && device.IsOptimalBcnSupported() &&
+        !device.IsOptimalAstcSupported()) {
+        const char* const named = std::getenv("EDEN_NX2_TEXTURE_STORE_DIR");
+        const std::filesystem::path folder =
+            named != nullptr && named[0] != '\0'
+                ? std::filesystem::path{named}
+                : std::filesystem::path{"/data/eglantineps5/texture-store"} /
+                      fmt::format("{:016x}", Settings::GetCurrentProgramID());
+        std::error_code error;
+        for (std::filesystem::recursive_directory_iterator at{folder, error}, end;
+             !error && at != end; at.increment(error)) {
+            const auto name = at->path().filename().string();
+            if (name.size() == 20 && name.ends_with(".bc7")) {
+                if (const u64 key = std::strtoull(name.c_str(), nullptr, 16); key != 0) {
+                    astc_store.emplace(key, at->path().string());
+                }
+            }
+        }
+        if (!astc_store.empty()) {
+            LOG_INFO(Render_Vulkan, "Texture store: {} BC7 images under {}", astc_store.size(),
+                     folder.string());
+        }
+    }
     // Huge ASTC arrays always decode on the GPU (IsHugeAstcArray), whatever the decode setting.
     if (Settings::values.accelerate_astc.GetValue() == Settings::AstcDecodeMode::Gpu ||
         !device.IsOptimalAstcSupported()) {
@@ -2921,6 +3066,160 @@ bool TextureCacheRuntime::UseOpaqueAstcFormat() const {
            Settings::GetAstcRecompression() == Settings::AstcRecompression::Bc3;
 }
 
+// From PS5_Lichii (mihawk, codeberg.org/mihawk/PS5_Lichii),
+// src/video_core/renderer_vulkan/vk_texture_cache.cpp. There a file that does not fit its image
+// is found out at the upload, when the image is already BC7 and stays empty; here its header is
+// read first, so such an image is decoded from the guest's bytes like any other.
+u64 TextureCacheRuntime::FindStoredAstc(std::span<const u8> guest_data, const ImageInfo& info) {
+    if (astc_store.empty() || guest_data.empty()) {
+        return 0;
+    }
+    const u64 key =
+        Common::CityHash64(reinterpret_cast<const char*>(guest_data.data()), guest_data.size());
+    const auto it = astc_store.find(key);
+    bool found = it != astc_store.end();
+    if (found) {
+        StoredAstcFile file{it->second};
+        StoredAstcHeader header{};
+        found = file.Read(&header, sizeof(header), 0) &&
+                StoredAstcFits(header, info, HostMipCount(info)) && header.key == key &&
+                header.guest_bytes == guest_data.size();
+        if (!found) {
+            static u32 logged{};
+            if (logged++ < 32) {
+                LOG_ERROR(Render_Vulkan,
+                          "The texture store's {} does not fit the {}x{}x{} image with its key "
+                          "({} levels, {} guest bytes): not used",
+                          it->second, info.size.width, info.size.height, info.resources.layers,
+                          info.resources.levels, guest_data.size());
+            }
+        }
+    }
+    const u64 count = found ? ++astc_store_hits : ++astc_store_misses;
+    // (Every large one: the arrays an area's ground is drawn from are where the memory is.)
+    if (count <= 4 || (count & (count - 1)) == 0 || guest_data.size() >= (size_t{8} << 20)) {
+        LOG_INFO(Render_Vulkan,
+                 "Texture store: {} ASTC images found, {} not (the last: {:016x}, {} guest bytes, "
+                 "{})",
+                 astc_store_hits, astc_store_misses, key, guest_data.size(),
+                 found ? "found" : "not found");
+    }
+    return found ? key : 0;
+}
+
+bool TextureCacheRuntime::UploadStoredAstc(Image& image) {
+    const ImageInfo& info = image.info;
+    const auto it = astc_store.find(info.astc_store_key);
+    if (it == astc_store.end() || image.host_level_offset != 0) {
+        return false;
+    }
+    const auto begin = std::chrono::steady_clock::now();
+    StoredAstcFile file{it->second};
+    StoredAstcHeader header{};
+    const u32 levels = image.HostMipLevels();
+    if (!file.Read(&header, sizeof(header), 0) || !StoredAstcFits(header, info, levels)) {
+        return false;
+    }
+    std::vector<std::array<u64, 2>> ranges(header.levels);
+    if (!file.Read(ranges.data(), ranges.size() * sizeof(ranges[0]), sizeof(header))) {
+        return false;
+    }
+    // PS5_Lichii reads the whole file into one staging buffer. A large array's file is as large as
+    // the image (128 MiB for Mario Kart World's 46-layer one), all of it host memory until the GPU
+    // has copied it: a file over EDEN_NX2_TEXTURE_STORE_CHUNK_MIB (32; 0 for no limit) goes in
+    // pieces of whole layers of a level up to that size, each copied before the next is read, so
+    // the pool hands the same staging memory out again.
+    static const u64 chunk = [] {
+        const char* const value = std::getenv("EDEN_NX2_TEXTURE_STORE_CHUNK_MIB");
+        const u64 mib = value != nullptr ? std::strtoull(value, nullptr, 10) : 32;
+        return mib != 0 ? mib << 20 : ~u64{0};
+    }();
+    struct Piece {
+        u64 offset; // in the file
+        u64 size;
+        VideoCommon::BufferImageCopy copy;
+    };
+    std::vector<Piece> pieces;
+    for (u32 level = 0; level < levels; ++level) {
+        const u32 width = (std::max)(info.size.width >> level, 1U);
+        const u32 height = (std::max)(info.size.height >> level, 1U);
+        const u64 layer_bytes = u64{Common::DivCeil(width, 4U)} * Common::DivCeil(height, 4U) * 16;
+        const u64 expected = layer_bytes * header.layers;
+        if (ranges[level][1] != expected || ranges[level][0] > file.Size() ||
+            expected > file.Size() - ranges[level][0]) {
+            return false;
+        }
+        const u32 step = static_cast<u32>(std::clamp<u64>(chunk / layer_bytes, 1, header.layers));
+        for (u32 layer = 0; layer < header.layers; layer += step) {
+            const u32 count = (std::min)(step, header.layers - layer);
+            pieces.push_back(Piece{
+                .offset = ranges[level][0] + layer_bytes * layer,
+                .size = layer_bytes * count,
+                .copy{
+                    .buffer_offset = 0,
+                    .buffer_size = static_cast<size_t>(layer_bytes * count),
+                    .buffer_row_length = Common::AlignUp(width, 4U),
+                    .buffer_image_height = Common::AlignUp(height, 4U),
+                    .image_subresource{
+                        .base_level = static_cast<s32>(level),
+                        .base_layer = static_cast<s32>(layer),
+                        .num_layers = static_cast<s32>(count),
+                    },
+                    .image_offset{0, 0, 0},
+                    .image_extent{width, height, 1},
+                },
+            });
+        }
+    }
+    u64 read_bytes = 0;
+    boost::container::small_vector<VideoCommon::BufferImageCopy, 16> copies;
+    for (size_t first = 0; first < pieces.size();) {
+        // The pieces that follow each other in the file and fit the limit together: one read.
+        size_t last = first + 1;
+        u64 bytes = pieces[first].size;
+        while (last < pieces.size() &&
+               pieces[last].offset == pieces[last - 1].offset + pieces[last - 1].size &&
+               bytes <= chunk && pieces[last].size <= chunk - bytes) {
+            bytes += pieces[last].size;
+            ++last;
+        }
+        if (first == 0 && last != pieces.size()) {
+            // A copy moves only the layers it writes out of the layout a new image starts in, and
+            // tells the next one the image has left it: all of a new image leaves it first.
+            TransitionImageLayout(image);
+        }
+        const StagingBufferRef staging = UploadStagingBuffer(static_cast<size_t>(bytes));
+        if (!file.Read(staging.mapped_span.data(), bytes, pieces[first].offset)) {
+            return false;
+        }
+        copies.clear();
+        for (size_t at = first; at < last; ++at) {
+            copies.push_back(pieces[at].copy);
+            copies.back().buffer_offset = static_cast<size_t>(pieces[at].offset - pieces[first].offset);
+        }
+        image.UploadMemory(staging, copies);
+        read_bytes += bytes;
+        if (last != pieces.size()) {
+            auto timer = Eden::Performance::VulkanTimer(8);
+            scheduler.Wait(scheduler.CurrentTick());
+        }
+        first = last;
+    }
+    // (how long the store's uploads take: at the 1st, 2nd, 4th ... and every large one)
+    static u64 count = 0, total_bytes = 0, total_us = 0;
+    ++count;
+    total_bytes += read_bytes;
+    total_us += static_cast<u64>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                     std::chrono::steady_clock::now() - begin)
+                                     .count());
+    if ((count & (count - 1)) == 0 || read_bytes >= (u64{32} << 20)) {
+        LOG_INFO(Render_Vulkan,
+                 "Texture store: {} images uploaded, {} MiB in {} ms (the last: {} MiB)", count,
+                 total_bytes >> 20, total_us / 1000, read_bytes >> 20);
+    }
+    return true;
+}
+
 void TextureCacheRuntime::FlushDeferredClear() {
     scheduler.FlushDeferredClear();
 }
@@ -3018,6 +3317,8 @@ Image::Image(TextureCacheRuntime& runtime_, const ImageInfo& info_, GPUVAddr gpu
                                IsHugeAstcArray(runtime_.device, info) ||
                                        IsUnevenMipRgba8Astc(runtime_.device, info)
                                    ? std::span<const VkFormat>{HugeAstcViewFormats}
+                               : IsStoredAstc(info)
+                                   ? std::span<const VkFormat>{StoredAstcViewFormats}
                                : IsOpaqueBc1Astc(runtime_.device, info)
                                    ? std::span<const VkFormat>{OpaqueAstcViewFormats}
                                    : runtime->ViewFormats(info.format),
@@ -3052,6 +3353,11 @@ Image::Image(TextureCacheRuntime& runtime_, const ImageInfo& info_, GPUVAddr gpu
     }
     if (IsHugeAstcArray(runtime->device, info)) {
         flags |= VideoCommon::ImageFlagBits::AcceleratedUpload;
+        flags |= VideoCommon::ImageFlagBits::Converted;
+        flags |= VideoCommon::ImageFlagBits::CostlyLoad;
+    } else if (IsStoredAstc(info)) {
+        // Filled from its file by RefreshContents: none of the decode paths' flags, so neither
+        // the GPU decoder, the background decode nor the uploads by layer take it.
         flags |= VideoCommon::ImageFlagBits::Converted;
         flags |= VideoCommon::ImageFlagBits::CostlyLoad;
     } else if (IsPixelFormatASTC(info.format) && !runtime->device.IsOptimalAstcSupported()) {
@@ -4373,6 +4679,10 @@ ImageView::ImageView(TextureCacheRuntime& runtime, const VideoCommon::ImageViewI
         format_info.format = VideoCore::Surface::IsPixelFormatSRGB(format)
                                  ? VK_FORMAT_A8B8G8R8_SRGB_PACK32
                                  : VK_FORMAT_A8B8G8R8_UNORM_PACK32;
+    } else if (IsStoredAstc(image.info) && IsPixelFormatASTC(format)) {
+        format_info.format = VideoCore::Surface::IsPixelFormatSRGB(format)
+                                 ? VK_FORMAT_BC7_SRGB_BLOCK
+                                 : VK_FORMAT_BC7_UNORM_BLOCK;
     } else if (IsOpaqueBc1Astc(*device, image.info) && IsPixelFormatASTC(format)) {
         format_info.format = VideoCore::Surface::IsPixelFormatSRGB(format)
                                  ? VK_FORMAT_BC1_RGBA_SRGB_BLOCK
@@ -5161,6 +5471,17 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
     // (Ocarina of Time: driver memory 0.6 -> 5.2 GB in 4 s). Copies in flight and kept for reuse
     // are bounded by bytes (64 MiB, or EDEN_PS5_TRANSCODE_PENDING_MIB; 256 MiB still thrashed), waiting for the oldest
     // only, and what is recorded is submitted every 32 MiB so the GPU works through them.
+    // One image over that bound was still made whole: Mario Kart World's 1434x1434 array of 46
+    // layers and 11 levels took a 560 MiB decode image and 128 MiB of encoded blocks when the pool
+    // had nothing left. Such an array is decoded and encoded `batch` layers at a time, as many as
+    // fit the bound (at least one), through one decode image and one buffer of that size: the GPU
+    // runs the batches in order, so each may write over the last one's. The blocks are the same.
+    // EDEN_PS5_TRANSCODE_LAYER_BATCH=0 makes every image whole again.
+    static const bool layer_batches = [] {
+        const char* value = std::getenv("EDEN_PS5_TRANSCODE_LAYER_BATCH");
+        return value == nullptr || value[0] != '0';
+    }();
+    u32 batch = layers;
     {
         using namespace Common::Literals;
         const auto bytes_of = [](const PendingTranscode& t) {
@@ -5178,7 +5499,12 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
         shape.width = width;
         shape.height = height;
         shape.levels = levels;
-        shape.layers = layers;
+        shape.layers = 1;
+        if (const u64 layer_bytes = bytes_of(shape);
+            layer_batches && layers > 1 && layer_bytes * layers > held_limit) {
+            batch = static_cast<u32>(std::clamp<u64>(held_limit / layer_bytes, 1, layers));
+        }
+        shape.layers = batch;
         const u64 decode_bytes = bytes_of(shape);
         u64 held_bytes = 0, recorded_bytes = 0, spare_bytes = 0;
         for (const PendingTranscode& held : pending_transcodes) {
@@ -5192,7 +5518,7 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
         if (held_bytes + spare_bytes + decode_bytes > held_limit) {
             std::erase_if(free_transcodes, [&](const PendingTranscode& t) {
                 return !(t.width == width && t.height == height && t.levels == levels &&
-                         t.layers == layers);
+                         t.layers == batch);
             });
         }
         if (recorded_bytes >= 32_MiB) {
@@ -5207,14 +5533,14 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
         }
     }
     const auto reusable = std::ranges::find_if(free_transcodes, [&](const PendingTranscode& t) {
-        return t.width == width && t.height == height && t.levels == levels && t.layers == layers;
+        return t.width == width && t.height == height && t.levels == levels && t.layers == batch;
     });
     PendingTranscode pending;
     if (reusable != free_transcodes.end()) {
         pending = std::move(*reusable);
         free_transcodes.erase(reusable);
     } else {
-        const VkImageCreateInfo decode_ci{
+        VkImageCreateInfo decode_ci{
             .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
             .pNext = nullptr,
             .flags = 0,
@@ -5222,7 +5548,7 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
             .format = DecodeFormat,
             .extent = {width, height, 1},
             .mipLevels = levels,
-            .arrayLayers = layers,
+            .arrayLayers = batch,
             .samples = VK_SAMPLE_COUNT_1_BIT,
             .tiling = VK_IMAGE_TILING_OPTIMAL,
             .usage = VK_IMAGE_USAGE_STORAGE_BIT,
@@ -5235,6 +5561,15 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
         if (!decode && !free_transcodes.empty()) {
             // The GPU is done with these: their memory goes back to the driver now.
             free_transcodes.clear();
+            decode = memory_allocator.TryCreateImage(decode_ci, true);
+        }
+        // No memory for that many layers: fewer at a time rather than no texture. Nothing is
+        // recorded yet, so giving up below still leaves the whole image to upload again. From
+        // PS5_Lichii (mihawk, codeberg.org/mihawk/PS5_Lichii),
+        // src/video_core/renderer_vulkan/vk_texture_cache.cpp.
+        while (!decode && layer_batches && batch > 1) {
+            batch = Common::DivCeil(batch, 2U);
+            decode_ci.arrayLayers = batch;
             decode = memory_allocator.TryCreateImage(decode_ci, true);
         }
         if (!decode) {
@@ -5256,7 +5591,7 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
             .width = width,
             .height = height,
             .levels = levels,
-            .layers = layers,
+            .layers = batch,
             .unused_frames = 0,
         };
         for (u32 level = 0; level < levels; ++level) {
@@ -5264,30 +5599,34 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
                 MakeStorageView(device.GetLogical(), level, *pending.image, DecodeFormat));
         }
     }
-    astc_decoder_pass->AssembleInto(
-        info, 0, image.guest_size_bytes,
-        ASTCDecoderPass::Target{
-            .image = *pending.image,
-            .aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT,
-            .initialized = false,
-            .level_view = [&pending](s32 level) { return *pending.views[level]; },
-            .wait = true,
-            .levels = levels,
-        },
-        map, swizzles);
+    const bool batched = batch < layers;
+    if (batched) {
+        static u32 logged{};
+        if (logged++ < 16) {
+            LOG_INFO(Render_Vulkan,
+                     "ASTC image {:#x} ({}x{}, {} levels, {} layers) decoded {} layers at a time",
+                     image.gpu_addr, width, height, levels, layers, batch);
+        }
+        // A copy moves only the layers it writes out of the layout a new image starts in, and
+        // tells the next one the image has left it: all of a new image leaves it first.
+        TransitionImageLayout(image);
+    }
 
-    // Encode every level into one buffer, then copy it into the image.
+    // A batch's encoded levels go into one buffer, each level's layers one after another, and are
+    // copied from there into the image.
     const bool bc3 = !IsOpaqueBc1Astc(device, info) &&
                      Settings::GetAstcRecompression() != Settings::AstcRecompression::Bc1;
     const u64 block_bytes = bc3 ? 16 : 8;
     boost::container::small_vector<VideoCommon::BufferImageCopy, 16> copies;
+    boost::container::small_vector<u64, 16> layer_bytes; // one encoded layer of each level
     u64 total = 0;
     for (u32 level = 0; level < levels; ++level) {
         const u32 level_width = (std::max)(width >> level, 1U);
         const u32 level_height = (std::max)(height >> level, 1U);
         const u32 blocks_x = Common::DivCeil(level_width, 4U);
         const u32 blocks_y = Common::DivCeil(level_height, 4U);
-        const u64 size = u64{blocks_x} * blocks_y * layers * block_bytes;
+        layer_bytes.push_back(u64{blocks_x} * blocks_y * block_bytes);
+        const u64 size = layer_bytes.back() * batch;
         copies.push_back({
             .buffer_offset = total,
             .buffer_size = size,
@@ -5296,30 +5635,88 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
             .image_subresource{
                 .base_level = static_cast<s32>(level),
                 .base_layer = 0,
-                .num_layers = static_cast<s32>(layers),
+                .num_layers = static_cast<s32>(batch),
             },
             .image_offset{0, 0, 0},
             .image_extent{level_width, level_height, 1},
         });
         total += size;
     }
-    const auto output = staging_buffer_pool.Request(total, MemoryUsage::DeviceLocal);
-    for (u32 level = 0; level < levels; ++level) {
-        bc_encoder_pass->Encode(*pending.views[level], copies[level].image_extent.width,
-                                copies[level].image_extent.height, layers, bc3, output.buffer,
-                                output.offset, total, copies[level].buffer_offset);
+    StagingBufferRef output{};
+    for (u32 base = 0; base < layers; base += batch) {
+        const u32 count = (std::min)(batch, layers - base);
+        // The swizzles describe one layer's levels and the decoder steps layer_stride per layer
+        // from the start of its input, so a batch is the same image with fewer layers, read from
+        // its first layer on: it lands in layers 0..count-1 of the decode image. From PS5_Lichii
+        // (mihawk, codeberg.org/mihawk/PS5_Lichii),
+        // src/video_core/renderer_vulkan/vk_texture_cache.cpp.
+        ImageInfo batch_info = info;
+        batch_info.resources.layers = static_cast<s32>(count);
+        StagingBufferRef batch_map = map;
+        const u64 guest_size = image.guest_size_bytes;
+        const u64 guest_offset = u64{base} * info.layer_stride;
+        batch_map.offset += guest_offset;
+        const size_t batch_size =
+            batched ? static_cast<size_t>(
+                          (std::min)(u64{count} * info.layer_stride,
+                                     guest_size - (std::min)(guest_size, guest_offset)))
+                    : image.guest_size_bytes;
+        astc_decoder_pass->AssembleInto(
+            batch_info, 0, batch_size,
+            ASTCDecoderPass::Target{
+                .image = *pending.image,
+                .aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT,
+                // A later batch writes over what the last one's encode read: its barrier waits
+                // for that.
+                .initialized = base != 0,
+                .level_view = [&pending](s32 level) { return *pending.views[level]; },
+                // Only the last batch submits: `map` carries the tick it was requested in, and a
+                // batch that read it after a submit could find it handed to the next upload.
+                .wait = base + count >= layers,
+                .levels = levels,
+            },
+            batch_map, swizzles);
+        if (base == 0) {
+            // Batches share the buffer across the last decode's submit, so it is held until the
+            // last copy is recorded and takes that tick: with the tick of its request the pool
+            // could hand it out while the last batch still encodes into it.
+            output = staging_buffer_pool.Request(total, MemoryUsage::DeviceLocal, batched);
+        } else {
+            // The last batch's copy read the blocks this batch writes over.
+            scheduler.Record([](vk::CommandBuffer cmdbuf) {
+                const VkMemoryBarrier barrier{
+                    .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                    .pNext = nullptr,
+                    .srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+                    .dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+                };
+                cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, barrier);
+            });
+        }
+        for (u32 level = 0; level < levels; ++level) {
+            bc_encoder_pass->Encode(*pending.views[level], copies[level].image_extent.width,
+                                    copies[level].image_extent.height, count, bc3, output.buffer,
+                                    output.offset, total, copies[level].buffer_offset);
+            copies[level].buffer_size = layer_bytes[level] * count;
+            copies[level].image_subresource.base_layer = static_cast<s32>(base);
+            copies[level].image_subresource.num_layers = static_cast<s32>(count);
+        }
+        scheduler.Record([](vk::CommandBuffer cmdbuf) {
+            const VkMemoryBarrier barrier{
+                .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                .pNext = nullptr,
+                .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+                .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+            };
+            cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                   VK_PIPELINE_STAGE_TRANSFER_BIT, 0, barrier);
+        });
+        image.UploadMemory(output.buffer, output.offset, copies);
     }
-    scheduler.Record([](vk::CommandBuffer cmdbuf) {
-        const VkMemoryBarrier barrier{
-            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
-            .pNext = nullptr,
-            .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
-            .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
-        };
-        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                               0, barrier);
-    });
-    image.UploadMemory(output.buffer, output.offset, copies);
+    if (batched) {
+        staging_buffer_pool.FreeDeferred(output);
+    }
     pending.tick = scheduler.CurrentTick();
     pending_transcodes.push_back(std::move(pending));
 }

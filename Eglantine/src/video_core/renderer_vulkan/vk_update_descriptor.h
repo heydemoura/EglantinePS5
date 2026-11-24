@@ -135,6 +135,8 @@ private:
     size_t frame_index{0};
     DescriptorUpdateEntry* payload_cursor = nullptr;
     DescriptorUpdateEntry* payload_start = nullptr;
+    size_t peak_frame_entries = 0;
+    size_t ticks_since_report = 0;
     const DescriptorUpdateEntry* upload_start = nullptr;
     std::unique_ptr<DescriptorUpdateEntry[]> payload;
     bool growth_disabled{};

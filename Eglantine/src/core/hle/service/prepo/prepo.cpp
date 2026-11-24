@@ -19,6 +19,36 @@
 
 namespace Service::PlayReport {
 
+// Object returned by prepo command 10500 on Switch 2 titles (The Legend of Zelda: Ocarina of Time
+// 2.0.0 calls command 0 on it right after its intro). Its real interface is unknown: accept every
+// call so the title can go on.
+class IPlayReportSession final : public ServiceFramework<IPlayReportSession> {
+public:
+    explicit IPlayReportSession(Core::System& system_)
+        : ServiceFramework{system_, "prepo::IPlayReportSession"} {
+        // clang-format off
+        static const FunctionInfo functions[] = {
+            {0, &IPlayReportSession::Accept, "Unknown0"},
+            {1, &IPlayReportSession::Accept, "Unknown1"},
+            {2, &IPlayReportSession::Accept, "Unknown2"},
+            {3, &IPlayReportSession::Accept, "Unknown3"},
+            {4, &IPlayReportSession::Accept, "Unknown4"},
+            {5, &IPlayReportSession::Accept, "Unknown5"},
+            {10, &IPlayReportSession::Accept, "Unknown10"},
+            {100, &IPlayReportSession::Accept, "Unknown100"},
+        };
+        // clang-format on
+        RegisterHandlers(functions);
+    }
+
+private:
+    void Accept(HLERequestContext& ctx) {
+        LOG_WARNING(Service_PREPO, "(STUBBED) session command {} called", ctx.GetCommand());
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(ResultSuccess);
+    }
+};
+
 class PlayReport final : public ServiceFramework<PlayReport> {
 public:
     explicit PlayReport(const char* name, Core::System& system_) : ServiceFramework{system_, name} {
@@ -35,6 +65,7 @@ public:
             {10200, &PlayReport::RequestImmediateTransmission, "RequestImmediateTransmission"},
             {10300, &PlayReport::GetTransmissionStatus, "GetTransmissionStatus"},
             {10400, &PlayReport::GetSystemSessionId, "GetSystemSessionId"},
+            {10500, &PlayReport::Unknown10500, "Unknown10500"},
             {20100, &PlayReport::SaveSystemReportOld, "SaveSystemReport"},
             {20101, &PlayReport::SaveSystemReportWithUserOld, "SaveSystemReportWithUser"},
             {20102, &PlayReport::SaveSystemReport, "SaveSystemReport"},
@@ -120,6 +151,15 @@ private:
         IPC::ResponseBuilder rb{ctx, 3};
         rb.Push(ResultSuccess);
         rb.Push(status);
+    }
+
+    // Newer firmware play-report command (switchbrew: SendReportWithUser, 15.0.0+). Ocarina of
+    // Time 2.0.0 sends a request to an object right after it, so it returns one.
+    void Unknown10500(HLERequestContext& ctx) {
+        LOG_WARNING(Service_PREPO, "(STUBBED) called, returning a session");
+        IPC::ResponseBuilder rb{ctx, 2, 0, 1};
+        rb.Push(ResultSuccess);
+        rb.PushIpcInterface<IPlayReportSession>(ctx, system);
     }
 
     void GetSystemSessionId(HLERequestContext& ctx) {

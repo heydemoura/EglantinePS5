@@ -10,7 +10,7 @@
 
 **EglantinePS5 is an unofficial PlayStation 5 port of [Eglantine](https://github.com/Djihads80/Eglantine)**, a Switch 2 capable fork of [Eden](https://github.com/eden-emulator/mirror) - an accurate, high-performance emulator. All credit for the emulator core belongs to the Eglantine and Eden projects and their contributors. EglantinePS5 is not affiliated with or endorsed by the Eglantine team, the Eden team or Sony.
 
-This is an early alpha. Video, audio, controller input, and saves have been confirmed working. Compatibility and performance will vary between games. The current release is **v1.000.002** (a pre-release).
+This is an early alpha. Video, audio, controller input, and saves have been confirmed working. Compatibility and performance will vary between games. The current release is **v1.000.004** (a pre-release).
 
 ## Source code
 
@@ -281,7 +281,7 @@ Each profile can keep its save data on a server, such as a [RomM](https://github
 | Setting | In the file | Default | What it does |
 |---|---|---|---|
 | Compile ahead | `block_list` | off | The code a 64-bit game compiled in earlier sessions is compiled again on a spare CPU as it starts, so the game stutters less when it reaches that code. In the one large game it was measured in, the game loaded sooner and its first seconds of play held their frame rate, while the emulated processor worked about a tenth harder afterwards. It has run in one game on the console so far; switch it off if a game misbehaves. |
-| Asynchronous shaders | `async_shaders` | off | A new effect is drawn once its shader is ready instead of pausing the game for it. Things can be missing for a moment. With the Vulkan renderer only: the OpenGL renderer ignores it. |
+| Asynchronous shaders | `async_shaders` | on | A new effect is drawn once its shader is ready instead of pausing the game for it. Things can be missing for a moment. Switching it off brings back the pauses: a first run of Zelda: Ocarina of Time without cached shaders froze for up to 7 s at a time on PC upstream. With the Vulkan renderer only: the OpenGL renderer ignores it. |
 | Faster GPU emulation | `fast_gpu` | off | The emulator's lowest GPU accuracy. Faster in demanding games; graphics can be wrong. |
 | Faster CPU emulation | `unsafe_cpu` | off | Less exact floating-point math. A few games misbehave. |
 | Faster DMA | `unsafe_dma` | off | Less exact memory transfers to the GPU. A few games show wrong graphics. |
@@ -294,15 +294,31 @@ A game can have its own values: in its settings, **Performance** (see [Settings 
 
 ```json
 {
-  "performance": { "block_list": false, "async_shaders": false, "fast_gpu": false, "unsafe_cpu": false,
+  "performance": { "block_list": false, "async_shaders": true, "fast_gpu": false, "unsafe_cpu": false,
                    "unsafe_dma": false, "reactive_flushing": true, "skip_invalidation": false },
   "games": { "0100000000010000": { "performance": { "fast_gpu": true } } }
 }
 ```
 
-The accuracy switches help only where a game is held back by what they relax. In the scene they were measured in on the console, a large game standing at its frame rate limit, switching all of them on changed neither the frame rate nor how busy the emulated processor and the graphics thread were. Leave them off unless a game runs under its frame rate, and switch them back off if its graphics go wrong.
+One more value has no switch in the launcher: `"gpu_clock"`, which is `"normal"`, `"boost"`, `"overclock"` or `"fixed"`. It sets how fast the GPU looks to a game: with boost (the default) the GPU's time for a frame looks 4 times shorter than it was, with overclock 16 times, with fixed 256 times. A game that picks its render resolution from that time keeps the highest one for longer the faster the GPU looks: with fixed, through frames that take seconds. Mario Kart World gets fixed unless the file says otherwise: with boost a single late frame made it change its resolution every frame, each size with render targets of its own, and graphics memory grew from 4.5 GB to 6-7 GB until the session ended (see [docs/GUEST-MEMORY-SWAP.md](docs/GUEST-MEMORY-SWAP.md)). Set it under `"performance"` for every game, or in a game's entry under `"games"` for that game.
 
-Resolution, the upscaling filter, the renderer and the refresh rate, which change speed too, are in **Settings > Video** and in a game's own settings.
+### Memory and the swap store
+
+A game's memory, its graphics memory and the emulator's own share one pool (about 13.4 GB on a PS5 Pro, 12.2 GB on a PS5). When a game fills it, EglantinePS5 first compresses memory of the game that nothing has touched for a while, in pieces of 64 KiB (a touch brings one piece back). Memory that does not compress, mostly texture and sound data the game keeps after the GPU has its copy, can go to a swap store on the console's storage instead, and is read back when the game touches it.
+
+The store is the one [PS5_Lichii](https://codeberg.org/mihawk/PS5_Lichii) uses: `store.bin` and `index.bin` in `/data/eglantineps5/cache/swap/`. It is kept between sessions and found by its contents, so memory whose bytes the store already holds (a game's own data, loaded as it was the last time) goes there without a write. It is written to as little as possible, because the storage's flash wears with writes:
+
+- Nothing is written unless an allocation has already failed and asked for memory back, and then only what the pool lacks and the store does not hold yet. A game that fits writes nothing.
+- Only memory nothing has read or written for a while goes to the store. Memory the game keeps reusing goes last.
+- A slot of the store is never written twice. The store grows up to 8 GiB and never into the last 1 GiB the storage has free. With less than a quarter of its size left it starts over at the next launch, once a day at most: 8 GiB a day is the most the storage takes.
+- At most 1 GiB at once and 8 GiB an hour. With the budget used up, or the store full, nothing more is written and the game runs as it does without the store.
+- Everything read back is checked against a hash taken when it went.
+
+On a PS5 Pro, Mario Kart World wrote 0.5 to 0.9 GiB in a 30-minute session (without the store its session ends after 10 minutes); The Legend of Zelda: Ocarina of Time and Donkey Kong Bananza wrote nothing. Before memory went in 64 KiB pieces the same 30 minutes wrote 2.2 to 2.5 GiB and an hour about 7 GiB, so that the store's 8 GiB were little more than an hour of Mario Kart World; an hour has not been measured since. Once the store is full, long sessions end early again until it starts over at a launch the next day. On a PS5 without Pro memory Mario Kart World was measured before the 64 KiB pieces only: five minutes wrote 0.3 to 0.6 GiB, and a longer session ended after ten minutes with the budget used up.
+
+Deleting `cache/swap/` while no game runs is always safe.
+
+`"swap_file": false` under `"performance"` in the settings file switches it off for every game. The other limits are listed in [docs/GUEST-MEMORY-SWAP.md](docs/GUEST-MEMORY-SWAP.md), with what was measured.
 
 ### Frame generation
 
@@ -369,6 +385,34 @@ The launcher follows the language the PS5 is set to: Arabic, Chinese (simplified
 ### Upgrading from an earlier alpha
 
 Earlier versions read everything from `/data/homebrew/PPSA98515/assets/`. That folder keeps working until you choose a game files folder, and settings are migrated automatically on first launch. To move to the new layout, move `assets/keys`, `assets/firmware` and `assets/roms` into any folder, then select it in **Settings > Game files**. The release ZIP contains no user files, so copy its app files over your installation without deleting your own data.
+
+## Changes in v1.000.004
+
+Pre-release. Two pull requests since v1.000.003, both about memory, and both built on work from [PS5_Lichii](https://codeberg.org/mihawk/PS5_Lichii).
+
+- **Mario Kart World no longer ends early in a session on a PS5 Pro.** In our console tests all five 30-minute sessions ran, at about 31 FPS; before, a session ended within minutes. Two causes are fixed. The game changed its render resolution every frame after a single late frame, which filled graphics memory: it now gets the `fixed` GPU clock by default (`"gpu_clock"`, see "Performance" above). And a long session needs more memory than the console has: see the next three points.
+- **A swap store on the console's storage.** Memory of a game that nothing has touched for a while and that does not compress can go to `/data/eglantineps5/cache/swap/` (8 GiB at most, kept between sessions) and is read back when the game touches it. Writes are kept low to spare the storage: nothing is written unless an allocation has already failed, a slot of the store is never written twice, and at most 1 GiB goes at once and 8 GiB in an hour. `"swap_file": false` under `"performance"` in the settings file switches it off. See "Memory and the swap store" above.
+- **Untouched game memory is handled in 64 KiB pieces.** A piece of zeroes takes nothing, a piece that compresses stays in memory compressed, and only the rest goes to the swap store; a touch brings back that one piece. With it Mario Kart World wrote 0.5 to 0.9 GiB to the storage in a 30-minute session, where it wrote 2.2 to 2.5 GiB before.
+- **Large ASTC texture arrays are converted a few layers at a time.** Mario Kart World's largest took 560 MiB of graphics memory at once while it was converted; it now takes about 63 MiB.
+- **JIT code caches of Switch 2 games can grow to 320 MiB per core** (96 to 160 MiB before) and take their memory 2 MiB at a time, as code is written.
+- **Graphics allocations wait for memory to come back** (up to 4 s, where they gave up after 20 ms), and a crash report says what the swap store held.
+- **Experimental: a BC7 texture store.** ASTC textures converted ahead of time on a PC (`tools/texture-store`) can be uploaded as they are, with no conversion on the console. Nothing uses it until you have made a store for a game, and it has not been tested on a console yet: [docs/TEXTURE-STORE.md](docs/TEXTURE-STORE.md).
+- The Legend of Zelda: Ocarina of Time and Donkey Kong Bananza run at the frame rate they had (34.0 and 30.3 FPS in our test scenes) and write nothing to the storage.
+- **Known issues, Mario Kart World:** frames of several seconds remain when a track loads (about 90 frames over 100 ms in half an hour, the worst 3 to 4 s). An hour-long session can still end early: of two tested, one ended after 53 minutes; that was before memory went in 64 KiB pieces, and an hour has not been tested since. On a PS5 without Pro memory only short sessions were tested to run (a longer one ended after ten minutes, also before the 64 KiB pieces).
+
+## Changes in v1.000.003
+
+Pre-release. 21 pull requests since v1.000.002, most of them upstream Eglantine work ported to the PS5.
+
+- **Zelda: Ocarina of Time runs faster.** 29 upstream Zelda fixes and speedups are ported (empty GPU submits skipped, cheaper command-list copies and query reports, faster fast-draw paths, x86-64 JIT code generation). In our console test scene it went from about 30 FPS to 32–33.5 FPS.
+- **Zelda: the dark grid on the water is gone** (the game's light-table shadow maps are bound correctly).
+- **Zelda: no more shader stutter in warm sessions.** The ~80 pipelines that were built mid-game each session (about 2 s of hitches) are now built from the cache at launch.
+- **Zelda: Ocarina of Time 2.0.0 (update v131072) no longer stops after the intro** (play-report session command 10500 is handled).
+- **Asynchronous shader building is on by default** (Settings > Video).
+- **Fire Emblem: Fortune's Weave boots** instead of stopping on a black screen with a GPU fault, and its picture is upscaled with FSR 3.1 temporal by default, which removes the jagged, crawling edges around characters.
+- **Pokémon Pokopia:** the sky is no longer black; it no longer crashes with a GPU hang after 5–20 minutes of play; and starting it from a `.nup` no longer takes 30+ minutes on every launch (large decoded parts of the container are kept in the cache and reused).
+- **Less memory use:** about 250 MiB less heap in use (smaller JIT dispatch and GPU page tables), smaller starting descriptor queues, and about 4.7 GB less allocation churn per Mario Kart World session.
+- **Known issue: Mario Kart World still crashes** early in a session (out of GPU memory).
 
 ## Changes in v1.000.002
 

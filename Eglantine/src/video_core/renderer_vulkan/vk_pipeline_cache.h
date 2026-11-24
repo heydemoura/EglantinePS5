@@ -32,6 +32,7 @@
 #include "shader_recompiler/profile.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
+#include "video_core/renderer_vulkan/async_draw_policy.h"
 #include "video_core/renderer_vulkan/fixed_pipeline_state.h"
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
@@ -117,6 +118,9 @@ struct ComputePipelineCacheEntry {
     u32 rebuilds{};
     /// Whether a dispatch looked it up yet (kept only with EDEN_NX2_STUTTER_TRACE)
     bool used{};
+    /// A rebuild whose driver compile runs on a worker; this entry's pipeline is used until it is
+    /// built (a compile waited on by the dispatch stalled every GPU channel for 2-3 s)
+    std::unique_ptr<ComputePipelineCacheEntry> pending_rebuild;
 
     [[nodiscard]] ComputePipeline* Get(bool native, GPUVAddr address,
                                        const ComputePipelineCacheKey& key) const;
@@ -138,6 +142,16 @@ public:
 
     [[nodiscard]] ComputePipeline* CurrentComputePipeline(u64& native_key);
 
+    /// Whether a Switch 2 dispatch whose compute pipeline is still building is skipped instead
+    /// of waiting for the build, as native_async_draws decides for draws. Skipping leaves the
+    /// dispatch's outputs as they are, which costs a frame of its work only when shaders wrote
+    /// them before (a pass the game runs every frame); otherwise they would keep a clear value
+    /// or whatever the guest left there, so those dispatches wait. A Bounded wait takes from the
+    /// draws' budget.
+    /// @param outputs_hold_gpu_data Every buffer byte the dispatch writes holds GPU writes, and
+    ///                              every image level it writes holds storage writes.
+    [[nodiscard]] bool SkipUnbuiltDispatch(ComputePipeline& pipeline, bool outputs_hold_gpu_data);
+
     void LoadDiskResources(u64 title_id, std::stop_token stop_loading,
                            const VideoCore::DiskResourceLoadCallback& callback);
 
@@ -147,6 +161,13 @@ private:
     /// Returns `pipeline` when it is built or its draw must wait for it, nullptr when the draw
     /// may be skipped while it builds (asynchronous shaders, CanDiscardPendingDraw).
     [[nodiscard]] GraphicsPipeline* BuiltPipeline(GraphicsPipeline* pipeline) noexcept;
+
+    /// How native work with an unbuilt pipeline is handled: native_async_draws, or Skip with
+    /// EDEN_NX2_ASYNC_DISCARD=1.
+    [[nodiscard]] NativePendingMode NativeMode() const;
+
+    /// Logs the bounded waits' time every 10 s.
+    void LogBoundedWaits();
 
     /// With `keep_pointers`, the slots an evicted pipeline of this key bound stay storage buffer
     /// pointers whatever they hold now.

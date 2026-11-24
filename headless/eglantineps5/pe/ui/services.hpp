@@ -323,7 +323,7 @@ struct Preferences
     std::string accent;
     // Performance: speed against accuracy, for every game.
     bool block_list = false;    // compile the code of earlier sessions ahead
-    bool async_shaders = false; // draw before a new shader is ready
+    bool async_shaders = true;  // draw before a new shader is ready
     bool fast_gpu = false;      // the emulator's lowest GPU accuracy
     bool unsafe_cpu = false;    // inexact floating-point shortcuts
     bool unsafe_dma = false;    // unsafe DMA accuracy

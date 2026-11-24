@@ -33,6 +33,9 @@ private:
     std::optional<Clock::time_point> probe_until;
     std::optional<Clock::time_point> next_probe;
     std::optional<Clock::time_point> deficit_since;
+    std::optional<Clock::time_point> down_trial_until;
+    std::optional<Clock::time_point> next_down_trial;
+    std::optional<Clock::time_point> step_up_since;
     f32 smoothed_interval{};
     f32 output_credit{};
     f32 probe_base_rate{};
@@ -40,6 +43,7 @@ private:
     size_t issued_generations{};
     size_t probe_previous_limit{};
     size_t limit{};
+    size_t held_outputs{};
     u32 probe_failures{};
 };
 

@@ -341,6 +341,24 @@ void Maxwell3D::DrawManager::ProcessDraw(Maxwell3D& maxwell3d, bool draw_indexed
     draw_state.draw_element_count =
         draw_indexed ? draw_state.index_buffer.count : draw_state.vertex_buffer.count;
     LOG_TRACE(HW_GPU, "called, topology={}, count={}", draw_state.topology, draw_indexed ? draw_state.index_buffer.count : draw_state.vertex_buffer.count);
+    // Indices that reach past 4 GiB: the buffer cache sizes an index buffer in 32 bits
+    // (UpdateIndexBuffer), so no game draws them; they come from registers a macro left half
+    // written (one that failed on the split front left first=0x3f800000 count=0x3f600000).
+    // Drawing them staged GiBs of index data and the GPU never finished (VK_ERROR_DEVICE_LOST).
+    if (draw_indexed && draw_state.inline_index_draw_indexes.empty()) {
+        const auto& index_buffer = draw_state.index_buffer;
+        const u64 end = (u64{index_buffer.first} + index_buffer.count) *
+                        static_cast<u64>(index_buffer.FormatSizeInBytes());
+        if (end > u64{UINT32_MAX}) [[unlikely]] {
+            static u32 logged{};
+            if (logged < 16) {
+                ++logged;
+                LOG_ERROR(HW_GPU, "Indexed draw dropped: first={:#x} count={:#x} reach {} MiB",
+                          index_buffer.first, index_buffer.count, end >> 20);
+            }
+            return;
+        }
+    }
     UpdateTopology(maxwell3d);
     if (maxwell3d.ShouldExecute()) {
         maxwell3d.rasterizer->Draw(draw_indexed, instance_count);

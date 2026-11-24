@@ -118,6 +118,9 @@ struct ImageBase {
     std::vector<std::pair<u64, u64>> dirty_ranges;
     u64 scale_tick = 0;
     bool has_scaled = false;
+    /// The texture store's file (ImageInfo::astc_store_key) was uploaded once: a later upload
+    /// first checks that the guest's bytes are still the ones the key was taken from.
+    bool astc_store_loaded = false;
 
     /// The channel and GPU address space whose page table RegisterImage put the image in.
     size_t channel = 0;
@@ -134,6 +137,11 @@ struct ImageBase {
     /// At least the newest modification_tick among aliased_images (raised when an alias's tick is
     /// set or an alias is added): SynchronizeAliases has nothing to do while it is not newer.
     u64 newest_alias_tick = 0;
+    /// frame_tick + 1 of the first frame a render pass other than a clear wrote it, or 0.
+    u64 first_written_frame = 0;
+    /// Levels whose every layer a shader last wrote through a storage view. Any other GPU write
+    /// (render pass, clear, copy, alias copy) and an upload from guest memory clear them.
+    u32 storage_written_levels = 0;
     size_t lru_index = SIZE_MAX;
 
     std::array<u32, MAX_MIP_LEVELS> mip_level_offsets{};
@@ -176,6 +184,14 @@ struct ImageAllocBase {
 };
 
 bool AddImageAlias(ImageBase& lhs, ImageBase& rhs, ImageId lhs_id, ImageId rhs_id);
+
+/// Records a shader's storage write through `range`, given the levels written before it: a write
+/// over every layer adds its levels, a partial one keeps what the other layers held.
+void NoteStorageWrite(ImageBase& image, u32 levels_before, const SubresourceRange& range) noexcept;
+
+/// Whether every level `range` covers holds a shader's storage writes and nothing newer.
+[[nodiscard]] bool HoldsStorageWrites(const ImageBase& image,
+                                      const SubresourceRange& range) noexcept;
 
 /// Sets an image's modification tick and raises its aliases' newest_alias_tick to it.
 template <typename Images>

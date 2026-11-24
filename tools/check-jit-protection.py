@@ -23,7 +23,10 @@ for bits in (32, 64):
     generated = eglantine_source(f'src/dynarmic/src/dynarmic/backend/x64/a{bits}_emit_x64.cpp')
     unpatch = generated[generated.index(f'void A{bits}EmitX64::Unpatch('):]
     assert 'code.DisableWriting()' not in unpatch and 'code.EnableWriting()' not in unpatch
-    assert '(*fast_dispatch_table_lookup)(location.Value()) = {};' in unpatch
+    # A64's table is set associative (upstream 1d216e248a): Unpatch clears the location's way.
+    assert '(*fast_dispatch_table_lookup)(location.Value()) = {};' in unpatch or (
+        bits == 64 and 'FastDispatchEntry* const set = &(*fast_dispatch_table_lookup)(location.Value());' in unpatch
+        and 'set[way] = {};' in unpatch)
 names = ('EnableWriting', 'DisableWriting', 'ClearCache', 'SetCodePtr')
 methods = [re.search(r'void BlockOfCode::' + name + r'\([^\n]*\) \{.*?^}', source, re.M | re.S).group() for name in names]
 protect = re.search(r'void ProtectMemory\([^\n]*\) \{.*?^}', source, re.M | re.S).group()
@@ -66,6 +69,8 @@ struct BlockOfCode {
     bool writing = true;
     std::vector<size_t> patch_pages;
     CodePtr code_begin;
+    const unsigned char* far_code_begin = nullptr;  // far code is off with W^X (upstream af476ac3d5)
+    const unsigned char* far_code_ptr = nullptr;
     bool prelude_complete = true;
     bool hasWritableAlias() const { return false; }
     size_t getSize() const { return size; }

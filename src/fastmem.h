@@ -16,8 +16,9 @@ namespace Eden::Fastmem {
 
 // The guest's memory as a service (src/guest_memory_service.inc): a write to a slot that is read where
 // it lies faults and is promoted. Asked first by a fault handler, so a write that faults for that reason
-// is never taken for a fastmem miss. Null until the service runs.
-inline std::atomic<bool (*)(void*) noexcept> guest_write_fault{nullptr};
+// is never taken for a fastmem miss. Null until the service runs. The second argument: 1 the access
+// was a write, 0 a read, -1 not known.
+inline std::atomic<bool (*)(void*, int) noexcept> guest_write_fault{nullptr};
 // The 64-bit window (src/host_memory.cpp, Window64): a JIT fault there that it could serve by showing
 // the guest's memory; the access then repeats. Asked after guest_write_fault.
 inline std::atomic<bool (*)(void*, bool) noexcept> window64_fault{nullptr};
