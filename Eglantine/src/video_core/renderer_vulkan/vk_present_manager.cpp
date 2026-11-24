@@ -408,17 +408,25 @@ void PresentManager::PresentThread(std::stop_token token) {
             // before the queue lock goes out of scope. This way the swapchain
             // lock in WaitPresent is guaranteed to occur after here.
             void(std::exchange(lock, std::unique_lock{swapchain_mutex}));
-            SleepUntil(next_present);
+            // The spacing counts from when this present was due, not from when it returned
+            // (Lichii #1772): counted again from there, each generated frame cost an extra
+            // refresh, which lengthened the measured frame interval and with it the spacing.
+            const auto ready = std::chrono::steady_clock::now();
+            const auto start = (std::max)(next_present, ready);
+            SleepUntil(start);
             CopyToSwapchain(frame);
-            const std::chrono::nanoseconds minimum_interval = MinimumPresentInterval();
-            if (minimum_interval.count() != 0) {
-                // The driver flips a present once its frame is done on the GPU: count the
-                // refresh from there, so a slow generated frame does not share a vblank with the
-                // next one either.
-                void(frame->present_done.Wait());
+            next_present = start + frame->present_spacing;
+            if (frame->present_spacing.count() != 0) {
+                generating_until = start + std::chrono::seconds{1};
             }
-            next_present = std::chrono::steady_clock::now() +
-                           std::max(frame->present_spacing, minimum_interval);
+            // While frames are generated, the next present also waits one refresh after this
+            // one is done on the GPU, which is when the driver flips it: two flips within one
+            // refresh show only the second (MinimumPresentInterval).
+            if (const auto minimum = MinimumPresentInterval();
+                minimum.count() != 0 && start < generating_until) {
+                void(frame->present_done.Wait());
+                next_present = (std::max)(next_present, std::chrono::steady_clock::now() + minimum);
+            }
 
             // Free the frame for reuse
             std::scoped_lock fl{free_mutex};

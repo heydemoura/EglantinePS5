@@ -111,6 +111,8 @@ private:
     std::jthread present_thread;
     /// The present thread presents no frame before this (Frame::present_spacing).
     std::chrono::steady_clock::time_point next_present{};
+    /// Until when presents keep a refresh apart: a second after the last generated frame.
+    std::chrono::steady_clock::time_point generating_until{};
     bool blit_supported;
     bool storage_supported;
     bool use_present_thread;
