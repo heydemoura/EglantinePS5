@@ -34,6 +34,11 @@ public:
 
     [[nodiscard]] size_t GeneratedFrameCount() const;
 
+    /// The measured interval between real frames, in seconds (0 before it is known).
+    [[nodiscard]] f32 FrameInterval() const {
+        return pacer.SmoothedInterval();
+    }
+
     void GenerateInto(const Device& device, Frame* destination, size_t generation);
 
     [[nodiscard]] VideoCore::FrameGenStatus CurrentStatus() const {

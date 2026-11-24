@@ -7,6 +7,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <mutex>
 #include <exception>
@@ -39,6 +40,9 @@ struct Frame {
     vk::Semaphore render_ready;
     vk::Fence present_done;
     bool storage_capable{};
+    /// Time the present thread leaves before presenting the next frame. Frame generation sets it
+    /// on generated frames, so they share the screen time evenly with the real ones.
+    std::chrono::nanoseconds present_spacing{};
 };
 
 class PresentManager {
@@ -105,6 +109,8 @@ private:
     std::mutex free_mutex;
     std::exception_ptr present_failure;
     std::jthread present_thread;
+    /// The present thread presents no frame before this (Frame::present_spacing).
+    std::chrono::steady_clock::time_point next_present{};
     bool blit_supported;
     bool storage_supported;
     bool use_present_thread;

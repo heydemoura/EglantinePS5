@@ -4,6 +4,10 @@
 // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <cstdlib>
+#include <thread>
+
 #include "common/settings.h"
 #include "common/thread.h"
 #include "core/frontend/emu_window.h"
@@ -30,6 +34,39 @@ constexpr u32 MAX_PRESENT_ATTEMPTS = 3;
 #ifdef HAS_LSFG
 static_assert(MAX_FRAMES_IN_FLIGHT <= LSFG_MAX_TARGETS);
 #endif
+
+// Sleeps until the deadline; the next deadline counts from the actual present, so a late wake
+// does not add up.
+void SleepUntil(std::chrono::steady_clock::time_point deadline) {
+    while (true) {
+        const auto left = deadline - std::chrono::steady_clock::now();
+        if (left <= std::chrono::steady_clock::duration::zero()) {
+            return;
+        }
+        std::this_thread::sleep_for(left);
+    }
+}
+
+// The shortest time between two presents while frame generation is on. On the PS5 the driver
+// flips each present at the next vblank without waiting for the previous flip to show
+// (wsi_common_videoout.c), so a generated frame and the real one after it, presented within one
+// refresh, both went to the same vblank and only the real one was seen: Zelda: Ocarina of Time
+// presented 65 frames a second at 59.94 Hz and looked like 30. One refresh apart, each shows.
+// Elsewhere FIFO does this itself.
+std::chrono::nanoseconds MinimumPresentInterval() {
+#if defined(__PROSPERO__) // PS5
+    if (!Settings::values.frame_gen.GetValue()) {
+        return {};
+    }
+    // The output's rate: 119.88 Hz when the session asked for 120 Hz (headless/display_refresh.h),
+    // 59.94 Hz otherwise.
+    const char* high = std::getenv("EDEN_VIDEOOUT_120HZ");
+    const bool hz120 = high != nullptr && high[0] == '1';
+    return std::chrono::nanoseconds{hz120 ? 8'341'675 : 16'683'350};
+#else
+    return {};
+#endif
+}
 
 bool CanStoreToFrame(const vk::PhysicalDevice& physical_device, VkFormat format) {
 #ifdef HAS_LSFG
@@ -200,6 +237,7 @@ Frame* PresentManager::GetRenderFrame() {
     // Wait for the presentation to be finished so all frame resources are free
     frame->present_done.Wait();
     frame->present_done.Reset();
+    frame->present_spacing = {};
 
     return frame;
 }
@@ -367,7 +405,17 @@ void PresentManager::PresentThread(std::stop_token token) {
             // before the queue lock goes out of scope. This way the swapchain
             // lock in WaitPresent is guaranteed to occur after here.
             void(std::exchange(lock, std::unique_lock{swapchain_mutex}));
+            SleepUntil(next_present);
             CopyToSwapchain(frame);
+            const std::chrono::nanoseconds minimum_interval = MinimumPresentInterval();
+            if (minimum_interval.count() != 0) {
+                // The driver flips a present once its frame is done on the GPU: count the
+                // refresh from there, so a slow generated frame does not share a vblank with the
+                // next one either.
+                void(frame->present_done.Wait());
+            }
+            next_present = std::chrono::steady_clock::now() +
+                           std::max(frame->present_spacing, minimum_interval);
 
             // Free the frame for reuse
             std::scoped_lock fl{free_mutex};

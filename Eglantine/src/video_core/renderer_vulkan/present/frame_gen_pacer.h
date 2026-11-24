@@ -19,6 +19,11 @@ class FrameGenPacer {
 public:
     [[nodiscard]] FrameGenPlan Plan(size_t capacity);
 
+    /// The measured interval between real frames, in seconds (0 before it is known).
+    [[nodiscard]] f32 SmoothedInterval() const {
+        return smoothed_interval;
+    }
+
     void Reset();
 
 private:
