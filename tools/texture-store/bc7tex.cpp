@@ -38,7 +38,11 @@ uint64_t tex_cityhash64(const char* data, size_t size) {
 // blocks are encoded again without mode 6, so an opaque texel stays exactly 255.
 void tex_bc7(const uint8_t* rgba, int w, int h, int level, int exact_alpha, int alpha_weight, uint8_t* out) {
     ispc::bc7e_compress_block_params p;
-    if (level <= 0) ispc::bc7e_compress_block_params_init_basic(&p, false);
+    // (-1 fast, -2 very fast, -3 ultra fast: added for EglantinePS5's from_dump.py, to try a store out.)
+    if (level <= -3) ispc::bc7e_compress_block_params_init_ultrafast(&p, false);
+    else if (level == -2) ispc::bc7e_compress_block_params_init_veryfast(&p, false);
+    else if (level == -1) ispc::bc7e_compress_block_params_init_fast(&p, false);
+    else if (level == 0) ispc::bc7e_compress_block_params_init_basic(&p, false);
     else if (level == 1) ispc::bc7e_compress_block_params_init_slow(&p, false);
     else if (level == 2) ispc::bc7e_compress_block_params_init_veryslow(&p, false);
     else ispc::bc7e_compress_block_params_init_slowest(&p, false);

@@ -2403,6 +2403,9 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
                 if (known) {
                     image.info.astc_store_key = key;
                 } else {
+                    // (For the next store: what the game put there instead.)
+                    runtime.DumpAstc(*gpu_memory, image.gpu_addr, image.info,
+                                     std::span<const u8>{guest_data.data(), guest_data.size()});
                     static u64 unknown{};
                     if (const u64 count = ++unknown; (count & (count - 1)) == 0) {
                         LOG_WARNING(HW_GPU,
@@ -3431,9 +3434,17 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
         // Opaque ASTC goes to BC1 rather than BC3 when it is re-compressed (the Vulkan runtime
         // decides). The guest data is already there when an image is first used.
         constexpr size_t MaxScanBytes = 64_MiB;
+        // With a texture store (or a dump for one) larger images are hashed too, and only
+        // hashed: the arrays an area's ground is drawn from are over the scan's limit (Mario Kart
+        // World's largest is 126 MiB), and they are where a transcode costs most.
+        constexpr size_t MaxStoreBytes = 256_MiB;
+        bool with_store = false;
+        if constexpr (requires { runtime.WantsAstcStore(); }) {
+            with_store = runtime.WantsAstcStore();
+        }
         if (IsPixelFormatASTC(new_info.format) && runtime.UseOpaqueAstcFormat()) {
             const size_t scan_bytes = CalculateGuestSizeInBytes(new_info);
-            if (scan_bytes <= MaxScanBytes) {
+            if (scan_bytes <= (with_store ? MaxStoreBytes : MaxScanBytes)) {
                 // Scanned where it is when it is in one piece; only copied (into the scratch
                 // buffer) when the range is split.
                 Tegra::Memory::GpuGuestMemory<u8, Tegra::Memory::GuestMemoryFlags::UnsafeRead>
@@ -3448,10 +3459,18 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
                     new_info.astc_store_key = runtime.FindStoredAstc(
                         std::span<const u8>{scan_data.data(), scan_data.size()}, new_info);
                 }
+                if constexpr (requires { runtime.WantsAstcStore(); }) {
+                    if (new_info.astc_store_key == 0) {
+                        runtime.DumpAstc(*gpu_memory, gpu_addr, new_info,
+                                         std::span<const u8>{scan_data.data(), scan_data.size()});
+                    }
+                }
                 new_info.astc_opaque =
-                    new_info.astc_store_key == 0 &&
+                    new_info.astc_store_key == 0 && scan_bytes <= MaxScanBytes &&
                     AstcDataLooksOpaque(std::span<const u8>{scan_data.data(), scan_data.size()});
-                ++(new_info.astc_opaque ? astc_opaque_images : astc_alpha_images);
+                if (scan_bytes <= MaxScanBytes) {
+                    ++(new_info.astc_opaque ? astc_opaque_images : astc_alpha_images);
+                }
             }
         }
     }
