@@ -92,8 +92,9 @@ FileSys::VirtualDir OpenNupControl(const FileSys::VirtualFile& file, std::string
     if (!FileSys::NupContainer::IsNupFile(file)) return {};
     FileSys::NupContainer container(file);
     const auto base = container.FindBasePackage();
-    if (container.GetStatus() != Loader::ResultStatus::Success || !base) return {};
-    const auto& package = container.GetPackages()[*base];
+    const auto pkg = base ? base : container.FindBestUpdatePackage();
+    if (container.GetStatus() != Loader::ResultStatus::Success || !pkg) return {};
+    const auto& package = container.GetPackages()[*pkg];
     std::vector<FileSys::VirtualFile> files;
     if (!package.icon.empty())
         files.push_back(std::make_shared<FileSys::VectorVfsFile>(package.icon, "icon_AmericanEnglish.dat"));
@@ -266,8 +267,9 @@ uint64_t eden_game_title_id(const char* rom_path) {
 #else
         FileSys::NupContainer container(file);
         const auto base = container.FindBasePackage();
-        return container.GetStatus() == Loader::ResultStatus::Success && base
-                   ? container.GetPackages()[*base].title_id
+        const auto pkg = base ? base : container.FindBestUpdatePackage();
+        return container.GetStatus() == Loader::ResultStatus::Success && pkg
+                   ? FileSys::GetBaseTitleID(container.GetPackages()[*pkg].title_id)
                    : 0;
 #endif
     }
