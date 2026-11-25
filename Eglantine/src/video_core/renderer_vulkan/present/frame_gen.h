@@ -34,6 +34,11 @@ public:
 
     [[nodiscard]] size_t GeneratedFrameCount() const;
 
+    /// The measured interval between real frames, in seconds (0 before it is known).
+    [[nodiscard]] f32 FrameInterval() const {
+        return pacer.SmoothedInterval();
+    }
+
     void GenerateInto(const Device& device, Frame* destination, size_t generation);
 
     [[nodiscard]] VideoCore::FrameGenStatus CurrentStatus() const {
@@ -72,6 +77,12 @@ private:
     std::chrono::steady_clock::time_point report_start{};
     u64 report_generated{};
     u32 report_frames{};
+    /// PS5: generated frames owed to the display's free refreshes (frame_gen.cpp).
+    f32 fill_credit{};
+    /// The extra frames the present manager has room for (WantedGenerations).
+    size_t last_capacity{};
+    /// PS5: when the last frame came (its own interval, beside the pacer's smoothed one).
+    std::chrono::steady_clock::time_point last_process{};
 };
 
 } // namespace Vulkan

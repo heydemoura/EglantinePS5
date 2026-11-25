@@ -7,6 +7,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <mutex>
 #include <exception>
@@ -39,6 +40,11 @@ struct Frame {
     vk::Semaphore render_ready;
     vk::Fence present_done;
     bool storage_capable{};
+    /// Time the present thread leaves before presenting the next frame. Frame generation sets it
+    /// on generated frames, so they share the screen time evenly with the real ones.
+    std::chrono::nanoseconds present_spacing{};
+    /// When the frame was handed to the present thread.
+    std::chrono::steady_clock::time_point queued_at{};
 };
 
 class PresentManager {
@@ -76,6 +82,9 @@ public:
 private:
     void PresentThread(std::stop_token token);
 
+    /// With frame generation on, logs every 10 s how many real and generated frames went out.
+    void LogFrameGenPresents(std::chrono::steady_clock::time_point now);
+
     void CopyToSwapchain(Frame* frame);
 
     void CopyToSwapchainImpl(Frame* frame);
@@ -105,6 +114,15 @@ private:
     std::mutex free_mutex;
     std::exception_ptr present_failure;
     std::jthread present_thread;
+    /// The present thread presents no frame before this (Frame::present_spacing).
+    std::chrono::steady_clock::time_point next_present{};
+    /// Until when presents keep a refresh apart: a second after the last generated frame.
+    std::chrono::steady_clock::time_point generating_until{};
+    /// Frame generation's presents since `pacing_since`, for the log.
+    std::chrono::steady_clock::time_point pacing_since{};
+    u64 pacing_real{};
+    u64 pacing_generated{};
+    u64 pacing_dropped{};
     bool blit_supported;
     bool storage_supported;
     bool use_present_thread;

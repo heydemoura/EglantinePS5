@@ -15,6 +15,7 @@
 #include <stdexcept>
 #include <vector>
 #include <chrono>
+#include <mutex>
 #include <cstring>
 #include <time.h>
 #include "hud.h"
@@ -111,6 +112,8 @@ HudClock vulkan_hud_clock;
 // What the display is actually given: the guest's frames plus the ones frame generation
 // adds (CountPresentedFrame(), hud.h).
 HudClock vulkan_hud_output_clock;
+// The present thread counts frames into it while the GPU thread reads it (frame generation).
+std::mutex vulkan_hud_output_mutex;
 HudSnapshot vulkan_hud;
 double vulkan_hud_stats_time{}, vulkan_hud_speed{};
 HudMachine vulkan_hud_machine;
@@ -615,7 +618,10 @@ GraphicsWindow::GraphicsWindow(bool use_vulkan) : vulkan(use_vulkan) {
 #ifdef EDEN_PS5_VULKAN
     if (vulkan) {
         vulkan_hud_clock = {};
-        vulkan_hud_output_clock = {};
+        {
+            std::scoped_lock lock{vulkan_hud_output_mutex};
+            vulkan_hud_output_clock = {};
+        }
         vulkan_hud = MakeLoadingSnapshot(0);
         vulkan_hud_stats_time = vulkan_hud_speed = 0;
         vulkan_hud_machine = {};
@@ -706,11 +712,12 @@ GraphicsWindow::~GraphicsWindow() {
     std::puts("EDEN_EGL_CLOSED");
 }
 void CountPresentedFrame() {
-    // The renderer calls this for every frame it hands to the present manager, so F in the HUD is
-    // the output rate. Same clock and timestamp as OnFrameDisplayed(); only the count differs.
+    // The present manager calls this for every frame it presents (on its present thread with
+    // frame generation), so F in the HUD is the output rate. Same clock and timestamp as OnFrameDisplayed(); only the count differs.
     const double now = std::chrono::duration<double>(
                            std::chrono::steady_clock::now().time_since_epoch())
                            .count();
+    std::scoped_lock lock{vulkan_hud_output_mutex};
     vulkan_hud_output_clock.Present(now);
 }
 
@@ -730,8 +737,12 @@ void GraphicsWindow::OnFrameDisplayed() {
             vulkan_hud_machine = MachineNow();
             vulkan_hud_stats_time = now;
         }
+        const HudClock output_clock = [] {
+            std::scoped_lock lock{vulkan_hud_output_mutex};
+            return vulkan_hud_output_clock;
+        }();
         vulkan_hud =
-            MakeHudSnapshot(vulkan_hud_clock, vulkan_hud_output_clock, vulkan_hud_speed, vulkan_hud_machine,
+            MakeHudSnapshot(vulkan_hud_clock, output_clock, vulkan_hud_speed, vulkan_hud_machine,
                             Eden::Display::output_millihertz.load(std::memory_order_relaxed) / 1000.0,
                             RoomPingMilliseconds(), hud_fields.load(std::memory_order_relaxed),
                             hud_size.load(std::memory_order_relaxed), hud_corner.load(std::memory_order_relaxed));

@@ -4,6 +4,10 @@
 // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <cstdlib>
+#include <thread>
+
 #include "common/settings.h"
 #include "common/thread.h"
 #include "core/frontend/emu_window.h"
@@ -13,6 +17,7 @@
 #endif
 #include "video_core/renderer_vulkan/vk_present_manager.h"
 #include "gpu_failure.h"
+#include "hud.h"
 #include "performance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_swapchain.h"
@@ -30,6 +35,39 @@ constexpr u32 MAX_PRESENT_ATTEMPTS = 3;
 #ifdef HAS_LSFG
 static_assert(MAX_FRAMES_IN_FLIGHT <= LSFG_MAX_TARGETS);
 #endif
+
+// Sleeps until the deadline; the next deadline counts from the actual present, so a late wake
+// does not add up.
+void SleepUntil(std::chrono::steady_clock::time_point deadline) {
+    while (true) {
+        const auto left = deadline - std::chrono::steady_clock::now();
+        if (left <= std::chrono::steady_clock::duration::zero()) {
+            return;
+        }
+        std::this_thread::sleep_for(left);
+    }
+}
+
+// The shortest time between two presents while frame generation is on. On the PS5 the driver
+// flips each present at the next vblank without waiting for the previous flip to show
+// (wsi_common_videoout.c), so a generated frame and the real one after it, presented within one
+// refresh, both went to the same vblank and only the real one was seen: Zelda: Ocarina of Time
+// presented 65 frames a second at 59.94 Hz and looked like 30. One refresh apart, each shows.
+// Elsewhere FIFO does this itself.
+std::chrono::nanoseconds MinimumPresentInterval() {
+#if defined(__PROSPERO__) // PS5
+    if (!Settings::values.frame_gen.GetValue()) {
+        return {};
+    }
+    // The output's rate: 119.88 Hz when the session asked for 120 Hz (headless/display_refresh.h),
+    // 59.94 Hz otherwise.
+    const char* high = std::getenv("EDEN_VIDEOOUT_120HZ");
+    const bool hz120 = high != nullptr && high[0] == '1';
+    return std::chrono::nanoseconds{hz120 ? 8'341'675 : 16'683'350};
+#else
+    return {};
+#endif
+}
 
 bool CanStoreToFrame(const vk::PhysicalDevice& physical_device, VkFormat format) {
 #ifdef HAS_LSFG
@@ -132,7 +170,10 @@ PresentManager::PresentManager(const vk::Instance& instance_,
     , surface{surface_}
     , blit_supported{CanBlitToSwapchain(device.GetPhysical(), swapchain.GetImageViewFormat())}
     , storage_supported{CanStoreToFrame(device.GetPhysical(), swapchain.GetImageFormat())}
-    , use_present_thread{Settings::values.async_presentation.GetValue()}
+    // Frame generation needs the present thread to space generated frames without stalling the
+    // emulator (upstream Eglantine faa4bd13a8).
+    , use_present_thread{Settings::values.async_presentation.GetValue() ||
+                         Settings::values.frame_gen.GetValue()}
 {
     SetImageCount();
 
@@ -200,6 +241,7 @@ Frame* PresentManager::GetRenderFrame() {
     // Wait for the presentation to be finished so all frame resources are free
     frame->present_done.Wait();
     frame->present_done.Reset();
+    frame->present_spacing = {};
 
     return frame;
 }
@@ -209,6 +251,7 @@ void PresentManager::Present(Frame* frame) {
         scheduler.Record([this, frame](vk::CommandBuffer) {
             std::unique_lock lock{queue_mutex};
             if (present_failure) return;
+            frame->queued_at = std::chrono::steady_clock::now();
             present_queue.push_back(frame);
             frame_cv.notify_one();
         });
@@ -367,7 +410,44 @@ void PresentManager::PresentThread(std::stop_token token) {
             // before the queue lock goes out of scope. This way the swapchain
             // lock in WaitPresent is guaranteed to occur after here.
             void(std::exchange(lock, std::unique_lock{swapchain_mutex}));
+            // The spacing counts from when this present was due, not from when it returned
+            // (Lichii #1772): counted again from there, each generated frame cost an extra
+            // refresh, which lengthened the measured frame interval and with it the spacing.
+            const auto ready = std::chrono::steady_clock::now();
+            const auto start = (std::max)(next_present, ready);
+            const bool generated = frame->present_spacing.count() != 0;
+            // A generated frame is shown only in a refresh the game leaves free: one that would
+            // go out later than it came (the present thread is behind) would hold back the real
+            // frame queued after it, and with it the game. A game that times itself by its
+            // frames (most count vsyncs) then ran slower with frame generation on than off:
+            // Zelda: Ocarina of Time, 34 FPS off, held at 29 on. Dropped, the game keeps its own
+            // rate and the frames it misses are filled (as Longshot's frame generation does).
+            constexpr auto slack = std::chrono::milliseconds{2};
+            if (generated && start > frame->queued_at + slack) {
+                DiscardFrame(frame);
+                ++pacing_dropped;
+                LogFrameGenPresents(start);
+                std::scoped_lock fl{free_mutex};
+                free_queue.push_back(frame);
+                free_cv.notify_one();
+                continue;
+            }
+            SleepUntil(start);
             CopyToSwapchain(frame);
+            ++(generated ? pacing_generated : pacing_real);
+            LogFrameGenPresents(start);
+            next_present = start + frame->present_spacing;
+            if (generated) {
+                generating_until = start + std::chrono::seconds{1};
+            }
+            // While frames are generated, the next present also waits one refresh after this
+            // one is done on the GPU, which is when the driver flips it: two flips within one
+            // refresh show only the second (MinimumPresentInterval).
+            if (const auto minimum = MinimumPresentInterval();
+                minimum.count() != 0 && start < generating_until) {
+                void(frame->present_done.Wait());
+                next_present = (std::max)(next_present, std::chrono::steady_clock::now() + minimum);
+            }
 
             // Free the frame for reuse
             std::scoped_lock fl{free_mutex};
@@ -375,6 +455,26 @@ void PresentManager::PresentThread(std::stop_token token) {
             free_cv.notify_one();
         }
     }
+}
+
+void PresentManager::LogFrameGenPresents(std::chrono::steady_clock::time_point now) {
+    if (!Settings::values.frame_gen.GetValue()) {
+        return;
+    }
+    if (pacing_since == std::chrono::steady_clock::time_point{}) {
+        pacing_since = now;
+        return;
+    }
+    const double seconds = std::chrono::duration<double>(now - pacing_since).count();
+    if (seconds < 10.0) {
+        return;
+    }
+    LOG_INFO(Render_Vulkan,
+             "Frame generation presents ({:.1f} s): {:.1f} real/s, {:.1f} generated/s shown, "
+             "{:.1f} generated/s left out (no free refresh)",
+             seconds, pacing_real / seconds, pacing_generated / seconds, pacing_dropped / seconds);
+    pacing_since = now;
+    pacing_real = pacing_generated = pacing_dropped = 0;
 }
 
 void PresentManager::RecreateSwapchain(Frame* frame) {
@@ -611,6 +711,8 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
 
     // Present
     swapchain.Present(render_semaphore);
+    // The overlay's F: every frame that went to the display (headless/hud.h).
+    Eden::CountPresentedFrame();
 }
 
 } // namespace Vulkan

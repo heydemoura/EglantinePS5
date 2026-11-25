@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <cmath>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -20,6 +22,15 @@
 namespace Vulkan {
 
 namespace {
+
+#if defined(__PROSPERO__) // PS5
+// The output's refresh period in seconds: 119.88 Hz when the session asked for 120 Hz
+// (headless/display_refresh.h), 59.94 Hz otherwise.
+f32 RefreshSeconds() {
+    const char* high = std::getenv("EDEN_VIDEOOUT_120HZ");
+    return high != nullptr && high[0] == '1' ? 1.0f / 119.88f : 1.0f / 59.94f;
+}
+#endif
 
 constexpr size_t COLOR_CHANNELS = 4;
 constexpr u64 LSFG_REQUIRED_FRAMES = 2;
@@ -248,6 +259,56 @@ void FrameGen::Process(const Device& device, Frame* frame, VkFormat format,
     const bool warm = plan.warm && count + 1 >= LSFG_REQUIRED_FRAMES;
     warm_streak = warm ? warm_streak + 1 : 0;
     generated = warm && warm_streak >= LSFG_RECURRENCE_FRAMES && plan.generations > 0;
+#if defined(__PROSPERO__) // PS5
+    // Make only the frames the display has a free refresh for. A game slower than the output
+    // leaves (interval x rate - 1) refreshes free per real frame (rate: the target, at most the
+    // output's refresh): at 43 FPS toward 60, 0.39. The present thread leaves out a generated
+    // frame that would hold the game back, so making one per real frame anyway spent the GPU on
+    // frames nobody saw (Zelda: Ocarina of Time, 31 of 43 a second left out) and took that time
+    // from the game. The credit carries the fraction over, so 0.39 makes a frame every second or
+    // third real one. MihawkGen and AMD FSR 3 need only the two latest frames, so this decides
+    // alone: the pacer's own rules (no frames while frame times jump about, or for a second
+    // after) made almost none in DK Bananza, whose frame times vary all the time. Lossless
+    // Scaling keeps the pacer (its chain warms up over frames).
+    if (Settings::values.frame_gen_type.GetValue() != Settings::FrameGenType::Lsfg) {
+        const f32 interval = pacer.SmoothedInterval();
+        const u32 target = Settings::values.frame_gen_target_rate.GetValue();
+        const f32 refresh_rate = 1.0f / RefreshSeconds();
+        const f32 rate = target > 0 ? (std::min)(static_cast<f32>(target), refresh_rate) : refresh_rate;
+        const size_t cap = (std::min)(Settings::FrameGenMaxGenerations(), last_capacity);
+        const auto now = std::chrono::steady_clock::now();
+        const f32 own_interval =
+            last_process == std::chrono::steady_clock::time_point{}
+                ? 0.0f
+                : std::chrono::duration<f32>(now - last_process).count();
+        last_process = now;
+        size_t fill = 0;
+        if (cap > 0 && interval > 0.0f && count + 1 >= LSFG_REQUIRED_FRAMES) {
+            // No more saved up than one frame's share rounds up to: saved-up frames spent at once
+            // found no free refresh and were left out (10 a second in Zelda and DK Bananza).
+            const f32 share = (std::max)(interval * rate - 1.0f, 0.0f);
+            const size_t frame_cap =
+                (std::min)(cap, static_cast<size_t>(std::ceil(share)));
+            fill_credit = std::clamp(fill_credit + share, 0.0f, static_cast<f32>(frame_cap));
+            fill = (std::min)(static_cast<size_t>(fill_credit), frame_cap);
+            // Spent only on a frame whose own interval leaves room (half a refresh past the real
+            // frames): frame times that swing (DK Bananza: about 20 and 34 ms in turn) have room
+            // after the long frames, Zelda: Ocarina of Time's steady 30 ms after each.
+            while (fill > 0 && own_interval * rate < static_cast<f32>(fill) + 0.5f) {
+                --fill;
+            }
+            fill_credit -= static_cast<f32>(fill);
+        } else {
+            fill_credit = 0.0f;
+        }
+        last_generations = fill;
+        generated = fill > 0;
+        if (generated && !generation_reported) {
+            generation_reported = true;
+            Eden::Report("framegen", "generating frames for the refreshes the game leaves free");
+        }
+    }
+#endif
     if (generated && !generation_reported) {
         generation_reported = true;
         Eden::Report("framegen",
@@ -255,7 +316,7 @@ void FrameGen::Process(const Device& device, Frame* frame, VkFormat format,
                       " extra frame(s) per guest frame").c_str());
     }
     generated_frames.fetch_add(GeneratedFrameCount(), std::memory_order_relaxed);
-    // The rate the output gets, next to the guest's own (nx2:vi2's "last 600 presents" line):
+    // The rate frames are made at, next to the guest's own (nx2:vi2's "last 600 presents" line):
     // every 600 guest frames, how many frames were generated between them, and in how long.
     {
         const auto now = std::chrono::steady_clock::now();
@@ -269,7 +330,7 @@ void FrameGen::Process(const Device& device, Frame* frame, VkFormat format,
             if (seconds > 0.0) {
                 LOG_INFO(Render_Vulkan,
                          "Frame generation: last 600 guest frames in {:.2f} s, {} generated: "
-                         "{:.1f} guest/s, {:.1f} shown/s",
+                         "{:.1f} guest/s, {:.1f} made/s (shown: the present thread's line)",
                          seconds, extra, 599.0 / seconds, (599.0 + static_cast<f64>(extra)) / seconds);
             }
             report_frames = 0;
@@ -310,6 +371,7 @@ size_t FrameGen::WantedGenerations(size_t capacity) {
         return 0;
     }
     plan = pacer.Plan(capacity);
+    last_capacity = capacity;
     return plan.generations;
 }
 
