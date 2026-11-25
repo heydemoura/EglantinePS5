@@ -2393,3 +2393,15 @@ msgstr "{0}/ (NSP, XCI)"
 #: pe/ui/browse.cpp
 msgid "{0}/ (one folder per game ID)"
 msgstr "{0}/ (папка на каждый ID игры)"
+
+#: pe/ui/game_options.cpp, pe/ui/settings.cpp
+msgid "Swap file"
+msgstr "Файл подкачки"
+
+#: pe/ui/settings.cpp
+msgid "SWAP FILE"
+msgstr "ФАЙЛ ПОДКАЧКИ"
+
+#: pe/ui/game_options.cpp, pe/ui/settings.cpp
+msgid "A game short of memory may write some of it to the console's storage: up to 8 GiB a day, which wears the flash. Off, a game that runs out of memory ends."
+msgstr "Игра, которой не хватает памяти, может записать её часть в хранилище консоли: до 8 ГиБ в день, что изнашивает флеш-память. Если выключено, игра, которой не хватит памяти, завершится."

@@ -1,8 +1,9 @@
 # Swap for the guest's memory
 
 Status, 2026-11-23: implemented in `src/guest_memory_service.inc`, on by default, tested with
-Mario Kart World and Ocarina of Time on a PS5 Pro. `"performance": { "swap_file": false }` in the
-settings file turns it off, as does `EDEN_SWAP=0` in `env.txt`.
+Mario Kart World and Ocarina of Time on a PS5 Pro. **Swap file** in Settings > Performance (for
+every game) or in a game's own settings turns it off (`"swap_file": false` under `"performance"`),
+as does `EDEN_SWAP=0` in `env.txt` for the whole run.
 
 Swap here is a store on the console's storage, built the way PS5_Lichii's is: found by its
 contents, kept between sessions, never rewritten. (This branch's first design was a file per
@@ -109,7 +110,7 @@ From this branch's first design, because they choose what goes:
 
 | Switch (`env.txt`) | Default | Meaning |
 |---|---|---|
-| `EDEN_SWAP` | `1` | `0`: no swap store (also `"swap_file": false` in the settings file) |
+| `EDEN_SWAP` | `1` | `0`: no swap store for the whole run (the launcher's **Swap file**, `"swap_file"`, chooses per game; `eden_swap_session`) |
 | `EDEN_SWAP_MIB` | 8192 | Most the store may hold |
 | `EDEN_SWAP_BURST_MIB` | 1024 | Most that may be written at once |
 | `EDEN_SWAP_RATE_MIB_HOUR` | 8192 | Refill of the burst, per hour |

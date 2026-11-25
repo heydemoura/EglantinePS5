@@ -329,6 +329,7 @@ struct Preferences
     bool unsafe_dma = false;    // unsafe DMA accuracy
     bool reactive_flushing = true;  // off is faster; some effects break
     bool skip_invalidation = false; // fewer invalidations of what the GPU caches hold
+    bool swap_file = true;          // a game short of memory may write some of it to the storage
     ButtonMapping mapping = kDefaultMapping; // Settings > Controls > Button mapping
 };
 
@@ -353,8 +354,8 @@ struct GameSettings
     bool own_mapping = false; // the game has a button mapping of its own
     ButtonMapping mapping = kDefaultMapping;
     // The Performance switches, in the order of Preferences: block list, async shaders, fast GPU,
-    // unsafe CPU, unsafe DMA, reactive flushing, skip invalidation.
-    std::array<int, 7> performance{-1, -1, -1, -1, -1, -1, -1};
+    // unsafe CPU, unsafe DMA, reactive flushing, skip invalidation, swap file.
+    std::array<int, 8> performance{-1, -1, -1, -1, -1, -1, -1, -1};
     int64_t rng_seed = -1;
 };
 

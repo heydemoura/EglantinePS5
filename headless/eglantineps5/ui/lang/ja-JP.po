@@ -2393,3 +2393,15 @@ msgstr "{0}/（NSPまたはXCI）"
 #: pe/ui/browse.cpp
 msgid "{0}/ (one folder per game ID)"
 msgstr "{0}/（タイトルIDごとに1フォルダー）"
+
+#: pe/ui/game_options.cpp, pe/ui/settings.cpp
+msgid "Swap file"
+msgstr "スワップファイル"
+
+#: pe/ui/settings.cpp
+msgid "SWAP FILE"
+msgstr "スワップファイル"
+
+#: pe/ui/game_options.cpp, pe/ui/settings.cpp
+msgid "A game short of memory may write some of it to the console's storage: up to 8 GiB a day, which wears the flash. Off, a game that runs out of memory ends."
+msgstr "メモリが不足したゲームは、その一部を本体のストレージに書き込むことがあります（1日最大8 GiB、フラッシュメモリが消耗します）。オフにすると、メモリが足りなくなったゲームは終了します。"

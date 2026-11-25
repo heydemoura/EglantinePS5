@@ -39,6 +39,10 @@ msgstr ""
 msgid "A firmware NCA cannot be read. Reinstall the firmware dump."
 msgstr ""
 
+#: pe/ui/game_options.cpp, pe/ui/settings.cpp
+msgid "A game short of memory may write some of it to the console's storage: up to 8 GiB a day, which wears the flash. Off, a game that runs out of memory ends."
+msgstr ""
+
 #: pe/ui/pairing.cpp
 msgid "A pairing is running already."
 msgstr ""
@@ -608,7 +612,7 @@ msgstr ""
 msgid "EglantinePS5 closes to finish the update."
 msgstr ""
 
-#: eden_services.cpp
+#: eden_services.cpp, host/fake_services.cpp
 msgid "EglantinePS5 could not get access to the console's storage, so it cannot read your settings, saves and games. Nothing was changed. Close EglantinePS5 and open it again. (Code {0})"
 msgstr ""
 
@@ -623,6 +627,10 @@ msgstr ""
 
 #: pe/ui/update.cpp
 msgid "EglantinePS5 was not changed."
+msgstr ""
+
+#: eden_services.cpp
+msgid "Encrypted game: needs keys and firmware"
 msgstr ""
 
 #. Label of the shortcut that ends the running game.
@@ -995,6 +1003,10 @@ msgstr ""
 msgid "Keys and firmware: startup checks passed. Game-specific compatibility is checked at launch."
 msgstr ""
 
+#: eden_services.cpp, host/fake_services.cpp
+msgid "Keys or firmware missing: {0} Unencrypted games (.nup files, extracted game folders) start without them. For .nsp and .xci games, open Settings, Game files to choose the folder that holds your keys, firmware and roms folders (or add the files to {1}), then reopen EglantinePS5."
+msgstr ""
+
 #: eden_services.cpp
 msgid "Korea"
 msgstr ""
@@ -1119,7 +1131,7 @@ msgstr ""
 msgid "Menu sounds"
 msgstr ""
 
-#: eden_services.cpp, host/fake_services.cpp
+#: eden_services.cpp, host/fake_services.cpp, host/fake_services.hpp
 msgid "Missing or empty keys/prod.keys in {0}."
 msgstr ""
 
@@ -1906,10 +1918,6 @@ msgstr ""
 msgid "Setup required"
 msgstr ""
 
-#: eden_services.cpp, host/fake_services.cpp
-msgid "Setup required: {0} Open Settings, Game files to choose the folder that holds your keys, firmware and roms folders (or add the files to {1}), then reopen EglantinePS5."
-msgstr ""
-
 #: pe/ui/settings.cpp
 msgid "Setup status and detailed logs."
 msgstr ""
@@ -2025,6 +2033,14 @@ msgstr ""
 
 #: pe/ui/browse.cpp
 msgid "Supply your own files"
+msgstr ""
+
+#: pe/ui/game_options.cpp, pe/ui/settings.cpp
+msgid "Swap file"
+msgstr ""
+
+#: pe/ui/settings.cpp
+msgid "SWAP FILE"
 msgstr ""
 
 #: pe/ui/settings.cpp
@@ -2189,6 +2205,10 @@ msgstr ""
 msgid "This game has no save to export yet."
 msgstr ""
 
+#: eden_services.cpp, host/fake_services.hpp
+msgid "This game is encrypted and needs keys and firmware: {0}"
+msgstr ""
+
 #: pe/ui/library.cpp
 msgid "This game's settings cannot be saved (no title ID)."
 msgstr ""
@@ -2247,6 +2267,14 @@ msgstr ""
 
 #: pe/ui/save_sync.cpp
 msgid "Understood"
+msgstr ""
+
+#: eden_services.cpp, host/fake_services.cpp
+msgid "Unencrypted games (.nup files, extracted game folders) start without keys and firmware."
+msgstr ""
+
+#: eden_services.cpp, host/fake_services.cpp, pe/ui/settings.cpp
+msgid "Unencrypted games only"
 msgstr ""
 
 #: pe/ui/pairing.cpp

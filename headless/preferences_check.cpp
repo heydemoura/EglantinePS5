@@ -448,15 +448,30 @@ int main() {
     assert(Eden::SavePerformance(racer, speed, by_hand) && Eden::SavePerformance(0, Eden::LoadPerformance(0, by_hand), by_hand));
     assert(Eden::LoadGpuClock(racer, by_hand) == "overclock" && Eden::LoadGpuClock(quest, by_hand) == "normal");
     assert(Eden::LoadPerformance(racer, by_hand).block_list);
-    // The swap store ("swap_file", settings file only, for every game): on unless the file says
-    // false, and saving the performance switches keeps what it says.
-    assert(Eden::LoadSwapFile(by_hand));
-    std::ofstream(by_hand) << R"({"performance": {"swap_file": false, "fast_gpu": true}})";
-    assert(!Eden::LoadSwapFile(by_hand));
-    assert(Eden::SavePerformance(0, Eden::LoadPerformance(0, by_hand), by_hand));
-    assert(!Eden::LoadSwapFile(by_hand) && Eden::LoadPerformance(0, by_hand).fast_gpu);
+    // The swap store ("swap_file", Settings > Performance > Swap file, or a game's own): on unless
+    // the file says false, a game's own value before the general one, and saved like the others.
+    assert(Eden::LoadPerformance(0, by_hand).swap_file && Eden::LoadPerformance(racer, by_hand).swap_file);
+    std::ofstream(by_hand) << R"({"performance": {"swap_file": false, "fast_gpu": true},
+        "games": {"0100000000010000": {"performance": {"swap_file": true}}}})";
+    assert(!Eden::LoadPerformance(0, by_hand).swap_file && !Eden::LoadPerformance(quest, by_hand).swap_file);
+    assert(Eden::LoadPerformance(racer, by_hand).swap_file);
+    assert(Eden::LoadGameSettings(racer, by_hand).performance[7] == 1 &&
+           Eden::LoadGameSettings(quest, by_hand).performance[7] == -1 &&
+           std::string(Eden::kPerformanceKeys[7]) == "swap_file");
+    speed = Eden::LoadPerformance(0, by_hand);
+    speed.swap_file = true;
+    assert(Eden::SavePerformance(0, speed, by_hand) && Eden::LoadPerformance(0, by_hand).swap_file &&
+           Eden::LoadPerformance(0, by_hand).fast_gpu);
+    assert(Read(by_hand).find("\"swap_file\": true") != std::string::npos);
+    {
+        // A game's own "off", through the game's settings (Library > Game settings > Performance).
+        Eden::GameSettings game = Eden::LoadGameSettings(quest, by_hand);
+        game.performance[7] = 0;
+        assert(Eden::SaveGameSettings(quest, game, by_hand) && !Eden::LoadPerformance(quest, by_hand).swap_file &&
+               Eden::LoadPerformance(0, by_hand).swap_file);
+    }
     std::ofstream(by_hand) << R"({"performance": {"swap_file": "no"}})";
-    assert(Eden::LoadSwapFile(by_hand));
+    assert(Eden::LoadPerformance(0, by_hand).swap_file);
 
     // Button mapping (button_mapping.h): the usual one, a changed one, and one the file names
     // badly. Choosing a button another game button has swaps the two.

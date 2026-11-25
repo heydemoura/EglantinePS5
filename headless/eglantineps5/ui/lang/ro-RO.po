@@ -2393,3 +2393,15 @@ msgstr "{0}/ (NSP sau XCI)"
 #: pe/ui/browse.cpp
 msgid "{0}/ (one folder per game ID)"
 msgstr "{0}/ (un dosar pentru fiecare ID de titlu)"
+
+#: pe/ui/game_options.cpp, pe/ui/settings.cpp
+msgid "Swap file"
+msgstr "Fișier de swap"
+
+#: pe/ui/settings.cpp
+msgid "SWAP FILE"
+msgstr "FIȘIER DE SWAP"
+
+#: pe/ui/game_options.cpp, pe/ui/settings.cpp
+msgid "A game short of memory may write some of it to the console's storage: up to 8 GiB a day, which wears the flash. Off, a game that runs out of memory ends."
+msgstr "Un joc cu memorie insuficientă poate scrie o parte din ea în stocarea consolei: până la 8 GiB pe zi, ceea ce uzează memoria flash. Dezactivat, un joc care rămâne fără memorie se închide."

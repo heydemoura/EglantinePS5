@@ -1921,8 +1921,9 @@ static void CheckReadTrapAreas() {
 // units found again without a write in the same session and in the next, units of zeroes and twins,
 // scattered new units in one write, a changed byte in the store, the budget and its refill, the
 // store's limit and the storage's, an index ahead of its store, and a store that starts over:
-// nearly full only, once a day at most, and never without its time on the storage. Its steps are
-// numbered in eden_swap_check.
+// nearly full only, once a day at most, and never without its time on the storage, and a game
+// whose Swap file is off (no store opened, the next game's opens). Its steps are numbered in
+// eden_swap_check.
 extern "C" int eden_swap_check(const char* folder) noexcept;
 extern "C" int LZ4_versionNumber(void); // (a reference that links LZ4 in: the port's own are weak)
 extern "C" unsigned ZSTD_versionNumber(void); // (and zstd, for the slots in units)
@@ -1938,7 +1939,7 @@ static void CheckSwapFile() {
     if (failed != 0) std::fprintf(stderr, "Swap store: step %d failed\n", failed);
     require(failed == 0);
     require(rmdir(folder) == 0); // (the check removes its store)
-    std::printf("Swap store PASS: 66 steps\n");
+    std::printf("Swap store PASS: 69 steps\n");
 }
 
 int main(int argc, char** argv) {

@@ -2393,3 +2393,15 @@ msgstr "{0}/‎ (NSP أو XCI)"
 #: pe/ui/browse.cpp
 msgid "{0}/ (one folder per game ID)"
 msgstr "{0}/‎ (مجلد لكل معرّف لعبة)"
+
+#: pe/ui/game_options.cpp, pe/ui/settings.cpp
+msgid "Swap file"
+msgstr "ملف التبديل"
+
+#: pe/ui/settings.cpp
+msgid "SWAP FILE"
+msgstr "ملف التبديل"
+
+#: pe/ui/game_options.cpp, pe/ui/settings.cpp
+msgid "A game short of memory may write some of it to the console's storage: up to 8 GiB a day, which wears the flash. Off, a game that runs out of memory ends."
+msgstr "قد تكتب لعبة تنقصها الذاكرة جزءًا منها على وحدة تخزين الجهاز: حتى 8 GiB يوميًا، مما يُبلي ذاكرة الفلاش. عند الإيقاف، تنتهي اللعبة التي تنفد ذاكرتها."
