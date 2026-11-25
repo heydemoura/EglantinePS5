@@ -351,12 +351,6 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
               "The first launch reads the game files and takes a few minutes; later launches "
               "only build what is new, until the GPU driver changes. The loading screen has a "
               "Skip button.\nAsk asks at launch while the game has never been precached."));
-    INSERT(Settings, build_all_cached_shaders, tr("Build all cached shaders before game start"),
-           tr("Builds every shader saved by earlier play sessions on the loading screen and keeps "
-              "them built, so places you visited long ago don't stutter. Without it, only the "
-              "shaders of recent sessions are built there and the rest in the background or when "
-              "the game first needs them.\nLoading takes longer and uses more memory, about 0.3 "
-              "MB per shader, up to a quarter of the RAM. Takes effect when a game starts."));
     INSERT(Settings, native_async_draws, tr("Switch 2 draws and compute with unbuilt shaders:"),
            tr("Only applies when \"Don't wait for shaders that are still compiling\" is on. Decides "
               "what Switch 2 work does when its pipeline is still building. Only work that redraws "
