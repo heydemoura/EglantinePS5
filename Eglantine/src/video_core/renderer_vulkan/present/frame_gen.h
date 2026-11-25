@@ -81,6 +81,8 @@ private:
     f32 fill_credit{};
     /// The extra frames the present manager has room for (WantedGenerations).
     size_t last_capacity{};
+    /// PS5: when the last frame came (its own interval, beside the pacer's smoothed one).
+    std::chrono::steady_clock::time_point last_process{};
 };
 
 } // namespace Vulkan

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <string>
 #include <vector>
@@ -275,11 +276,26 @@ void FrameGen::Process(const Device& device, Frame* frame, VkFormat format,
         const f32 refresh_rate = 1.0f / RefreshSeconds();
         const f32 rate = target > 0 ? (std::min)(static_cast<f32>(target), refresh_rate) : refresh_rate;
         const size_t cap = (std::min)(Settings::FrameGenMaxGenerations(), last_capacity);
+        const auto now = std::chrono::steady_clock::now();
+        const f32 own_interval =
+            last_process == std::chrono::steady_clock::time_point{}
+                ? 0.0f
+                : std::chrono::duration<f32>(now - last_process).count();
+        last_process = now;
         size_t fill = 0;
         if (cap > 0 && interval > 0.0f && count + 1 >= LSFG_REQUIRED_FRAMES) {
-            fill_credit = std::clamp(fill_credit + (std::max)(interval * rate - 1.0f, 0.0f), 0.0f,
-                                     static_cast<f32>(cap));
-            fill = (std::min)(static_cast<size_t>(fill_credit), cap);
+            // No more saved up than one frame's share rounds up to: saved-up frames spent at once
+            // found no free refresh and were left out (10 a second in Zelda and DK Bananza).
+            const f32 share = (std::max)(interval * rate - 1.0f, 0.0f);
+            const size_t frame_cap =
+                (std::min)(cap, static_cast<size_t>(std::ceil(share)));
+            fill_credit = std::clamp(fill_credit + share, 0.0f, static_cast<f32>(frame_cap));
+            fill = (std::min)(static_cast<size_t>(fill_credit), frame_cap);
+            // Spent only on a frame whose own interval leaves the refreshes: frame times that
+            // swing (DK Bananza: about 20 and 34 ms in turn) have room after the long frames.
+            while (fill > 0 && own_interval * rate < static_cast<f32>(fill) + 0.9f) {
+                --fill;
+            }
             fill_credit -= static_cast<f32>(fill);
         } else {
             fill_credit = 0.0f;
