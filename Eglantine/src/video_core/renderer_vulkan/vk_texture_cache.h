@@ -13,6 +13,7 @@
 #include <span>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "video_core/texture_cache/texture_cache_base.h"
 
@@ -140,6 +141,16 @@ public:
     /// Uploads a stored image's BC7 levels from its file; false when the file cannot be read or
     /// does not fit the image, which is then left as it was.
     bool UploadStoredAstc(Image& image);
+    /// Whether a store or a dump folder is there: only then is an image's guest data hashed.
+    [[nodiscard]] bool WantsAstcStore() const noexcept {
+        return !astc_store.empty() || !astc_dump_folder.empty();
+    }
+    /// EDEN_NX2_TEXTURE_STORE_DUMP=<folder>: an ASTC image the store does not have is written
+    /// to a file there once, its blocks in rows (unswizzled), for tools/texture-store/from_dump.py
+    /// to make the store's file from. How a store is made for a game whose files the tool cannot read.
+    void DumpAstc(Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr,
+                  const VideoCommon::ImageInfo& info, std::span<const u8> guest_data);
+    void FlushAstcDump();
 
     bool CanDownloadMsaa(const VideoCommon::ImageInfo& info) const;
 
@@ -333,6 +344,13 @@ public:
     std::unordered_map<u64, std::string> astc_store;
     u64 astc_store_hits = 0;
     u64 astc_store_misses = 0;
+    /// DumpAstc: where to, what went already (by key), and how much may still go.
+    std::string astc_dump_folder;
+    std::unordered_set<u64> astc_dumped;
+    u64 astc_dump_bytes = 0;
+    u64 astc_dump_limit = 0;
+    int astc_dump_file = -1;
+    std::vector<u8> astc_dump_pending;
 
     std::optional<BlockLinearUnswizzle3DPass> bl3d_unswizzle_pass;
     const Settings::ResolutionScalingInfo& resolution;

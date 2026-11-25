@@ -9,9 +9,10 @@ BC7 and is filled from the file.
 Ported from PS5_Lichii (mihawk, codeberg.org/mihawk/PS5_Lichii, commit 5a424f7, GPL-3.0-or-later). Our core and
 Lichii's share an ancestor but differ, so this is a port by reading, not a copy.
 
-**The store's path has not run.** It was written without a build; since then the code builds for the console and
-that build ran four sessions (`docs/LICHII-MEMORY-PLAN.md`, "The console runs"), but with no store folder for any
-game, so every lookup returned at its first line. The layer batches of the transcode did run (Mario Kart World). See "Untested" before relying on any of it.
+**Tried on the console with Mario Kart World on 2026-11-24, and it lost:** the store works (keys match, the BC7
+images are right) and the game runs slower with it than without. See
+[Mario Kart World on the console](#mario-kart-world-on-the-console). It stays off for every game that has no store
+folder, which is every game unless you make one.
 
 Without a store folder for the running game the emulator does what it did before: the only new work is one
 attempt to open the folder when the game starts.
@@ -20,6 +21,25 @@ attempt to open the folder when the game starts.
 
 `tools/texture-store/` holds the offline tool (Python, with a BC7 encoder it builds). Its README says what it
 needs, which game it was written for, and what another game takes.
+
+### From a dump
+
+Lichii's tool reads a game's unpacked texture files, and one game's. For any other game the emulator can write
+the store's input itself:
+
+1. `EDEN_NX2_TEXTURE_STORE_DUMP=/data/eglantineps5/texture-dump` in `env.txt`, and play. Every ASTC image the store
+   does not have is written once, by its key, to that session's `dump-<time>.pack` in the folder: its ASTC blocks
+   as they are, in rows (`TextureCacheRuntime::DumpAstc`). `EDEN_NX2_TEXTURE_STORE_DUMP_MIB` is the most a session
+   writes (8192). It goes out 4 MiB at a time: what is not written yet when the app is ended is lost.
+2. Copy the folder to a PC and run `tools/texture-store/from_dump.py --dump <folder> --out <store>`: astcenc
+   decodes each level and layer, bc7e encodes it, and the file is named by the key the emulator took.
+3. Copy the `.bc7` files to the game's store folder (below) and take the dump out of `env.txt`.
+
+A key made this way is the lookup's own, so nothing has to be known about the game's files. The store holds what
+the sessions dumped showed and no more: play on with the dump and convert again to add to it. A session with the
+dump on is slower while new textures arrive.
+
+With a store folder or a dump, images of up to 256 MiB of guest data are hashed (64 MiB otherwise).
 
 ## Where the store lives
 
@@ -133,29 +153,51 @@ Also in the way:
   what it had (nothing, the first time).
 - `Stored ASTC image ... was rewritten with bytes the texture store does not have`: see above.
 
+## Mario Kart World on the console
+
+PS5 Pro, 2026-11-24, scripted input (title to Grand Prix, the same route every run), 10 minutes a run. The store was
+made from the dumps of two such sessions: 8,732 textures, 1.3 GiB of ASTC blocks, 4.7 GiB as BC7 (bc7e "fast",
+about 9 minutes on 16 cores; the first session's files a median 52 dB from the decoded ASTC at level 0). Seconds 150 to 590 of each run:
+
+| | FPS | Frames over 100 ms | Worst frame | Peak graphics memory | Found / not in the store | Read from the store |
+|---|---|---|---|---|---|---|
+| no store (the first 10 minutes of two 30-minute runs) | 32.8, 32.8 | 13, 13 | 0.35 s, 0.48 s | 4,922 and 4,947 MiB | | |
+| the store, a file per texture | 29.6 | 94 | 1.7 s | 5,288 MiB | 34,459 / 4,753 | 20.2 GiB in 23.3 s |
+| the store, one file for all (tried, not kept) | 28.2 | 154 | 2.4 s | 5,329 MiB | 32,768 / 5,543 | 20.9 GiB in 36.6 s |
+
+What it showed:
+
+- **It works.** Keys taken from the dump are found, BC7 images with these flags are right on this driver, uploads
+  in pieces work, and the six screenshots looked at show the races as they should be.
+- **It is slower here, by a tenth of the frame rate, with seven times the long frames.** Mario Kart World makes
+  about 100 images a second for as long as it runs (59,000 in these 10 minutes), most of them textures it had
+  before. Without the store such an image is transcoded on the GPU from the game's memory, which is there. With
+  it, each one is read from the console's storage again, on the thread that draws: 20 GiB in 10 minutes for 4.7 GiB
+  of files. PS5_Lichii's store was made for a game that loads an area's textures once.
+- **A file per texture is not what costs.** One file for the whole store, kept open (an index of key, offset and
+  length in front of the files), read no faster; it was taken out again.
+- **More graphics memory, not less:** 340 to 410 MiB more at the peak. Of the first session's textures 71% are
+  opaque (61% of their bytes), which this core holds as BC1 (4 bits a texel) and the store as BC7 (8 bits).
+- **Two sessions' dumps are not a whole store.** The same route a third time still missed one image in eight:
+  what the game hands the GPU when an image is made is not the same bytes every session (its data may still be
+  arriving). Two images were written again with bytes the store did not have and kept their old texture.
+
+What would have to change for it to pay in this game, none of it done: the game's images made again less often (that costs in either path), the store read off the
+drawing thread, and opaque textures held as BC1. The runs wrote 1.3 GiB to the console's storage for the dumps and
+9.4 GiB for the store's copies (a file per texture, then one file); all of it is deleted again.
+
 ## Untested
 
-Everything the store does. In the order of what is most likely to be wrong:
+The lookup, BC7 images with the flags used here, the upload (whole and in pieces) and the second-upload check
+ran with Mario Kart World (above). Still open, in the order of what is most likely to be wrong:
 
-1. **The store's path has not run.** The code builds and the build ran on the console, without a store folder:
-   nothing after the first line of a lookup has been executed.
-2. **No store exists for any game on this console**, so no lookup has ever matched here. That a key made by the
-   tool equals the hash the emulator takes rests on Lichii's results with one game on Lichii's core, and on the
-   size computation being the same code in both cores (it was compared and is).
-3. **BC7 images with the image flags used here.** A stored image is made like the BC1 images of opaque ASTC
-   (format override, two view formats, mutable format), which work on the console; BC7 in their place has not
-   been tried on this driver build.
-4. **The second-upload check** is not in Lichii and has never run anywhere. It reads the image's guest memory
-   again on every re-upload (an upload from guest memory reads it too, so no more than before).
-5. **Uploads in pieces** wait for the GPU between pieces, inside the texture cache's upload. The GPU transcode
-   waits in the same place already, but this path is new.
-6. **Mario Kart World.** The tool was written for Ocarina of Time's BNTX files. Whether Mario Kart World's
-   textures can be unpacked to BNTX, pass the tool's checks and give matching keys is unknown; its largest array
-   may be over the 64 MiB lookup limit.
-7. **A game that streams textures in place** with an incomplete store shows the old texture where the new one is
-   not in the store (above).
-8. **Memory and time.** Lichii reports a quarter of the memory of RGBA and shorter loads on its build. Against
-   this core's BC3 the memory is the same (BC7 is BC3's size, twice BC1's for opaque textures), so the gains to
-   expect here are no decode image, no encode and BC7's quality. None of it is measured.
-9. **Other hosts.** The Windows branch of the file reader is there for the core's other builds and was not
+1. **Lichii's tool (`texture_store.py`) has not been run here**, only `from_dump.py`. That a key made from a
+   game's files equals the hash the emulator takes rests on Lichii's results with one game on Lichii's core, and
+   on the size computation being the same code in both cores (it was compared and is).
+2. **Any game but Mario Kart World.** Ocarina of Time, which the store was made for, has not been tried.
+3. **Colour.** The dump does not say which channels a shader reads, so `from_dump.py` encodes all four with equal
+   weight; Lichii's tool spends the bits on the channels read.
+4. **The second-upload check** ran twice in one session (two images kept their old texture); what that looks
+   like on screen was not seen.
+5. **Other hosts.** The Windows branch of the file reader is there for the core's other builds and was not
    compiled either.

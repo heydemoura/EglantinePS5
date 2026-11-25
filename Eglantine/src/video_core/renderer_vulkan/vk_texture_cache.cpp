@@ -1458,6 +1458,20 @@ TextureCacheRuntime::TextureCacheRuntime(const Device& device_, Scheduler& sched
             LOG_INFO(Render_Vulkan, "Texture store: {} BC7 images under {}", astc_store.size(),
                      folder.string());
         }
+        // EDEN_NX2_TEXTURE_STORE_DUMP=<folder>: what the store lacks is written there (DumpAstc),
+        // EDEN_NX2_TEXTURE_STORE_DUMP_MIB at most (8192): it is the console's storage.
+        if (const char* const dump = std::getenv("EDEN_NX2_TEXTURE_STORE_DUMP");
+            dump != nullptr && dump[0] != '\0') {
+            std::filesystem::create_directories(dump, error);
+            if (!error) {
+                astc_dump_folder = dump;
+                const char* const limit = std::getenv("EDEN_NX2_TEXTURE_STORE_DUMP_MIB");
+                astc_dump_limit = (limit != nullptr ? std::strtoull(limit, nullptr, 10) : 8192)
+                                  << 20;
+                LOG_INFO(Render_Vulkan, "Texture store: ASTC images it lacks are written to {}",
+                         astc_dump_folder);
+            }
+        }
     }
     // Huge ASTC arrays always decode on the GPU (IsHugeAstcArray), whatever the decode setting.
     if (Settings::values.accelerate_astc.GetValue() == Settings::AstcDecodeMode::Gpu ||
@@ -3107,6 +3121,85 @@ u64 TextureCacheRuntime::FindStoredAstc(std::span<const u8> guest_data, const Im
     return found ? key : 0;
 }
 
+// The dump, little endian, one record after another in <folder>/dump-<time>.pack: "PS5ASTD1", u32
+// width, height, layers, levels, block width, block height, sRGB (0 or 1), guest bytes, u64 key,
+// then the image's ASTC blocks as UnswizzleImage leaves them: level after level, in a level layer
+// after layer, in a layer the blocks row by row. One file a session, written a few MiB at a time:
+// a file per image took the console about 25 ms each to make, 108 s for the thousand images of one
+// track's load. What is not written yet when the app is ended (4 MiB at most) is lost.
+void TextureCacheRuntime::DumpAstc(Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr,
+                                   const ImageInfo& info, std::span<const u8> guest_data) {
+    if (astc_dump_folder.empty() || guest_data.empty() || info.type != ImageType::e2D ||
+        info.size.depth != 1 || info.num_samples != 1 || !IsPixelFormatASTC(info.format)) {
+        return;
+    }
+    const u64 key =
+        Common::CityHash64(reinterpret_cast<const char*>(guest_data.data()), guest_data.size());
+    if (key == 0 || astc_store.contains(key) || !astc_dumped.insert(key).second) {
+        return;
+    }
+    const u64 bytes = VideoCommon::CalculateUnswizzledSizeBytes(info);
+    if (astc_dump_bytes + bytes > astc_dump_limit) {
+        return;
+    }
+    if (astc_dump_file < 0) {
+        const std::string path =
+            fmt::format("{}/dump-{}.pack", astc_dump_folder,
+                        std::chrono::duration_cast<std::chrono::seconds>(
+                            std::chrono::system_clock::now().time_since_epoch())
+                            .count());
+        astc_dump_file = ::open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0666);
+        if (astc_dump_file < 0) {
+            astc_dump_folder.clear();
+            return;
+        }
+    }
+    const std::array<u32, 8> head{
+        info.size.width,
+        info.size.height,
+        static_cast<u32>(info.resources.layers),
+        static_cast<u32>(info.resources.levels),
+        VideoCore::Surface::DefaultBlockWidth(info.format),
+        VideoCore::Surface::DefaultBlockHeight(info.format),
+        VideoCore::Surface::IsPixelFormatSRGB(info.format) ? 1U : 0U,
+        static_cast<u32>(guest_data.size()),
+    };
+    const size_t at = astc_dump_pending.size();
+    astc_dump_pending.resize(at + 8 + sizeof(head) + sizeof(key) + bytes);
+    u8* out = astc_dump_pending.data() + at;
+    std::memcpy(out, "PS5ASTD1", 8);
+    std::memcpy(out + 8, head.data(), sizeof(head));
+    std::memcpy(out + 8 + sizeof(head), &key, sizeof(key));
+    (void)VideoCommon::UnswizzleImage(
+        gpu_memory, gpu_addr, info, guest_data,
+        std::span<u8>{out + 8 + sizeof(head) + sizeof(key), static_cast<size_t>(bytes)});
+    astc_dump_bytes += bytes;
+    if (astc_dump_pending.size() >= (size_t{4} << 20)) {
+        FlushAstcDump();
+    }
+    if (const size_t count = astc_dumped.size(); (count & (count - 1)) == 0) {
+        LOG_INFO(Render_Vulkan, "Texture store: {} ASTC images for {}, {} MiB", count,
+                 astc_dump_folder, astc_dump_bytes >> 20);
+    }
+}
+
+void TextureCacheRuntime::FlushAstcDump() {
+    size_t done = 0;
+    while (astc_dump_file >= 0 && done < astc_dump_pending.size()) {
+        const ssize_t put = ::write(astc_dump_file, astc_dump_pending.data() + done,
+                                    astc_dump_pending.size() - done);
+        if (put <= 0) {
+            // (No room, or the storage is gone: no more of it, and no half record after this.)
+            ::close(astc_dump_file);
+            astc_dump_file = -1;
+            astc_dump_folder.clear();
+            break;
+        }
+        done += static_cast<size_t>(put);
+    }
+    astc_dump_pending.clear();
+}
+
 bool TextureCacheRuntime::UploadStoredAstc(Image& image) {
     const ImageInfo& info = image.info;
     const auto it = astc_store.find(info.astc_store_key);
@@ -3265,6 +3358,10 @@ void TextureCacheRuntime::ReleaseMsaaScratchImage(VkImage image) {
 }
 
 void TextureCacheRuntime::TickFrame() {
+    // (The dump's last images of a load go out within some seconds, not at the next load.)
+    if (static u32 frames{}; !astc_dump_pending.empty() && ++frames % 300 == 0) {
+        FlushAstcDump();
+    }
     while (!pending_byte_addressed_shadows.empty() &&
            scheduler.IsFree(pending_byte_addressed_shadows.front().tick)) {
         pending_byte_addressed_shadows.pop_front();
