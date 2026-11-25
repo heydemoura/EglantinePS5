@@ -291,9 +291,10 @@ void FrameGen::Process(const Device& device, Frame* frame, VkFormat format,
                 (std::min)(cap, static_cast<size_t>(std::ceil(share)));
             fill_credit = std::clamp(fill_credit + share, 0.0f, static_cast<f32>(frame_cap));
             fill = (std::min)(static_cast<size_t>(fill_credit), frame_cap);
-            // Spent only on a frame whose own interval leaves the refreshes: frame times that
-            // swing (DK Bananza: about 20 and 34 ms in turn) have room after the long frames.
-            while (fill > 0 && own_interval * rate < static_cast<f32>(fill) + 0.9f) {
+            // Spent only on a frame whose own interval leaves room (half a refresh past the real
+            // frames): frame times that swing (DK Bananza: about 20 and 34 ms in turn) have room
+            // after the long frames, Zelda: Ocarina of Time's steady 30 ms after each.
+            while (fill > 0 && own_interval * rate < static_cast<f32>(fill) + 0.5f) {
                 --fill;
             }
             fill_credit -= static_cast<f32>(fill);
