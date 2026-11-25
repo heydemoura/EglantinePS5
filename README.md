@@ -287,6 +287,7 @@ Each profile can keep its save data on a server, such as a [RomM](https://github
 | Faster DMA | `unsafe_dma` | off | Less exact memory transfers to the GPU. A few games show wrong graphics. |
 | Reactive flushing | `reactive_flushing` | on | Keeps what a game reads back from the GPU exact. Off is faster; some effects break. |
 | Skip CPU invalidation | `skip_invalidation` | off | Skips some checks when a game changes memory the GPU uses. Textures can be stale. |
+| Swap file | `swap_file` | on | A game short of memory may write some of it to the console's storage: up to 8 GiB a day, and flash storage wears with every write. Off, nothing of a game is written there, and a game that runs out of memory ends instead (Mario Kart World after about 10 minutes on a PS5 Pro). See [Memory and the swap store](#memory-and-the-swap-store). |
 
 A Switch 2 game (title IDs that start with `0400`) starts from the emulator core's own defaults for its games instead of the general values: **Faster GPU emulation** on and **Reactive flushing** off. Without them the core's second GPU thread stays off and every GPU fence waits for the console's GPU; Mario Kart World's title screen ran at about 11 FPS with the general defaults and about 24 FPS with these (see [docs/MKW-TITLE-FPS.md](docs/MKW-TITLE-FPS.md)). The game's own values, set in the Library, still win.
 
@@ -295,7 +296,8 @@ A game can have its own values: in its settings, **Performance** (see [Settings 
 ```json
 {
   "performance": { "block_list": false, "async_shaders": true, "fast_gpu": false, "unsafe_cpu": false,
-                   "unsafe_dma": false, "reactive_flushing": true, "skip_invalidation": false },
+                   "unsafe_dma": false, "reactive_flushing": true, "skip_invalidation": false,
+                   "swap_file": true },
   "games": { "0100000000010000": { "performance": { "fast_gpu": true } } }
 }
 ```
@@ -318,7 +320,7 @@ On a PS5 Pro, Mario Kart World wrote 0.5 to 0.9 GiB in a 30-minute session (with
 
 Deleting `cache/swap/` while no game runs is always safe.
 
-`"swap_file": false` under `"performance"` in the settings file switches it off for every game. The other limits are listed in [docs/GUEST-MEMORY-SWAP.md](docs/GUEST-MEMORY-SWAP.md), with what was measured.
+**Swap file** in **Settings > Performance** switches it on or off for every game, and a game's own settings (**Performance**, **Swap file**) for that game. In the settings file it is `"swap_file"` under `"performance"`. A game with it off writes nothing to the storage; one that then runs out of memory ends. The other limits are listed in [docs/GUEST-MEMORY-SWAP.md](docs/GUEST-MEMORY-SWAP.md), with what was measured.
 
 ### Frame generation
 

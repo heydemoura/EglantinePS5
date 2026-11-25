@@ -2485,3 +2485,15 @@ msgstr "Calculando el tiempo"
 #: pe/ui/remote.cpp
 msgid "The reading you cancelled is still ending. Its files are kept; try again in a moment."
 msgstr "La lectura que cancelaste aún está terminando. Sus archivos se guardan; intenta de nuevo en un momento."
+
+#: pe/ui/game_options.cpp, pe/ui/settings.cpp
+msgid "Swap file"
+msgstr "Archivo de intercambio"
+
+#: pe/ui/settings.cpp
+msgid "SWAP FILE"
+msgstr "ARCHIVO DE INTERCAMBIO"
+
+#: pe/ui/game_options.cpp, pe/ui/settings.cpp
+msgid "A game short of memory may write some of it to the console's storage: up to 8 GiB a day, which wears the flash. Off, a game that runs out of memory ends."
+msgstr "Un juego con poca memoria puede escribir parte de ella en el almacenamiento de la consola: hasta 8 GiB al día, lo que desgasta la memoria flash. Desactivado, un juego que se queda sin memoria se cierra."

@@ -349,6 +349,10 @@ constexpr std::size_t SwapTableSize = SwapMaxSlots * 2;                  // (a p
 constexpr std::uint32_t SwapZeroUnit = 0xFFFFFFFFu;                      // a unit of zeroes: no slot of the store
 int swap_store_fd = -1, swap_index_fd = -1;
 std::atomic<int> swap_state{0}; // 0 not started, 1 on, 2 off
+// Whether this session's game may use the store (Settings > Performance > Swap file, or the game's
+// own: eden_swap_session at each launch). Not allowed, the store is neither opened nor written, and
+// the session is as one with the store off; the next game may use it again.
+std::atomic<bool> swap_session_allowed{true};
 // The store's slots (pack_mutex held: one writer).
 std::uint32_t swap_count = 0, swap_carried = 0; // held now; left by earlier sessions
 std::uint32_t swap_cap = 0, swap_limit = 0;     // most it may hold (EDEN_SWAP_MIB); and with the storage's free space as it is
@@ -380,7 +384,13 @@ std::uint64_t SwapNow() noexcept {
     clock_gettime(CLOCK_MONOTONIC, &now);
     return static_cast<std::uint64_t>(now.tv_sec) * 1000000000ull + static_cast<std::uint64_t>(now.tv_nsec);
 }
-bool SwapOn() noexcept { return swap_state.load(std::memory_order_acquire) == 1; }
+bool SwapOn() noexcept {
+    return swap_state.load(std::memory_order_acquire) == 1 && swap_session_allowed.load(std::memory_order_acquire);
+}
+// Off for this session: switched off, failed, or not allowed for this game.
+bool SwapOffNow() noexcept {
+    return swap_state.load(std::memory_order_acquire) == 2 || !swap_session_allowed.load(std::memory_order_acquire);
+}
 // Why it is off, for the report (SwapOff may run in a fault handler: no stdio there).
 std::atomic<const char*> swap_off_why{"not needed yet"};
 std::atomic<int> swap_off_errno{0};
@@ -466,6 +476,8 @@ void SwapRoom() noexcept {
 // short (the scanner), or when memory is first asked back by the driver (pack_mutex held; never in
 // a fault handler or under the heap's lock: it allocates).
 bool SwapStart() noexcept {
+    // (Not allowed for this game: nothing changes, so a later game may still open the store.)
+    if (!swap_session_allowed.load(std::memory_order_acquire)) return false;
     if (const int state = swap_state.load(std::memory_order_acquire); state != 0) return state == 1;
     errno = 0;
     const char* const off = std::getenv("EDEN_SWAP");
@@ -811,6 +823,8 @@ void SwapCheckReset() noexcept {
 // twins, a changed byte in the store, the budget and its refill, the store's limit and the
 // storage's, an index ahead of its store, and when the store starts over. `folder`: where the store
 // may be made. Returns 0, or the number of the step that failed.
+extern "C" void eden_swap_session(int allowed) noexcept;
+extern "C" int eden_swap_numbers(unsigned long long numbers[5]) noexcept;
 extern "C" int eden_swap_check(const char* folder) noexcept {
     char path[400], store[420], index[420];
     if (std::snprintf(path, sizeof(path), "%s/swap", folder) >= static_cast<int>(sizeof(path))) return 1;
@@ -1016,6 +1030,18 @@ extern "C" int eden_swap_check(const char* folder) noexcept {
                !UnitFill(unit.data(), units[1], 0, packed.data()));                               // 67
     } else {
         for (int skipped = 0; skipped < 4; ++skipped) expect(true);                               // 64-67
+    }
+    // A game whose Swap file is off: the store is neither opened nor counted on, the numbers say
+    // off, and nothing is left behind, so the next game, allowed, opens it as usual.
+    {
+        SwapCheckReset();
+        eden_swap_session(0);
+        const bool refused = !session("64", "16") && swap_state.load(std::memory_order_acquire) == 0 &&
+                             swap_store_fd < 0 && !SwapOn() && SwapOffNow();
+        unsigned long long numbers[5]{};
+        expect(refused && eden_swap_numbers(numbers) == 2);                                       // 68
+        eden_swap_session(1);
+        expect(session("64", "16") && SwapOn() && !SwapOffNow() && eden_swap_numbers(numbers) == 1); // 69
     }
     unlink(mark);
     SwapCheckReset();
@@ -3590,8 +3616,10 @@ void ServiceReport(SparseRange& range, const char* when) noexcept {
             "EDEN_SWAP %s on=%d (%s) store=%lluMiB out=%zuMiB clean=%zuMiB written=%lluMiB found=%lluMiB zeroes=%lluMiB "
             "write_ms=%llu writes=%llu reused=%llu dirtied=%llu reads=%llu read_avg_us=%llu read_max_us=%llu denied_rate=%llu full=%llu "
             "absent=%llu idle_now=%zuMiB idled=%llu woken=%llu kept_free=%lluMiB/%llu last_resort=%llu late_reads=%llu/%llu\n",
-            when, swap_state.load(std::memory_order_relaxed) == 1 ? 1 : 0,
-            swap_state.load(std::memory_order_relaxed) == 1 ? "ok" : swap_off_why.load(std::memory_order_acquire),
+            when, SwapOn() ? 1 : 0,
+            SwapOn()                                                ? "ok"
+            : !swap_session_allowed.load(std::memory_order_acquire) ? "off for this game (Swap file)"
+                                                                    : swap_off_why.load(std::memory_order_acquire),
             (unsigned long long)(std::uint64_t{swap_count} * SwapUnit >> 20), swapped_out * (SparseSlot >> 20),
             clean * (SparseSlot >> 20), (unsigned long long)(written >> 20),
             (unsigned long long)(swap_found.load(std::memory_order_relaxed) * SwapUnit >> 20),
@@ -4109,7 +4137,7 @@ std::size_t RecoverMemory(std::size_t bytes, bool wait, bool driver = true, int 
             given = GiveBackIdleBlocks(bytes - freed, !driver);
             continue;
         }
-        if (step != 0 && (!idle_mode || keeper == 1 || swap_state.load(std::memory_order_acquire) == 2)) continue;
+        if (step != 0 && (!idle_mode || keeper == 1 || SwapOffNow())) continue;
         static const bool last_resort_on = EnvOr("EDEN_SWAP_LAST_RESORT", 1) != 0;
         if (step == 3 && !last_resort_on) break;
         // (The keeper leaves the quarter of the burst that is kept for failed allocations, and writes
@@ -4256,7 +4284,13 @@ extern "C" int eden_swap_numbers(unsigned long long numbers[5]) noexcept {
     numbers[2] = swap_written.load(std::memory_order_relaxed) >> 20;
     numbers[3] = swap_denied_rate.load(std::memory_order_relaxed);
     numbers[4] = swap_full.load(std::memory_order_relaxed);
-    return swap_state.load(std::memory_order_relaxed);
+    return swap_session_allowed.load(std::memory_order_relaxed) ? swap_state.load(std::memory_order_relaxed) : 2;
+}
+
+// At each launch, before the game runs: whether its session may use the swap store (Settings >
+// Performance > Swap file, or the game's own choice; headless/main.cpp).
+extern "C" void eden_swap_session(int allowed) noexcept {
+    swap_session_allowed.store(allowed != 0, std::memory_order_release);
 }
 
 

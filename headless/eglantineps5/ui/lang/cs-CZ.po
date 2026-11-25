@@ -2393,3 +2393,15 @@ msgstr "{0}/ (NSP nebo XCI)"
 #: pe/ui/browse.cpp
 msgid "{0}/ (one folder per game ID)"
 msgstr "{0}/ (složka pro každé ID titulu)"
+
+#: pe/ui/game_options.cpp, pe/ui/settings.cpp
+msgid "Swap file"
+msgstr "Odkládací soubor"
+
+#: pe/ui/settings.cpp
+msgid "SWAP FILE"
+msgstr "ODKLÁDACÍ SOUBOR"
+
+#: pe/ui/game_options.cpp, pe/ui/settings.cpp
+msgid "A game short of memory may write some of it to the console's storage: up to 8 GiB a day, which wears the flash. Off, a game that runs out of memory ends."
+msgstr "Hra, které dochází paměť, může její část zapsat na úložiště konzole: až 8 GiB denně, což opotřebovává paměť flash. Když je vypnuto, hra, které dojde paměť, skončí."

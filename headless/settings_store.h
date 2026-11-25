@@ -508,7 +508,8 @@ inline bool SaveGameDocked(uint64_t title_id, bool docked, const std::string& fi
 
 // The Performance switches by name, in the order of PerformanceSettings and of the launcher.
 inline constexpr const char* kPerformanceKeys[] = {"block_list", "async_shaders", "fast_gpu", "unsafe_cpu",
-                                                   "unsafe_dma", "reactive_flushing", "skip_invalidation"};
+                                                   "unsafe_dma", "reactive_flushing", "skip_invalidation",
+                                                   "swap_file"};
 inline constexpr int kPerformanceSwitches = int(std::size(kPerformanceKeys));
 
 // Library > Game settings: what one game does differently from Settings. Each value is -1 (absent
@@ -530,7 +531,7 @@ struct GameSettings {
     int controller = -1;        // index into kControllerKeys
     bool own_mapping = false;   // the game has a button mapping of its own: mapping
     ButtonMapping mapping = kDefaultMapping;
-    std::array<int, kPerformanceSwitches> performance{-1, -1, -1, -1, -1, -1, -1};  // kPerformanceKeys
+    std::array<int, kPerformanceSwitches> performance{-1, -1, -1, -1, -1, -1, -1, -1};  // kPerformanceKeys
     int64_t rng_seed = -1;      // 0 to 4294967295, or -1: no seed (load_address.h)
 };
 // The seed a typed text names: digits and nothing else, 0 to 4294967295. -1 for any other text.
@@ -687,6 +688,9 @@ struct PerformanceSettings {
     bool unsafe_dma = false;     // Eden's unsafe DMA accuracy
     bool reactive_flushing = true;   // Eden's reactive flushing: off is faster, some effects break
     bool skip_invalidation = false;  // Eden's skip_cpu_inner_invalidation: fewer cache invalidations
+    // The swap store (src/guest_memory_service.inc, docs/GUEST-MEMORY-SWAP.md): a game short of
+    // memory may write some of it to the console's storage, at most 8 GiB a day.
+    bool swap_file = true;
 };
 
 inline PerformanceSettings LoadPerformance(uint64_t title_id, const std::string& file = SettingsFile()) {
@@ -704,6 +708,7 @@ inline PerformanceSettings LoadPerformance(uint64_t title_id, const std::string&
         value("unsafe_dma", result.unsafe_dma);
         value("reactive_flushing", result.reactive_flushing);
         value("skip_invalidation", result.skip_invalidation);
+        value("swap_file", result.swap_file);
     };
     read("");
     // A Switch 2 title (program ids 0400...) starts from the core's own defaults for its games:
@@ -725,27 +730,16 @@ inline bool SavePerformance(uint64_t title_id, const PerformanceSettings& value,
     document["version"] = 1;
     auto& owner = title_id ? document["games"][Settings::TitleKey(title_id)] : document;
     if (!owner.is_object()) owner = Settings::Json::object();
-    // "gpu_clock" and "swap_file" have no switch in the launcher: values set by hand stay
-    // (LoadGpuClock, LoadSwapFile).
+    // "gpu_clock" has no switch in the launcher: a value set by hand stays (LoadGpuClock).
     const std::string gpu_clock = Settings::String(owner, Settings::Json::json_pointer("/performance/gpu_clock"));
-    const Settings::Json::json_pointer swap_at("/performance/swap_file");
-    const bool has_swap = owner.contains(swap_at) && owner.at(swap_at).is_boolean();
-    const bool swap_file = has_swap && owner.at(swap_at).get<bool>();
     owner["performance"] = {{"block_list", value.block_list}, {"async_shaders", value.async_shaders},
                             {"fast_gpu", value.fast_gpu}, {"unsafe_cpu", value.unsafe_cpu},
                             {"unsafe_dma", value.unsafe_dma}, {"reactive_flushing", value.reactive_flushing},
-                            {"skip_invalidation", value.skip_invalidation}};
+                            {"skip_invalidation", value.skip_invalidation}, {"swap_file", value.swap_file}};
     if (!gpu_clock.empty()) owner["performance"]["gpu_clock"] = gpu_clock;
-    if (has_swap) owner["performance"]["swap_file"] = swap_file;
     return Settings::Write(document, file);
 }
 
-// The swap store for a game's memory (src/guest_memory_service.inc, docs/GUEST-MEMORY-SWAP.md):
-// "performance/swap_file", on unless the settings file says false. For every game: it is the
-// console's storage that it writes to.
-inline bool LoadSwapFile(const std::string& file = SettingsFile()) {
-    return Settings::Bool(Settings::Load(file), Settings::Json::json_pointer("/performance/swap_file"), true);
-}
 
 // How fast the GPU looks to a game: Eden's GPU clock, "normal", "boost" or "overclock", and the
 // port's "fixed". A Switch 2 game reads the GPU's time for a frame 4 times shorter with boost (the

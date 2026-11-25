@@ -18,6 +18,7 @@ release = main[:begin] + main[end:]  # what a release build compiles
 assert 'const auto speed = Eden::LoadPerformance(eden_game_title_id(guest));' in release
 for statement in (
     'Settings::values.use_asynchronous_shaders = speed.async_shaders;',
+    'if (eden_swap_session) eden_swap_session(speed.swap_file ? 1 : 0);',
     'Settings::values.gpu_accuracy.SetValue(Settings::GpuAccuracy::Low);',
     'Settings::values.current_gpu_accuracy = Settings::GpuAccuracy::Low;',
     'Settings::values.cpu_accuracy = Settings::CpuAccuracy::Unsafe;',

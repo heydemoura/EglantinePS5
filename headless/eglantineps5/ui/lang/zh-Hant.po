@@ -2393,3 +2393,15 @@ msgstr "{0}/（NSP 或 XCI）"
 #: pe/ui/browse.cpp
 msgid "{0}/ (one folder per game ID)"
 msgstr "{0}/（每個遊戲 ID 一個資料夾）"
+
+#: pe/ui/game_options.cpp, pe/ui/settings.cpp
+msgid "Swap file"
+msgstr "交換檔案"
+
+#: pe/ui/settings.cpp
+msgid "SWAP FILE"
+msgstr "交換檔案"
+
+#: pe/ui/game_options.cpp, pe/ui/settings.cpp
+msgid "A game short of memory may write some of it to the console's storage: up to 8 GiB a day, which wears the flash. Off, a game that runs out of memory ends."
+msgstr "記憶體不足的遊戲可將部分記憶體寫入主機儲存空間：每天最多 8 GiB，會磨損快閃記憶體。關閉後，記憶體耗盡的遊戲會結束。"

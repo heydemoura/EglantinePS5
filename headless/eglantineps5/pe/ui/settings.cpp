@@ -105,6 +105,7 @@ enum PerformanceRow : int
     speed_unsafe_dma,
     speed_reactive_flushing,
     speed_skip_invalidation,
+    speed_swap_file,
     kPerformanceRows,
 };
 constexpr int kPerformanceRowsShown = 4;
@@ -263,7 +264,7 @@ void Launcher::draw_settings(Canvas &c)
         playing_,
         prefs_.renderer != 0 ? "Vulkan" : "OpenGL",
         prefs_.async_shaders || prefs_.fast_gpu || prefs_.unsafe_cpu || prefs_.unsafe_dma ||
-                !prefs_.reactive_flushing || prefs_.skip_invalidation ? tr("On") : "",
+                !prefs_.reactive_flushing || prefs_.skip_invalidation || !prefs_.swap_file ? tr("On") : "",
         prefs_.mute ? tr("Muted") : percent(prefs_.volume),
         prefs_.vibration ? tr("Vibration on") : tr("Vibration off"),
         prefs_.large_text || prefs_.high_contrast || prefs_.reduce_motion ? tr("On") : "",
@@ -344,7 +345,8 @@ void Launcher::draw_settings(Canvas &c)
                  {tr("FASTER CPU EMULATION"), on_off(prefs_.unsafe_cpu)},
                  {tr("FASTER DMA"), on_off(prefs_.unsafe_dma)},
                  {tr("REACTIVE FLUSHING"), on_off(prefs_.reactive_flushing)},
-                 {tr("SKIP CPU INVALIDATION"), on_off(prefs_.skip_invalidation)}};
+                 {tr("SKIP CPU INVALIDATION"), on_off(prefs_.skip_invalidation)},
+                 {tr("SWAP FILE"), on_off(prefs_.swap_file)}};
         break;
     case kAudio:
         about = tr("Game volume, and the sounds of this menu.");
@@ -447,9 +449,9 @@ void Launcher::draw_settings(Canvas &c)
     text(c, tr(kHeadings[settings_.selected]), 1016.0f, baseline(458.0f, 30.0f, th().size_small),
          th().size_small, th().accent, Align::left, 3.0f);
     text_shrink(c, about, 1016.0f, baseline(494.0f, 32.0f, 22.0f), 22.0f, th().copy, 748.0f);
-    // Five lines sit 62 apart; Video's six and Performance's seven move closer to stay inside
+    // Five lines sit 62 apart; Video's six and Performance's eight move closer to stay inside
     // the panel.
-    const float pitch = lines.size() > 6 ? 46.0f : lines.size() > 5 ? 52.0f : 62.0f;
+    const float pitch = lines.size() > 7 ? 40.0f : lines.size() > 6 ? 46.0f : lines.size() > 5 ? 52.0f : 62.0f;
     for (std::size_t i = 0; i < lines.size(); ++i)
     {
         const float top = 562.0f + pitch * static_cast<float>(i);
@@ -458,7 +460,8 @@ void Launcher::draw_settings(Canvas &c)
                         th().size_text, th().value, 470.0f, Align::right);
         text_shrink(c, lines[i].label, 1016.0f, baseline(top, 36.0f, th().size_small), th().size_small,
                     th().label, 748.0f - value - 24.0f, Align::left, 2.0f);
-        list.rounded_rect({1016.0f, top + 48.0f, 748.0f, 1.0f}, 0.0f, th().rule.with_alpha(0.45f));
+        list.rounded_rect({1016.0f, top + (std::min)(48.0f, pitch + 2.0f), 748.0f, 1.0f}, 0.0f,
+                          th().rule.with_alpha(0.45f));
     }
     list.pop_transform();
     list.pop_opacity();
@@ -638,8 +641,8 @@ void Launcher::press_dialog(Key key)
     case Modal::performance:
     {
         bool *const switches[kPerformanceRows] = {
-            &prefs_.block_list, &prefs_.async_shaders,     &prefs_.fast_gpu, &prefs_.unsafe_cpu,
-            &prefs_.unsafe_dma, &prefs_.reactive_flushing, &prefs_.skip_invalidation};
+            &prefs_.block_list, &prefs_.async_shaders,     &prefs_.fast_gpu,          &prefs_.unsafe_cpu,
+            &prefs_.unsafe_dma, &prefs_.reactive_flushing, &prefs_.skip_invalidation, &prefs_.swap_file};
         bool &value = *switches[std::clamp(option_, 0, kPerformanceRows - 1)];
         value = !value;
         break;
@@ -937,7 +940,7 @@ void Launcher::draw_dialog(Canvas &c, Modal modal, float open)
         static constexpr const char *kNames[kPerformanceRows] = {
             TR("Compile ahead"),        TR("Asynchronous shaders"), TR("Faster GPU emulation"),
             TR("Faster CPU emulation"), TR("Faster DMA"),           TR("Reactive flushing"),
-            TR("Skip CPU invalidation")};
+            TR("Skip CPU invalidation"), TR("Swap file")};
         for (int row = first; row <= last; ++row)
         {
             list.push_opacity(rows_view.row_alpha(row, kVideoRowHeight));
@@ -1032,7 +1035,9 @@ void Launcher::draw_dialog(Canvas &c, Modal modal, float open)
             TR("Keeps what a game reads back from the GPU exact. Off is faster, and some effects "
                "break."),
             TR("Skips some checks when a game changes memory the GPU uses: faster, and textures "
-               "can be stale.")};
+               "can be stale."),
+            TR("A game short of memory may write some of it to the console's storage: up to 8 GiB a day, "
+               "which wears the flash. Off, a game that runs out of memory ends.")};
         text_block(c, tr(kAbout[std::clamp(option_, 0, kPerformanceRows - 1)]), 592.0f,
                    baseline(window.y + window.h + 22.0f, 30.0f, th().size_small), th().size_small, 30.0f,
                    th().meta, 736.0f, 2, kShrink);

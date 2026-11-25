@@ -82,12 +82,18 @@ struct Option
     bool locked = false; // shown greyed out: it cannot be changed now
 };
 
+// The Performance rows end with Swap file, which says what it writes to the console's storage.
+constexpr int kSwapFileRow = 7;
+constexpr const char *kSwapFileAbout =
+    TR("A game short of memory may write some of it to the console's storage: up to 8 GiB a day, "
+    "which wears the flash. Off, a game that runs out of memory ends.");
+
 bool *performance_switch(Preferences &prefs, int index)
 {
     bool *const switches[] = {&prefs.block_list, &prefs.async_shaders,     &prefs.fast_gpu,
                               &prefs.unsafe_cpu, &prefs.unsafe_dma,        &prefs.reactive_flushing,
-                              &prefs.skip_invalidation};
-    return switches[std::clamp(index, 0, 6)];
+                              &prefs.skip_invalidation, &prefs.swap_file};
+    return switches[std::clamp(index, 0, kSwapFileRow)];
 }
 
 // rates: the refresh rates as the launcher writes them (Launcher::hertz).
@@ -141,8 +147,8 @@ std::vector<Option> options(int category, const GameSettings &game, Preferences 
         static constexpr const char *kNames[] = {
             TR("Compile ahead"),        TR("Asynchronous shaders"), TR("Faster GPU emulation"),
             TR("Faster CPU emulation"), TR("Faster DMA"),           TR("Reactive flushing"),
-            TR("Skip CPU invalidation")};
-        for (int i = 0; i < 7; ++i)
+            TR("Skip CPU invalidation"), TR("Swap file")};
+        for (int i = 0; i <= kSwapFileRow; ++i)
         {
             // Asynchronous shaders act with Vulkan only (settings.cpp).
             rows.push_back({std::string(tr(kNames[i])) + (i == 1 ? " (Vulkan)" : ""), off_on,
@@ -197,7 +203,7 @@ GameSettings with_option(GameSettings game, int category, int row, int value, co
          row == 6 ? game.frame_gen_target : row == 7 ? game.frame_gen_multiplier : game.frame_gen_type) = value;
         break;
     case category_performance:
-        game.performance[static_cast<std::size_t>(std::clamp(row, 0, 6))] = value;
+        game.performance[static_cast<std::size_t>(std::clamp(row, 0, kSwapFileRow))] = value;
         break;
     case category_audio:
         if (row == 0)
@@ -443,10 +449,17 @@ void Launcher::draw_game_options(Canvas &c, float open)
     const bool opens = game_options_ == category_controls && option_rows_.selected == kMappingRow &&
                        game_settings_.own_mapping;
     const bool types = game_options_ == category_system && option_rows_.selected == kSeedRow;
+    // What Swap file means for the console's storage, while it is the row chosen.
+    const bool swap = game_options_ == category_performance && option_rows_.selected == kSwapFileRow;
     if (!message_.empty())
     {
         notice_block(c, message_, 592.0f, kHints - 6.0f, th().size_small, 26.0f,
                      message_warning_ ? th().warning : th().accent_pale, 736.0f, 2, message_warning_);
+    }
+    else if (swap)
+    {
+        notice_block(c, tr(kSwapFileAbout), 592.0f, kHints - 6.0f, th().size_small, 26.0f, th().accent_pale,
+                     736.0f, 2, false);
     }
     else if (opens)
     {

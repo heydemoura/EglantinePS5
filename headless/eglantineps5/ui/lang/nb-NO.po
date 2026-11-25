@@ -2393,3 +2393,15 @@ msgstr "{0}/ (NSP eller XCI)"
 #: pe/ui/browse.cpp
 msgid "{0}/ (one folder per game ID)"
 msgstr "{0}/ (én mappe per tittel-ID)"
+
+#: pe/ui/game_options.cpp, pe/ui/settings.cpp
+msgid "Swap file"
+msgstr "Vekselfil"
+
+#: pe/ui/settings.cpp
+msgid "SWAP FILE"
+msgstr "VEKSELFIL"
+
+#: pe/ui/game_options.cpp, pe/ui/settings.cpp
+msgid "A game short of memory may write some of it to the console's storage: up to 8 GiB a day, which wears the flash. Off, a game that runs out of memory ends."
+msgstr "Et spill som mangler minne, kan skrive noe av det til konsollens lagring: opptil 8 GiB om dagen, noe som sliter på flashminnet. Av: Et spill som går tom for minne, avsluttes."

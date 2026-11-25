@@ -25,6 +25,8 @@
 #include <cstring>
 #include <sys/stat.h>
 extern "C" size_t eden_heap_last_failure(unsigned*, size_t*);
+// src/guest_memory_service.inc: whether this session may use the swap store (Swap file).
+extern "C" void eden_swap_session(int allowed) __attribute__((weak));
 #endif
 #ifdef EDEN_DEV_VULKAN
 #include "sdk_audit.h"
@@ -565,8 +567,8 @@ int main(int argc, char** argv) {
         if (Eden::FilesystemAccess()) {
             (void)mkdir((std::string{Eden::kDataDir} + "/cache").c_str(), 0777);
             setenv("EDEN_SWAP_DIR", (std::string{Eden::kDataDir} + "/cache/swap").c_str(), 0);
-            // "performance": { "swap_file": false } in the settings file switches it off.
-            if (!Eden::LoadSwapFile()) setenv("EDEN_SWAP", "0", 0);
+            // Whether a game may use it is chosen per session (Settings > Performance > Swap file,
+            // or the game's own), below where the session's performance settings are applied.
         }
         // The 64-bit fastmem window (src/host_memory.cpp, Window64): opt-in while it is qualified,
         // EDEN_FASTMEM64=1. Chosen here, before Core::System (and so HostMemory) is made.
@@ -1283,6 +1285,9 @@ int main(int argc, char** argv) {
             // The block list is off unless the settings turn it on (block-list.txt in the app
             // folder still does, further down).
             if (!dev_block_list) Eden::JitList::enabled = speed.block_list;
+            // The swap store (Swap file): for every game in Settings > Performance, or this game's
+            // own choice. Off, the game's memory is never written to the console's storage.
+            if (eden_swap_session) eden_swap_session(speed.swap_file ? 1 : 0);
             // The report reads the values back: what the emulator has, whoever set it.
             const auto on = [](bool value) { return value ? "on" : "off"; };
             Eden::Report("launch", (std::string("Performance: block list ") + on(Eden::JitList::enabled) +
@@ -1294,7 +1299,8 @@ int main(int argc, char** argv) {
                                     on(Settings::values.dma_accuracy.GetValue() == Settings::DmaAccuracy::Unsafe) +
                                     ", reactive flushing " + on(Settings::values.use_reactive_flushing.GetValue()) +
                                     ", skip invalidation " +
-                                    on(Settings::values.skip_cpu_inner_invalidation.GetValue())).c_str());
+                                    on(Settings::values.skip_cpu_inner_invalidation.GetValue()) +
+                                    ", swap file " + on(speed.swap_file)).c_str());
             // What a crash report says was running.
             char title_id[20];
             std::snprintf(title_id, sizeof(title_id), "%016llx",
