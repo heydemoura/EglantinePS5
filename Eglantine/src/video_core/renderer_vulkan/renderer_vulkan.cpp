@@ -281,6 +281,7 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
     {
         const VideoCommon::Nx2Profile::Scope scope{VideoCommon::Nx2Profile::Zone::Present};
         present_manager.Present(frame);
+        Eden::CountPresentedFrame();
     }
     const auto presented = trace ? std::chrono::steady_clock::now()
                                  : std::chrono::steady_clock::time_point{};
