@@ -4,10 +4,14 @@
 // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <thread>
 
+#include "common/logging.h"
 #include "common/scope_exit.h"
+#include "core/arm/arm_interface.h"
 #include "core/core.h"
 #include "core/core_timing.h"
 #include "core/hle/kernel/k_hardware_timer.h"
@@ -363,7 +367,66 @@ void ExitThread64(Core::System& system) {
     return ExitThread(system);
 }
 
+namespace {
+
+// Pokemon Pokopia's main thread waits for a job group in a loop that helps with jobs and otherwise
+// sleeps 1 ms (main+0x7e1bcc), about three times a frame. The group mostly ends inside such a
+// sleep, and the emulated wake-up comes late on top, so each of those waits ends up to ~1.1 ms
+// after the group did. That one call site sleeps 250 us instead (EDEN_NX2_POLL_SLEEP_US=<n>
+// sets n us, 1 to 999, for any application; 0 turns it off). The site is told by its code around
+// the return address: mov w0, #0x4240; movk w0, #0xf, lsl #16; bl SleepThread; b <loop head>.
+constexpr u64 PokopiaProgramId = 0x0400A3A01EE4C000ULL;
+constexpr s64 PokopiaPollSleepNs = 250'000;
+
+s64 PollSleepNs(u64 program_id) {
+    static const long env_us = [] {
+        const char* value = std::getenv("EDEN_NX2_POLL_SLEEP_US");
+        return value != nullptr && *value != '\0' ? std::strtol(value, nullptr, 10) : -1L;
+    }();
+    if (env_us >= 0) {
+        return env_us > 0 && env_us < 1000 ? s64{env_us} * 1000 : 0;
+    }
+    return program_id == PokopiaProgramId ? PokopiaPollSleepNs : 0;
+}
+
+bool IsJobWaitPoll(Core::System& system, s64 poll_ns) {
+    auto& kernel = system.Kernel();
+    KProcess* const process = GetCurrentProcessPointer(kernel);
+    if (process == nullptr) {
+        return false;
+    }
+    // The JIT of this core holds the registers: it just stopped for this SVC.
+    const Core::ArmInterface* const arm =
+        process->GetArmInterface(kernel.CurrentPhysicalCoreIndex());
+    if (arm == nullptr) {
+        return false;
+    }
+    Svc::ThreadContext ctx;
+    arm->GetContext(ctx);
+    const u64 lr = ctx.lr;
+    auto& memory = process->GetMemory();
+    if (lr < 12 || !memory.IsValidVirtualAddressRange(lr - 12, 16)) {
+        return false;
+    }
+    const bool match = memory.Read32(lr - 12) == 0x52884800 &&
+                       memory.Read32(lr - 8) == 0x72a001e0 && memory.Read32(lr) == 0x17ffff8d;
+    static std::atomic<bool> logged{false};
+    if (match && !logged.exchange(true)) {
+        LOG_INFO(Kernel_SVC, "Poll sleep: the job-wait loop at {:#x} sleeps {} us instead of 1 ms",
+                 lr, poll_ns / 1000);
+    }
+    return match;
+}
+
+} // Anonymous namespace
+
 void SleepThread64(Core::System& system, int64_t ns) {
+    if (ns == 1'000'000) {
+        const s64 poll_ns = PollSleepNs(GetCurrentProcess(system.Kernel()).GetProgramId());
+        if (poll_ns != 0 && IsJobWaitPoll(system, poll_ns)) {
+            ns = poll_ns;
+        }
+    }
     return SleepThread(system, ns);
 }
 
