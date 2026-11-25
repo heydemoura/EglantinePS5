@@ -79,6 +79,8 @@ private:
     u32 report_frames{};
     /// PS5: generated frames owed to the display's free refreshes (frame_gen.cpp).
     f32 fill_credit{};
+    /// The extra frames the present manager has room for (WantedGenerations).
+    size_t last_capacity{};
 };
 
 } // namespace Vulkan

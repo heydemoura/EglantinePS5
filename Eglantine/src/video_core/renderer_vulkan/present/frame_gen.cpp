@@ -260,22 +260,36 @@ void FrameGen::Process(const Device& device, Frame* frame, VkFormat format,
     generated = warm && warm_streak >= LSFG_RECURRENCE_FRAMES && plan.generations > 0;
 #if defined(__PROSPERO__) // PS5
     // Make only the frames the display has a free refresh for. A game slower than the output
-    // leaves (interval / refresh - 1) refreshes free per frame: at 43 FPS on 60 Hz, 0.39. The
-    // present thread leaves out a generated frame that would hold the game back, so making one
-    // per real frame anyway spent the GPU on frames nobody saw (Zelda: Ocarina of Time, 31 of
-    // 43 a second left out) and took that time from the game. The credit carries the fraction
-    // over, so 0.39 makes a frame every second or third real one.
-    if (generated) {
+    // leaves (interval x rate - 1) refreshes free per real frame (rate: the target, at most the
+    // output's refresh): at 43 FPS toward 60, 0.39. The present thread leaves out a generated
+    // frame that would hold the game back, so making one per real frame anyway spent the GPU on
+    // frames nobody saw (Zelda: Ocarina of Time, 31 of 43 a second left out) and took that time
+    // from the game. The credit carries the fraction over, so 0.39 makes a frame every second or
+    // third real one. MihawkGen and AMD FSR 3 need only the two latest frames, so this decides
+    // alone: the pacer's own rules (no frames while frame times jump about, or for a second
+    // after) made almost none in DK Bananza, whose frame times vary all the time. Lossless
+    // Scaling keeps the pacer (its chain warms up over frames).
+    if (Settings::values.frame_gen_type.GetValue() != Settings::FrameGenType::Lsfg) {
         const f32 interval = pacer.SmoothedInterval();
-        const f32 free_refreshes = interval > 0.0f ? interval / RefreshSeconds() - 1.0f : 0.0f;
-        fill_credit = std::clamp(fill_credit + (std::max)(free_refreshes, 0.0f), 0.0f,
-                                 static_cast<f32>(plan.generations));
-        const size_t fill = (std::min)(static_cast<size_t>(fill_credit), plan.generations);
-        fill_credit -= static_cast<f32>(fill);
+        const u32 target = Settings::values.frame_gen_target_rate.GetValue();
+        const f32 refresh_rate = 1.0f / RefreshSeconds();
+        const f32 rate = target > 0 ? (std::min)(static_cast<f32>(target), refresh_rate) : refresh_rate;
+        const size_t cap = (std::min)(Settings::FrameGenMaxGenerations(), last_capacity);
+        size_t fill = 0;
+        if (cap > 0 && interval > 0.0f && count + 1 >= LSFG_REQUIRED_FRAMES) {
+            fill_credit = std::clamp(fill_credit + (std::max)(interval * rate - 1.0f, 0.0f), 0.0f,
+                                     static_cast<f32>(cap));
+            fill = (std::min)(static_cast<size_t>(fill_credit), cap);
+            fill_credit -= static_cast<f32>(fill);
+        } else {
+            fill_credit = 0.0f;
+        }
         last_generations = fill;
         generated = fill > 0;
-    } else {
-        fill_credit = 0.0f;
+        if (generated && !generation_reported) {
+            generation_reported = true;
+            Eden::Report("framegen", "generating frames for the refreshes the game leaves free");
+        }
     }
 #endif
     if (generated && !generation_reported) {
@@ -340,6 +354,7 @@ size_t FrameGen::WantedGenerations(size_t capacity) {
         return 0;
     }
     plan = pacer.Plan(capacity);
+    last_capacity = capacity;
     return plan.generations;
 }
 
