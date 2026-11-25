@@ -255,7 +255,7 @@ void FrameGen::Process(const Device& device, Frame* frame, VkFormat format,
                       " extra frame(s) per guest frame").c_str());
     }
     generated_frames.fetch_add(GeneratedFrameCount(), std::memory_order_relaxed);
-    // The rate the output gets, next to the guest's own (nx2:vi2's "last 600 presents" line):
+    // The rate frames are made at, next to the guest's own (nx2:vi2's "last 600 presents" line):
     // every 600 guest frames, how many frames were generated between them, and in how long.
     {
         const auto now = std::chrono::steady_clock::now();
@@ -269,7 +269,7 @@ void FrameGen::Process(const Device& device, Frame* frame, VkFormat format,
             if (seconds > 0.0) {
                 LOG_INFO(Render_Vulkan,
                          "Frame generation: last 600 guest frames in {:.2f} s, {} generated: "
-                         "{:.1f} guest/s, {:.1f} shown/s",
+                         "{:.1f} guest/s, {:.1f} made/s (shown: the present thread's line)",
                          seconds, extra, 599.0 / seconds, (599.0 + static_cast<f64>(extra)) / seconds);
             }
             report_frames = 0;

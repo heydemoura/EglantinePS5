@@ -17,6 +17,7 @@
 #endif
 #include "video_core/renderer_vulkan/vk_present_manager.h"
 #include "gpu_failure.h"
+#include "hud.h"
 #include "performance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_swapchain.h"
@@ -250,6 +251,7 @@ void PresentManager::Present(Frame* frame) {
         scheduler.Record([this, frame](vk::CommandBuffer) {
             std::unique_lock lock{queue_mutex};
             if (present_failure) return;
+            frame->queued_at = std::chrono::steady_clock::now();
             present_queue.push_back(frame);
             frame_cv.notify_one();
         });
@@ -413,10 +415,29 @@ void PresentManager::PresentThread(std::stop_token token) {
             // refresh, which lengthened the measured frame interval and with it the spacing.
             const auto ready = std::chrono::steady_clock::now();
             const auto start = (std::max)(next_present, ready);
+            const bool generated = frame->present_spacing.count() != 0;
+            // A generated frame is shown only in a refresh the game leaves free: one that would
+            // go out later than it came (the present thread is behind) would hold back the real
+            // frame queued after it, and with it the game. A game that times itself by its
+            // frames (most count vsyncs) then ran slower with frame generation on than off:
+            // Zelda: Ocarina of Time, 34 FPS off, held at 29 on. Dropped, the game keeps its own
+            // rate and the frames it misses are filled (as Longshot's frame generation does).
+            constexpr auto slack = std::chrono::milliseconds{2};
+            if (generated && start > frame->queued_at + slack) {
+                DiscardFrame(frame);
+                ++pacing_dropped;
+                LogFrameGenPresents(start);
+                std::scoped_lock fl{free_mutex};
+                free_queue.push_back(frame);
+                free_cv.notify_one();
+                continue;
+            }
             SleepUntil(start);
             CopyToSwapchain(frame);
+            ++(generated ? pacing_generated : pacing_real);
+            LogFrameGenPresents(start);
             next_present = start + frame->present_spacing;
-            if (frame->present_spacing.count() != 0) {
+            if (generated) {
                 generating_until = start + std::chrono::seconds{1};
             }
             // While frames are generated, the next present also waits one refresh after this
@@ -434,6 +455,26 @@ void PresentManager::PresentThread(std::stop_token token) {
             free_cv.notify_one();
         }
     }
+}
+
+void PresentManager::LogFrameGenPresents(std::chrono::steady_clock::time_point now) {
+    if (!Settings::values.frame_gen.GetValue()) {
+        return;
+    }
+    if (pacing_since == std::chrono::steady_clock::time_point{}) {
+        pacing_since = now;
+        return;
+    }
+    const double seconds = std::chrono::duration<double>(now - pacing_since).count();
+    if (seconds < 10.0) {
+        return;
+    }
+    LOG_INFO(Render_Vulkan,
+             "Frame generation presents ({:.1f} s): {:.1f} real/s, {:.1f} generated/s shown, "
+             "{:.1f} generated/s left out (no free refresh)",
+             seconds, pacing_real / seconds, pacing_generated / seconds, pacing_dropped / seconds);
+    pacing_since = now;
+    pacing_real = pacing_generated = pacing_dropped = 0;
 }
 
 void PresentManager::RecreateSwapchain(Frame* frame) {
@@ -670,6 +711,8 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
 
     // Present
     swapchain.Present(render_semaphore);
+    // The overlay's F: every frame that went to the display (headless/hud.h).
+    Eden::CountPresentedFrame();
 }
 
 } // namespace Vulkan

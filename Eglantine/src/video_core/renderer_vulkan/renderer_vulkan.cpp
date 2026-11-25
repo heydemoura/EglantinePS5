@@ -274,7 +274,6 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
         frame_gen.GenerateInto(device, generated, generation);
         scheduler.Flush(*generated->render_ready);
         present_manager.Present(generated);
-        Eden::CountPresentedFrame();
     }
 #endif
 
@@ -289,11 +288,6 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
         const VideoCommon::Nx2Profile::Scope scope{VideoCommon::Nx2Profile::Zone::Present};
         present_manager.Present(frame);
     }
-    // The overlay's F counts every frame handed to the present manager, the generated ones
-    // above and this one (headless/hud.h). This call was lost when the port's patches were
-    // folded into Eglantine/ (983612f), so with frame generation F read only the generated
-    // frames: about the game's own rate.
-    Eden::CountPresentedFrame();
     const auto presented = trace ? std::chrono::steady_clock::now()
                                  : std::chrono::steady_clock::time_point{};
 #if defined(__PROSPERO__) // PS5
