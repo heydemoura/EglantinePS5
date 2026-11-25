@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -20,6 +21,15 @@
 namespace Vulkan {
 
 namespace {
+
+#if defined(__PROSPERO__) // PS5
+// The output's refresh period in seconds: 119.88 Hz when the session asked for 120 Hz
+// (headless/display_refresh.h), 59.94 Hz otherwise.
+f32 RefreshSeconds() {
+    const char* high = std::getenv("EDEN_VIDEOOUT_120HZ");
+    return high != nullptr && high[0] == '1' ? 1.0f / 119.88f : 1.0f / 59.94f;
+}
+#endif
 
 constexpr size_t COLOR_CHANNELS = 4;
 constexpr u64 LSFG_REQUIRED_FRAMES = 2;
@@ -248,6 +258,26 @@ void FrameGen::Process(const Device& device, Frame* frame, VkFormat format,
     const bool warm = plan.warm && count + 1 >= LSFG_REQUIRED_FRAMES;
     warm_streak = warm ? warm_streak + 1 : 0;
     generated = warm && warm_streak >= LSFG_RECURRENCE_FRAMES && plan.generations > 0;
+#if defined(__PROSPERO__) // PS5
+    // Make only the frames the display has a free refresh for. A game slower than the output
+    // leaves (interval / refresh - 1) refreshes free per frame: at 43 FPS on 60 Hz, 0.39. The
+    // present thread leaves out a generated frame that would hold the game back, so making one
+    // per real frame anyway spent the GPU on frames nobody saw (Zelda: Ocarina of Time, 31 of
+    // 43 a second left out) and took that time from the game. The credit carries the fraction
+    // over, so 0.39 makes a frame every second or third real one.
+    if (generated) {
+        const f32 interval = pacer.SmoothedInterval();
+        const f32 free_refreshes = interval > 0.0f ? interval / RefreshSeconds() - 1.0f : 0.0f;
+        fill_credit = std::clamp(fill_credit + (std::max)(free_refreshes, 0.0f), 0.0f,
+                                 static_cast<f32>(plan.generations));
+        const size_t fill = (std::min)(static_cast<size_t>(fill_credit), plan.generations);
+        fill_credit -= static_cast<f32>(fill);
+        last_generations = fill;
+        generated = fill > 0;
+    } else {
+        fill_credit = 0.0f;
+    }
+#endif
     if (generated && !generation_reported) {
         generation_reported = true;
         Eden::Report("framegen",

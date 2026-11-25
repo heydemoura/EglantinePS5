@@ -77,6 +77,8 @@ private:
     std::chrono::steady_clock::time_point report_start{};
     u64 report_generated{};
     u32 report_frames{};
+    /// PS5: generated frames owed to the display's free refreshes (frame_gen.cpp).
+    f32 fill_credit{};
 };
 
 } // namespace Vulkan
