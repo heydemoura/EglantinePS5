@@ -758,6 +758,10 @@ msgstr "نوع توليد الإطارات"
 msgid "Skip game anti-aliasing"
 msgstr "تخطي تنعيم الحواف في اللعبة"
 
+#: pe/ui/settings.cpp
+msgid "AMD FSR 3.1"
+msgstr "AMD FSR 3.1"
+
 #: pe/ui/game_options.cpp, pe/ui/settings.cpp
 msgid "Frame generation"
 msgstr "توليد الإطارات"

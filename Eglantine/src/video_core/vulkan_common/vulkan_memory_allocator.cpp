@@ -749,6 +749,11 @@ MemoryCommit MemoryAllocator::Commit(const VkMemoryRequirements &reqs, MemoryUsa
             ci3.preferredFlags &= ~VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
             res = vmaAllocateMemory(allocator, &reqs, &ci3, &a, &info);
         }
+#if defined(__PROSPERO__) // PS5
+        // (Ours, 5863e62: upstream only retries images and buffers.)
+        res = RetryAfterRecovery(res, reqs.size,
+                                 [&] { return vmaAllocateMemory(allocator, &reqs, &ci2, &a, &info); });
+#endif // PS5
     }
 
     vk::Check(res);
@@ -786,6 +791,13 @@ MemoryCommit MemoryAllocator::Commit(const vk::Buffer &buffer, MemoryUsage usage
             ci3.preferredFlags &= ~VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
             res = vmaAllocateMemoryForBuffer(allocator, raw, &ci3, &a, &info);
         }
+#if defined(__PROSPERO__) // PS5
+        // (Ours, 5863e62: upstream only retries images and buffers.)
+        const VkMemoryRequirements requirements = device.GetLogical().GetBufferMemoryRequirements(raw);
+        res = RetryAfterRecovery(res, requirements.size, [&] {
+            return vmaAllocateMemoryForBuffer(allocator, raw, &ci2, &a, &info);
+        });
+#endif // PS5
     }
 
     vk::Check(res);
@@ -910,7 +922,7 @@ void LogMemoryStatistics(const Device& device) {
         if (s.blockCount == 0) {
             continue;
         }
-        LOG_DEBUG(Render_Vulkan, "VMA type {} (heap {}, flags {:#x}): {} blocks {} MiB, {} allocations {} MiB",
+        LOG_INFO(Render_Vulkan, "VMA type {} (heap {}, flags {:#x}): {} blocks {} MiB, {} allocations {} MiB",
                  type, properties->memoryTypes[type].heapIndex,
                  static_cast<u32>(properties->memoryTypes[type].propertyFlags), s.blockCount,
                  s.blockBytes >> 20, s.allocationCount, s.allocationBytes >> 20);

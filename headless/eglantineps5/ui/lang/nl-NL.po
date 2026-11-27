@@ -758,6 +758,10 @@ msgstr "Type framegeneratie"
 msgid "Skip game anti-aliasing"
 msgstr "Anti-aliasing van de game overslaan"
 
+#: pe/ui/settings.cpp
+msgid "AMD FSR 3.1"
+msgstr "AMD FSR 3.1"
+
 #: pe/ui/game_options.cpp, pe/ui/settings.cpp
 msgid "Frame generation"
 msgstr "Framegeneratie"

@@ -380,8 +380,26 @@ bool Maxwell3D::IsFastDrawQueryMethod(u32 method) {
     // Neither is in what a delta draw keeps: the draw manager asks ShouldExecute for every draw,
     // every draw resumes the counters and host conditional rendering (NotifySegment,
     // CounterEnable), and a resolve that leaves the render pass ends the delta chain there.
-    return method == MAXWELL3D_REG_INDEX(clear_report_value) ||
-           method == MAXWELL3D_REG_INDEX(render_enable.mode);
+    if (method == MAXWELL3D_REG_INDEX(clear_report_value) ||
+        method == MAXWELL3D_REG_INDEX(render_enable.mode)) {
+        return true;
+    }
+    if (!VideoCommon::Nx2FastDraw::More()) {
+        return false;
+    }
+    // A report writes a counter or a payload to guest memory and changes no draw state (the
+    // rasterizer notes the sync, and a resolve that leaves the render pass ends the chain as
+    // above); the three registers before the query are its address and payload. 0x154-0x157 are
+    // the macro data (MME DMA) registers: macros read them, draw setup does not. A shader
+    // slot's register count (its fourth word) is read by nothing here: the program is found by
+    // its address, in the slot's later words.
+    const u32 report = MAXWELL3D_REG_INDEX(report_semaphore.query);
+    if ((method >= report - 3 && method <= report) || (method >= 0x154 && method <= 0x157)) {
+        return true;
+    }
+    const u32 slots = MAXWELL3D_REG_INDEX(pipelines);
+    return method >= slots && method < slots + Regs::MaxShaderProgram * 0x10 &&
+           (method - slots) % 0x10 == 3;
 }
 
 bool Maxwell3D::IsFastDrawVertexFormat(u32 method) {
@@ -2117,7 +2135,10 @@ bool Maxwell3D::FrontRunOnBack(Core::System& system, VideoCommon::GpuSplit& spli
                 AsyncReadback::MaybeReport();
             }
         },
-        fs.parameters, VideoCommon::GpuSplit::Writes::Caches);
+        fs.parameters, VideoCommon::GpuSplit::Writes::Caches,
+        // The macro's own writes end fast draw reuse where a write sent directly would: the
+        // call itself changes nothing a draw resolves to (EDEN_NX2_FAST_DRAW_MORE).
+        VideoCommon::Nx2FastDraw::More() ? VideoCommon::GpuSplit::FastDrawNeutral : 0);
     const u64 position = split.Position();
     fs.back_last = position;
     const bool tracked = fs.control == Regs::ShadowRamControl::Track ||

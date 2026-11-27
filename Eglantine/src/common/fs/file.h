@@ -7,6 +7,12 @@
 #pragma once
 
 #include <cstdio>
+#if defined(__PROSPERO__)
+#include <algorithm>
+#include <cstring>
+#include <memory>
+extern "C" int eden_guest_memory_contains(const void* host) noexcept __attribute__((weak));
+#endif
 #include <filesystem>
 #include <span>
 #include <type_traits>
@@ -289,6 +295,9 @@ public:
         if (!IsOpen()) {
             return 0;
         }
+#if defined(__PROSPERO__)
+        if (GuestBounce(data.data())) return BounceRead(data.data(), sizeof(T), data.size());
+#endif
         return std::fread(data.data(), sizeof(T), data.size(), file);
     }
 
@@ -315,6 +324,9 @@ public:
             return 0;
         }
 
+#if defined(__PROSPERO__)
+        if (GuestBounce(data.data())) return BounceWrite(data.data(), sizeof(T), data.size());
+#endif
         return std::fwrite(data.data(), sizeof(T), data.size(), file);
     }
 
@@ -454,6 +466,45 @@ public:
     [[nodiscard]] s64 Tell() const;
 
 private:
+#if defined(__PROSPERO__)
+    // EglantinePS5: guest memory may be packed, on probation (no access) or show the zero block
+    // read-only, 64 KiB at a time (src/guest_memory_service.inc). The kernel answers a read(2) or
+    // write(2) on such a page with EFAULT instead of faulting, and a page touched beforehand can be
+    // put on probation again before the call: a game's file data then never arrived (blank scenes,
+    // garbage textures while packing ran). File I/O on guest memory goes through a buffer of the
+    // host's; the copy to or from the guest faults like any other access.
+    static bool GuestBounce(const void* data) noexcept {
+        return &eden_guest_memory_contains != nullptr && eden_guest_memory_contains(data) != 0;
+    }
+    size_t BounceRead(void* data, size_t size, size_t count) const {
+        constexpr size_t Chunk = 1u << 20;
+        const size_t bytes = size * count;
+        const auto buffer = std::make_unique_for_overwrite<char[]>((std::min)(bytes, Chunk));
+        size_t done = 0;
+        while (done < bytes) {
+            const size_t want = (std::min)(bytes - done, Chunk);
+            const size_t got = std::fread(buffer.get(), 1, want, file);
+            std::memcpy(static_cast<char*>(data) + done, buffer.get(), got);
+            done += got;
+            if (got != want) break;
+        }
+        return size ? done / size : 0;
+    }
+    size_t BounceWrite(const void* data, size_t size, size_t count) const {
+        constexpr size_t Chunk = 1u << 20;
+        const size_t bytes = size * count;
+        const auto buffer = std::make_unique_for_overwrite<char[]>((std::min)(bytes, Chunk));
+        size_t done = 0;
+        while (done < bytes) {
+            const size_t want = (std::min)(bytes - done, Chunk);
+            std::memcpy(buffer.get(), static_cast<const char*>(data) + done, want);
+            const size_t put = std::fwrite(buffer.get(), 1, want, file);
+            done += put;
+            if (put != want) break;
+        }
+        return size ? done / size : 0;
+    }
+#endif
     std::filesystem::path file_path;
     FileAccessMode file_access_mode{};
     FileType file_type{};

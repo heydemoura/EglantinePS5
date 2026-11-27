@@ -62,13 +62,21 @@ u32 ReadSemaphoreWord(DmaPusher& dma_pusher, GPUVAddr address) {
 // `writes`: what it writes to guest memory (GpuSplit::Writes).
 template <typename Func>
 void OnBack(const Func& func,
-            VideoCommon::GpuSplit::Writes writes = VideoCommon::GpuSplit::Writes::Anywhere) {
+            VideoCommon::GpuSplit::Writes writes = VideoCommon::GpuSplit::Writes::Anywhere,
+            u64 flags = 0) {
     if (auto& split = VideoCommon::GpuSplit::Get(); split.Active()) {
-        split.Defer(func, 0, writes);
+        split.Defer(func, flags, writes);
     } else {
         VideoCommon::Nx2FastDraw::BreakUnsplit(VideoCommon::Nx2FastDraw::Reason::Call);
         func();
     }
+}
+
+// A semaphore release and a syncpoint increment change nothing a draw resolves to: the
+// rasterizer notes the sync where they reach it (uniform keeps read their buffers again), and
+// the draws around them keep their pipeline, views and bindings (EDEN_NX2_FAST_DRAW_MORE).
+u64 SyncNeutral() {
+    return VideoCommon::Nx2FastDraw::More() ? VideoCommon::GpuSplit::FastDrawNeutral : 0;
 }
 
 // Fence work (ReleaseFences, SignalSyncPoint, SignalReference) writes guest memory through fence
@@ -130,7 +138,15 @@ enum class AcquireCheck {
 AcquireCheck CheckWithoutDrain(DmaPusher& dma_pusher, const Puller::PendingAcquire& acquire) {
     auto& split = VideoCommon::GpuSplit::Get();
     auto& stats = VideoCommon::g_acquire_stats;
-    if (!acquire.WaitsToReach()) {
+    // (EglantinePS5) Equal and mask acquires too, unless EDEN_NX2_ACQUIRE_ANY=0: with no release
+    // queued to the word that the back has yet to run, memory holds what the GPU reads there, and
+    // the last queued release decides as for greater-or-equal. Ocarina of Time drained 7,000
+    // equal or mask acquires a second, 87% of its drains.
+    static const bool any_operation = [] {
+        const char* const value = std::getenv("EDEN_NX2_ACQUIRE_ANY");
+        return value == nullptr || value[0] != '0';
+    }();
+    if (!acquire.WaitsToReach() && !any_operation) {
         VideoCommon::Count(stats.drain_operation);
         return AcquireCheck::Drain;
     }
@@ -392,7 +408,7 @@ void Puller::ProcessFenceActionMethod(DmaPusher& dma_pusher) {
     case Puller::FenceOperation::Increment:
         OnBack([rasterizer = dma_pusher.rasterizer, id = static_cast<u32>(regs.fence_action.syncpoint_id.Value())] {
             rasterizer->SignalSyncPoint(id);
-        }, FenceWrites);
+        }, FenceWrites, SyncNeutral());
         break;
     default:
         UNIMPLEMENTED_MSG("Unimplemented operation {}", regs.fence_action.op.Value());
@@ -434,7 +450,7 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
                 rasterizer->Query(mirror, VideoCommon::QueryType::Payload,
                                   properties | VideoCommon::QueryPropertiesFlags::Nx2Mirror, payload, 0);
             }
-        }, VideoCommon::GpuSplit::Writes::Noted);
+        }, VideoCommon::GpuSplit::Writes::Noted, SyncNeutral());
         NoteRelease(dma_pusher, sequence_address, payload,
                     properties == VideoCommon::QueryPropertiesFlags::HasTimeout,
                     VideoCommon::GpuSplit::ReportLanding(

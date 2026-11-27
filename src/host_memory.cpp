@@ -777,6 +777,9 @@ bool RequestedA64() noexcept { return window64_requested; }
 std::uint64_t Window64Base() noexcept { return window64_base; }
 // Page-reuse groups formed while blocks compile (headless/dynarmic/page_reuse_pass.inc).
 extern "C" unsigned long long eden_page_reuse_groups __attribute__((weak));
+extern "C" unsigned long long eden_fastmem_demotion_count() __attribute__((weak));
+extern "C" unsigned long long eden_fastmem_repeat_count() __attribute__((weak));
+extern "C" unsigned long long eden_jit_empty_invalidations() __attribute__((weak));
 void Window64Report(char* out, std::size_t size) noexcept {
     auto& c = window64_counts;
     std::uint64_t made = 0, dropped = 0, refused = 0;
@@ -795,6 +798,11 @@ void Window64Report(char* out, std::size_t size) noexcept {
     std::size_t used = std::strlen(out);
     if (&eden_page_reuse_groups != nullptr && used < size)
         used += std::snprintf(out + used, size - used, " reuse_groups=%llu", __atomic_load_n(&eden_page_reuse_groups, __ATOMIC_RELAXED));
+    if (eden_fastmem_demotion_count != nullptr && used < size)
+        used += std::snprintf(out + used, size - used, " demotions=%llu repeats=%llu", eden_fastmem_demotion_count(),
+                             eden_fastmem_repeat_count ? eden_fastmem_repeat_count() : 0ULL);
+    if (eden_jit_empty_invalidations != nullptr && used < size)
+        used += std::snprintf(out + used, size - used, " empty_invalidations=%llu", eden_jit_empty_invalidations());
     if (used < size)
         used += std::snprintf(out + used, size - used, " misaligned_phase=%llu/%llu/%llu areas=", v(c.misaligned_phase[1]),
                               v(c.misaligned_phase[2]), v(c.misaligned_phase[3]));

@@ -254,7 +254,7 @@ void DynarmicCallbacks64::ExceptionRaised(u64 pc, Dynarmic::A64::Exception excep
     case Dynarmic::A64::Exception::SendEvent:
     case Dynarmic::A64::Exception::SendEventLocal:
     case Dynarmic::A64::Exception::Yield:
-        if (Kernel::Nx2ThreadStats::g_enabled) {
+        if (Kernel::Nx2ThreadStats::g_enabled()) {
             Kernel::Nx2ThreadStats::CountHint(
                 Kernel::Nx2ThreadStats::t_run,
                 static_cast<size_t>(exception) -
@@ -325,7 +325,7 @@ u64 DynarmicCallbacks64::GetCNTPCT() {
 #endif
     }
     m_last_cntpct = ticks;
-    if (Kernel::Nx2ThreadStats::g_enabled) {
+    if (Kernel::Nx2ThreadStats::g_enabled()) {
         Kernel::Nx2ThreadStats::CountRead(Kernel::Nx2ThreadStats::t_run, ticks, m_spin_ticks);
     }
     return ticks;

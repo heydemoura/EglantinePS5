@@ -40,7 +40,7 @@ fi
 # The SDK's dlfcn wrappers explicitly return unavailable when these optional
 # weak hooks are null. This static frontend supplies no dynamic-loader hooks.
 "$template/.deps/native/ps5-payload-sdk/bin/prospero-lld" \
-    "${tls_flags[@]}" "${radv_link_flags[@]}" -L "$sdk/target/lib" \
+    "${tls_flags[@]}" "${radv_link_flags[@]}" --no-dependent-libraries -L "$sdk/target/lib" \
     --defsym=__dlopen=0 --defsym=__dlsym=0 --defsym=__dladdr=0 \
     --defsym=__dlclose=0 --defsym=__dlerror=0 \
     -T "$template/tooling/native/ps5-pie.ld" -T "$root/tools/unwind.ld" \

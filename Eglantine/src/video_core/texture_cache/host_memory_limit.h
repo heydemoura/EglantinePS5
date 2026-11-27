@@ -10,12 +10,19 @@
 
 namespace VideoCommon {
 
+#if defined(__PROSPERO__)
+/// The PS5's room is its pool's largest free block (GetSystemCommitRoom), whose own allocations
+/// come in 2 MiB pieces: a smaller reserve and floor fit a 12 GiB pool shared with the guest.
+constexpr u64 HostCommitReserve = u64{512} << 20;
+constexpr u64 MinHostCriticalMemory = u64{1536} << 20;
+#else
 /// Commit the texture cache leaves to the rest of the process and the system.
 constexpr u64 HostCommitReserve = u64{2} << 30;
 
 /// The cache is not shrunk below this for host memory: a scene needs about this much, and under
 /// it the collector only deletes and decodes the same textures again.
 constexpr u64 MinHostCriticalMemory = u64{3} << 30;
+#endif
 
 /// The most device memory the texture cache may hold before it collects in earnest, as host
 /// memory allows it. Windows charges device memory to the system's commit limit (RAM plus the

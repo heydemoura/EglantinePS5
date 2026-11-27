@@ -78,6 +78,7 @@ extern "C" void eden_swap_session(int allowed) __attribute__((weak));
 #include "../src/fastmem.h"
 // The 64-bit fastmem window's demoted sites, kept per title (headless/dynarmic/fastmem-callback.cmake).
 extern "C" std::size_t eden_fastmem64_load_sites(const char*, unsigned long long, const unsigned char*) __attribute__((weak));
+extern "C" unsigned long long eden_fastmem_demotion_count() __attribute__((weak));
 extern "C" std::size_t eden_fastmem64_save_sites(const char*, unsigned long long, unsigned long long,
                                                  const unsigned char*) __attribute__((weak));
 #include "crash_report.h"
@@ -266,6 +267,26 @@ static void UpdateGrips(Core::System& system, Eden::Pad& pad) {
 #ifdef EDEN_PS5_RADV
 void EdenRegisterNirBackend(); // nir_backend.cpp
 #endif
+
+#if defined(PS5_NATIVE)
+// Development: /data/eglantineps5/env.txt also applies before the core's static initializers.
+// Several of its diagnostic switches are constants read with getenv at start-up
+// (EDEN_NX2_GUEST_THREAD_STATS, EDEN_NX2_FS_READ_TRACE...), which main's reader came too late for.
+__attribute__((constructor(101))) static void EarlyEnvironment() {
+    std::FILE* const file = std::fopen("/data/eglantineps5/env.txt", "r");
+    if (file == nullptr) return;
+    char line[512];
+    while (std::fgets(line, sizeof(line), file) != nullptr) {
+        line[std::strcspn(line, "\r\n")] = 0;
+        char* const split = std::strchr(line, '=');
+        if (line[0] == '#' || split == nullptr || split == line) continue;
+        *split = 0;
+        setenv(line, split + 1, 1);
+    }
+    std::fclose(file);
+}
+#endif
+
 
 int main(int argc, char** argv) {
     try {
@@ -475,6 +496,23 @@ int main(int argc, char** argv) {
             else launch_error = "Forwarded game not found: " + (path.empty() ? forwarded.rom : path);
             Eden::BootTrace::Line("forwarded game: %s", forwarded_game.empty() ? "not found" : "found");
         }
+        // One-shot test launch without a controller: /data/eglantineps5/autoboot.txt names a game
+        // like --rom does (the PS5 shell's launch passes no arguments). Removed before the game
+        // loads, so a crash comes back to the library and never loops.
+        if (forwarded_game.empty() && last_crash.report.empty()) {
+            const std::string request_path = std::string{Eden::kDataDir} + "/autoboot.txt";
+            std::ifstream request_file(request_path);
+            std::string rom;
+            if (std::getline(request_file, rom)) {
+                request_file.close();
+                if (std::remove(request_path.c_str()) == 0) {
+                    std::string path = Eden::ResolveForwardedRom(rom, Eden::AssetsPath("roms"));
+                    if (const auto main = Eden::ExtractedGameMain(path); !main.empty()) path = main;
+                    if (!path.empty() && Eden::FileExists(path)) forwarded_game = path;
+                    Eden::BootTrace::Line("autoboot.txt game: %s", forwarded_game.empty() ? "not found" : "found");
+                }
+            }
+        }
 #ifdef MKW_DIAGNOSTIC_INPUT
         // One-shot launch for an explicitly prepared console experiment. Consume it before
         // loading so a crash returns to the normal library and never loops the diagnostic.
@@ -542,12 +580,17 @@ int main(int argc, char** argv) {
         {
             // Development: env.txt in the app folder sets core switches (NAME=VALUE per line,
             // e.g. EDEN_NX2_GPU_PROFILE=1) before the core reads them. Absent in a release.
-            std::ifstream environment(Eden::AppFile("env.txt"));
-            for (std::string entry; std::getline(environment, entry);) {
-                const auto split = entry.find('=');
-                if (entry.empty() || entry[0] == '#' || split == std::string::npos || split == 0) continue;
-                setenv(entry.substr(0, split).c_str(), entry.c_str() + split + 1, 1);
-                std::printf("EDEN_ENV %s\n", entry.c_str());
+            // /data/eglantineps5/env.txt is read after it (and wins): /app0 is read-only over FTP.
+            for (const std::string& path : {Eden::AppFile("env.txt"), std::string{Eden::kDataDir} + "/env.txt"}) {
+                std::ifstream environment(path);
+                for (std::string entry; std::getline(environment, entry);) {
+                    if (!entry.empty() && entry.back() == '\r') entry.pop_back();
+                    const auto split = entry.find('=');
+                    if (entry.empty() || entry[0] == '#' || split == std::string::npos || split == 0) continue;
+                    setenv(entry.substr(0, split).c_str(), entry.c_str() + split + 1, 1);
+                    std::printf("EDEN_ENV %s\n", entry.c_str());
+                    std::fprintf(stderr, "EDEN_ENV %s\n", entry.c_str());
+                }
             }
         }
         // The console's defaults for the core's switches (env.txt above wins). Without a fastmem
@@ -757,6 +800,10 @@ int main(int argc, char** argv) {
         const uint64_t game_title = 0;
 #endif
         Eden::session_title.store(game_title);
+        // Ocarina of Time takes the 64-bit fastmem window unless EDEN_FASTMEM64 says otherwise:
+        // standing in Kokiri Forest 45-47 FPS against ~41 through the page table.
+        if (!std::getenv("EDEN_FASTMEM64"))
+            Eden::Fastmem::RequestA64(game_title == 0x0400486024DEC000ULL);
         const unsigned cycles = game ? 1 : 3;
         const bool devices = EDEN_DEVICE_FRONTEND;
         if (game) {
@@ -1139,6 +1186,13 @@ int main(int argc, char** argv) {
             // Settings > Video > Skip game anti-aliasing (video_core/oot_network.h): read by the core
             // at each dispatch of a game's network.
             setenv("EDEN_OOT_ANTI_ALIASING", video.skip_game_aa ? "skip" : "game", 1);
+            // Settings > Video > AMD FSR 3.1: the FidelityFX SDK's FSR 3.1 upscaler in place of Ocarina
+            // of Time's own (vk_ocarina_camera_motion.cpp), from the game's camera motion and depth. On
+            // the console: 1080p to 1440p, about 0.7 FPS and 250 MiB of graphics memory. env.txt's
+            // EDEN_OCARINA_FSR=0/1 overrides the switch (A/B runs).
+            bool ocarina_fsr = video.amd_fsr31;
+            if (const char* value = std::getenv("EDEN_OCARINA_FSR")) ocarina_fsr = value[0] == '1';
+            Settings::values.ocarina_fsr.SetValue(ocarina_fsr);
             const int resolution = video.resolution;
             const int filter = video.upscaling_filter;
             Settings::values.resolution_setup.SetValue(resolutions[resolution]);
@@ -1256,8 +1310,84 @@ int main(int argc, char** argv) {
             // Speed against accuracy ("performance" in the settings file, settings_store.h): each
             // one is off unless chosen there, for every game or for this one. The levels start
             // every session at their exact values (above), so one that is not chosen is off.
+            // Ocarina of Time: native task/mesh draws end the process without a signal ~2 s after
+            // its opening movie (the first scene's first mesh draws) on the pinned RADV; the
+            // compute fallback draws the same geometry and the game plays on. Measured with
+            // autoboot.txt + a replayed controller: native died in 5 of 5 runs, the fallback and
+            // EDEN_NX2_NO_MESH ran on. EDEN_NX2_FORCE_MESH_FALLBACK=0 in env.txt keeps native.
+            {
+                static bool fallback_ours = false;
+                static const bool native_asked = [] {
+                    const char* value = std::getenv("EDEN_NX2_FORCE_MESH_FALLBACK");
+                    return value && value[0] == '0';
+                }();
+                const char* forced = std::getenv("EDEN_NX2_FORCE_MESH_FALLBACK");
+                if (native_asked) {
+                    unsetenv("EDEN_NX2_FORCE_MESH_FALLBACK");
+                } else if (eden_game_title_id(guest) == 0x0400486024DEC000ULL && !forced) {
+                    setenv("EDEN_NX2_FORCE_MESH_FALLBACK", "1", 1);
+                    fallback_ours = true;
+                    Eden::Report("launch", "Ocarina of Time: task/mesh draws take the compute fallback");
+                }
+                // Its first area runs the 12 GiB pool out: 4 arenas a thread (the heap's cap reads
+                // the switch until it is set) played 131 s past the first scene against 16-30 s.
+                // Its guest memory packs from the start, with a 512 MiB writers' reserve: 117 s past
+                // the first scene against 45 s packing only below 3 GiB free (e99ccb8).
+                if (eden_game_title_id(guest) == 0x0400486024DEC000ULL) {
+                    setenv("EDEN_HEAP_THREAD_ARENAS_MAX", "4", 0);
+                    // Device memory arrives with whatever the pool held. OoT's water ripple
+                    // simulation (compute fb4203a7d928ed42 / e2ce39e630ce65f3, 256x256 ping-pong)
+                    // never clears its textures and kept NaN forever; the scene took it into 54% of
+                    // its pixels (blue, blinking trees). RADV's zerovram: a frame dump at 225 s had
+                    // no NaN in the scene, against 1.1 million pixels without it.
+                    if (!std::getenv("RADV_DEBUG")) setenv("RADV_DEBUG", "zerovram", 1);
+                    // Packing is on, GPU-mapped slots included. What ended OoT with packing on was
+                    // the driver's memory trim built from a doubly patched tree (each destroyed
+                    // image counted out twice, live textures' memory given back: white scenes, GPU
+                    // Protection faults at 0x40_xxxxxxxx; tools/build-radv-dependencies.sh now always
+                    // patches a clean export). With the trim right, the forest draws correctly with
+                    // the guest at 3.4 GB against 5.7 GB unpacked.
+                    setenv("EDEN_CRAM_KEEP_GPU_MAPPED", "0", 0);
+                    setenv("EDEN_CRAM_RESERVE_MIB", "128", 0);
+                    setenv("EDEN_CRAM_UNPACK_KEEP_MIB", "64", 0);
+                    // Texture cache 1.5/2 GiB (2/2.5 before): in a 25-minute roam no allocation failed and
+                    // the frame rate was the same (33.5 FPS mean, 1 of 82 600-frame blocks under 30).
+                    setenv("EDEN_NX2_TC_EXPECTED_MIB", "1536", 0);
+                    setenv("EDEN_NX2_TC_CRITICAL_MIB", "2048", 0);
+                    setenv("EDEN_CRAM_PACK_BELOW_MIB", "12288", 0); // pack from the start
+                    // The driver gives a granule back once nothing has been bound to it for this long.
+                    // With 2 s, 20 minutes into a session with 14 to 86 MiB free and memory asked back
+                    // several times a second, the GPU wrote to one just given back (kernel: GPU
+                    // Protection fault, unmapped page access in the driver's range, Write).
+                    setenv("RADV_PS5_TRIM_QUARANTINE_MS", "10000", 0);
+                    // The swap store's keeper writes slots left cold once the pool has been short for 3 s, so a
+                    // failed allocation rarely has to wait for writes: this game does not write them again.
+                    // In 25-minute roams the frames of 0.5 to 1.2 s that came with each burst of writes
+                    // after a failed allocation went (33.6 FPS mean, 1.3 GiB written).
+                    setenv("EDEN_SWAP_KEEPER", "1", 0);
+                    // The six guest cores share one L3 cluster, the other threads use the second one
+                    // (performance.cpp, EDEN_PS5_ONE_CLUSTER): standing 6% faster.
+                    setenv("EDEN_PS5_ONE_CLUSTER", "1", 0);
+                    // Draws wait for a pipeline still building instead of being skipped (vk_pipeline_cache.cpp,
+                    // EDEN_NX2_ASYNC_DRAWS_WAIT): with no pipeline cache yet, a skipped draw left the GPU on a
+                    // submission that never completed as gameplay started (6 of 6 on a tester's console, and
+                    // here with the caches moved away); waiting costs one stall of about 16 s while the first
+                    // scene's pipelines build, and nothing once they are in the cache.
+                    setenv("EDEN_NX2_ASYNC_DRAWS_WAIT", "w", 0);
+                    // The keeper aims for 1 GiB free in 2 MiB pieces, not 512 MiB: with 512, 1 GiB of idle guest
+                    // memory stayed in place while late in a session allocations failed and waited for writes
+                    // (frames of 1.7 s); with 1024 a 25-minute roam had no failed allocation, worst frame 236 ms.
+                    setenv("EDEN_CRAM_KEEP_FREE_MIB", "1024", 0);
+                } else if (fallback_ours && eden_game_title_id(guest) != 0x0400486024DEC000ULL) {
+                    unsetenv("EDEN_NX2_FORCE_MESH_FALLBACK");
+                    fallback_ours = false;
+                }
+            }
             const auto speed = Eden::LoadPerformance(eden_game_title_id(guest));
             Settings::values.use_asynchronous_shaders = speed.async_shaders;
+            // EDEN_ASYNC_SHADERS=0/1 (env.txt) overrides the Performance switch for a run.
+            if (const char* value = std::getenv("EDEN_ASYNC_SHADERS"))
+                Settings::values.use_asynchronous_shaders = value[0] == '1';
             if (speed.fast_gpu) {
                 // Nothing calls UpdateGPUAccuracy() here; set the live value too.
                 Settings::values.gpu_accuracy.SetValue(Settings::GpuAccuracy::Low);
@@ -1320,6 +1450,14 @@ int main(int argc, char** argv) {
             const auto cheats_on = Eden::LoadChosenCheats(title);
             Eden::Cheats::Off() = Eden::Mods::CheatsOff(all_mods, cheats_on);
             const std::string mods = Eden::Mods::Summary(all_mods, mods_off, cheats_on);
+            // Ocarina of Time's built-in patches now apply without a mod folder (patch_manager.cpp).
+            // Dynamic FPS / FPS Unlock keep the game at real speed under 30 FPS. Max Resolution
+            // (full-scale 3D instead of the game's dynamic resolution) and Texture Pool x2 cost
+            // GPU time and memory a 12 GiB pool does not have: off unless EDEN_OOT_MAX_RESOLUTION=1.
+            if (title == 0x0400486024DEC000ULL && !std::getenv("EDEN_OOT_MAX_RESOLUTION")) {
+                mods_off.emplace_back("Max Resolution (built-in)");
+                mods_off.emplace_back("Texture Pool x2 (built-in)");
+            }
             Settings::values.disabled_addons[title] = mods_off;
             Eden::Report("launch", ("Mods: " + mods).c_str());
             Eden::Crash::SetSession("game " + std::filesystem::path(guest).filename().string() + " (" + title_id +
@@ -1724,6 +1862,9 @@ int main(int argc, char** argv) {
                 [[maybe_unused]] std::string fastmem64_sites;  // the title's demoted 64-bit fastmem sites (cache/jit)
                 [[maybe_unused]] u64 fastmem64_code_start = 0, fastmem64_code_size = 0;
                 [[maybe_unused]] unsigned char fastmem64_build[32]{};
+                // Saves the demoted sites every minute while new ones appear, so a session that ends
+                // without the menu (a crash, the console turned off) still gives the next one a warm window.
+                [[maybe_unused]] std::jthread fastmem64_saver;
                 if (auto* process = system.ApplicationProcess()) {
                     Eden::JitList::BuildId build{};
                     const auto& id = system.GetApplicationProcessBuildID();
@@ -1754,6 +1895,19 @@ int main(int argc, char** argv) {
                         std::memcpy(fastmem64_build, build.data(), std::min(sizeof(fastmem64_build), build.size()));
                         std::printf("EDEN_FASTMEM64 sites_loaded=%zu\n",
                                     eden_fastmem64_load_sites(fastmem64_sites.c_str(), fastmem64_code_start, fastmem64_build));
+                        if (eden_fastmem64_save_sites)
+                            fastmem64_saver = std::jthread([&](std::stop_token stop) {
+                                unsigned long long saved = eden_fastmem_demotion_count ? eden_fastmem_demotion_count() : 0;
+                                while (!stop.stop_requested()) {
+                                    for (int second = 0; second < 60 && !stop.stop_requested(); ++second)
+                                        std::this_thread::sleep_for(std::chrono::seconds{1});
+                                    const unsigned long long now = eden_fastmem_demotion_count ? eden_fastmem_demotion_count() : 0;
+                                    if (stop.stop_requested() || now == saved) continue;
+                                    saved = now;
+                                    eden_fastmem64_save_sites(fastmem64_sites.c_str(), fastmem64_code_start,
+                                                              fastmem64_code_size, fastmem64_build);
+                                }
+                            });
                     }
 #endif
                 }
@@ -2159,6 +2313,10 @@ int main(int argc, char** argv) {
                 Eden::StopLimit::Begin();
                 jit_list.Finish();  // while the JITs still exist: their block list is saved
 #ifdef PS5_NATIVE
+                if (fastmem64_saver.joinable()) {
+                    fastmem64_saver.request_stop();
+                    fastmem64_saver.join();
+                }
                 if (!fastmem64_sites.empty() && eden_fastmem64_save_sites)
                     std::printf("EDEN_FASTMEM64 sites_saved=%zu\n",
                                 eden_fastmem64_save_sites(fastmem64_sites.c_str(), fastmem64_code_start,

@@ -758,6 +758,10 @@ msgstr "프레임 생성 방식"
 msgid "Skip game anti-aliasing"
 msgstr "게임 안티에일리어싱 건너뛰기"
 
+#: pe/ui/settings.cpp
+msgid "AMD FSR 3.1"
+msgstr "AMD FSR 3.1"
+
 #: pe/ui/game_options.cpp, pe/ui/settings.cpp
 msgid "Frame generation"
 msgstr "프레임 생성"

@@ -145,6 +145,13 @@ int main() {
     assert(video.resolution == 1 && video.upscaling_filter == 1 && video.volume == 40);
     assert(Read(file).find("\"resolution\": \"0.75x\"") != std::string::npos);
     assert(Read(file).find("\"upscaling_filter\": \"fsr\"") != std::string::npos);
+    // AMD FSR 3.1 (Settings > Video) is on by default and is saved when turned off.
+    assert(video.amd_fsr31);
+    video.amd_fsr31 = false;
+    assert(Eden::SavePreferences(video, file) && !Eden::LoadPreferences(file).amd_fsr31);
+    assert(Read(file).find("\"amd_fsr31\": false") != std::string::npos);
+    video.amd_fsr31 = true;
+    assert(Eden::SavePreferences(video, file) && Eden::LoadPreferences(file).amd_fsr31);
     // The largest scale is 4x; nothing beyond the list is saved.
     video.resolution = 6;
     assert(Eden::SavePreferences(video, file) && Eden::LoadPreferences(file).resolution == 6);
@@ -408,6 +415,7 @@ int main() {
     speed = Eden::LoadPerformance(quest, file);  // another title keeps the general values
     assert(speed.block_list && speed.async_shaders && !speed.fast_gpu && !speed.unsafe_cpu && !speed.unsafe_dma);
     assert(Eden::LoadPerformance(0, file).async_shaders);
+    assert(Eden::LoadPerformance(0x0400486024DEC000ULL, file).unsafe_cpu);  // Ocarina's own default
     assert(Eden::LoadGameSettings(racer, file).resolution == 4);  // the title's other settings stay
     // A file written by hand: a title names one value, the rest are the general ones; a value of
     // the wrong type reads as if it were absent.

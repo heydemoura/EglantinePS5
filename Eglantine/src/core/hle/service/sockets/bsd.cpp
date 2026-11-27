@@ -366,10 +366,14 @@ public:
         : kernel{system.Kernel()}, deferral_event{deferral_event_} {
         if (const Network::Errno host_errno = OpenSignalSocket(wake_socket);
             host_errno != Network::Errno::SUCCESS) {
-            LOG_ERROR(Service, "Failed to open the wake socket of Select, which cannot wait: {}",
-                      static_cast<int>(host_errno));
-            stopped = true;
-            return;
+            // The PS5 denies the loopback socket. Without it, waits on emulated sockets and
+            // eventfds alone block on a condition variable that Wake notifies, and host polls end
+            // every PollCapMs to look again. Stopping instead made every select and poll return at
+            // once: Ocarina of Time's network thread called them ~7,500 times a second.
+            LOG_WARNING(Service, "No wake socket for Select ({}): waits without host sockets use a "
+                                 "condition variable, host polls end every {} ms",
+                        static_cast<int>(host_errno), PollCapMs);
+            has_wake_socket = false;
         }
         thread = kernel.RunOnHostCoreThread("bsdsocket:select", [this] { Run(); });
     }
@@ -474,6 +478,11 @@ private:
 
     /// Ends the host poll in progress, if any. The caller holds mutex.
     void Wake() {
+        if (!has_wake_socket) {
+            wake_requested = true;
+            wake_cv.notify_all();
+            return;
+        }
         if (!polling || wake_pending) {
             return;
         }
@@ -571,17 +580,34 @@ private:
                 return;
             }
 
-            pollfds.push_back(Network::PollFD{
-                .socket = &wake_socket,
-                .events = Network::PollEvents::In,
-                .revents = Network::PollEvents{},
-            });
+            if (!has_wake_socket && pollfds.empty()) {
+                // Nothing for the host to poll: wait for Wake, the earliest deadline or a recheck.
+                polling = true;
+                const auto until = (std::min)(wake_at, SelectClock::now() + std::chrono::milliseconds{50});
+                wake_cv.wait_until(lock, until, [this] { return wake_requested || stopped; });
+                wake_requested = false;
+                polling = false;
+                ++poll_epoch;
+                poll_done.notify_all();
+                continue;
+            }
+            if (has_wake_socket) {
+                pollfds.push_back(Network::PollFD{
+                    .socket = &wake_socket,
+                    .events = Network::PollEvents::In,
+                    .revents = Network::PollEvents{},
+                });
+            }
             s32 timeout = -1;
             if (wake_at != SelectClock::time_point::max()) {
                 const auto remaining =
                     std::chrono::ceil<std::chrono::milliseconds>(wake_at - now).count();
                 timeout = static_cast<s32>(std::clamp<std::chrono::milliseconds::rep>(
                     remaining, 0, (std::numeric_limits<s32>::max)()));
+            }
+            if (!has_wake_socket) {
+                timeout = timeout < 0 ? PollCapMs : (std::min)(timeout, PollCapMs);
+                wake_requested = false;
             }
             polling = true;
             lock.unlock();
@@ -594,8 +620,9 @@ private:
             polled_sockets.clear();
             poll_done.notify_all();
 
-            const Network::PollEvents wake_revents = pollfds.back().revents;
-            if (True(wake_revents & Network::PollEvents::In)) {
+            const Network::PollEvents wake_revents =
+                has_wake_socket ? pollfds.back().revents : Network::PollEvents{};
+            if (has_wake_socket && True(wake_revents & Network::PollEvents::In)) {
                 std::array<u8, 16> sink;
                 while (wake_socket.Recv(0, sink).first > 0) {
                 }
@@ -639,6 +666,11 @@ private:
     Kernel::KEvent* const deferral_event;
     /// A loopback socket in every host poll, which a datagram to itself wakes.
     Network::Socket wake_socket;
+    /// Without it (the PS5): how long a host poll lasts at most, and what Wake notifies.
+    static constexpr s32 PollCapMs = 2;
+    bool has_wake_socket = true;
+    bool wake_requested = false;
+    std::condition_variable wake_cv;
 
     std::mutex mutex;
     /// Notified when a host poll ends.

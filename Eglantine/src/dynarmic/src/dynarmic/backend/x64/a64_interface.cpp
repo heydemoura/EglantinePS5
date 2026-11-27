@@ -288,7 +288,9 @@ extern "C" __attribute__((weak)) void mkw_native_block(unsigned long long, const
 // The Impl running guest code on this thread, for the fastmem fault callback
 // (headless/dynarmic/fastmem-callback.cmake). A function pointer, as the callback cannot name Impl.
 static thread_local void* eden_running_impl = nullptr;
-static bool (*eden_invalidate_running_hook)(u64) = nullptr;
+static bool (*eden_invalidate_running_hook)(u64, u64) = nullptr;
+// Range invalidations that found no block (a demoted site whose block was not where its PC is).
+static std::atomic<unsigned long long> eden_empty_invalidations{0};
 struct Jit::Impl final {
 public:
     // A fastmem site demoted on this thread: its block is invalidated like a code change, at this
@@ -296,12 +298,13 @@ public:
     // The guest code did not change, so the other cores are not halted for it: they drop the block
     // at their next Run boundary, and one still inside it faults again and takes the fallback.
     // Halting every core for each of a first session's demotions made it slower than no window.
-    static bool EdenInvalidateRunning(u64 pc) {
+    static bool EdenInvalidateRunning(u64 pc, u64 location) {
         auto* const impl = static_cast<Impl*>(eden_running_impl);
         if (!impl) return false;
         {
             std::unique_lock lock{impl->invalidation_mutex};
             impl->invalid_cache_ranges.add(boost::icl::discrete_interval<u64>::closed(pc, pc + 3));
+            impl->eden_demoted_locations.push_back(location);
             impl->eden_quiet_invalidation = true;
         }
         impl->HaltExecution(HaltReason::CacheInvalidation);
@@ -684,8 +687,10 @@ private:
             bool entire = false;
             bool quiet = false;
             boost::icl::interval_set<u64> ranges;
+            std::vector<u64> demoted;
             {
                 std::unique_lock lock{invalidation_mutex};
+                demoted.swap(eden_demoted_locations);
                 ClearHalt(HaltReason::CacheInvalidation);
                 entire = invalidate_entire_cache;
                 quiet = eden_quiet_invalidation;
@@ -695,12 +700,17 @@ private:
             }
             if (entire) {
                 EdenClearGroup();
-            } else if (!ranges.empty()) {
+            } else if (!ranges.empty() || !demoted.empty()) {
                 std::vector<u64> invalidated;
                 std::vector<Impl*> members;
                 {
                     std::lock_guard lock{group->mutex};
                     invalidated = group->Invalidate(ranges);
+                    for (const u64 location : demoted)
+                        for (const u64 gone : group->InvalidateLocation(IR::LocationDescriptor{location}))
+                            invalidated.push_back(gone);
+                    if (invalidated.empty())
+                        eden_empty_invalidations.fetch_add(1, std::memory_order_relaxed);
                     if (!invalidated.empty())
                         for (void* member : group->members)
                             members.push_back(static_cast<Impl*>(member));
@@ -745,9 +755,9 @@ private:
         EdenCount(conf.processor_id, all ? EdenFlushAll : EdenFlushLocations, all ? 1 : locations.size());
         if (all) {
             emitter.ClearFastDispatchTable();
-        } else if (emitter.fast_dispatch_table_lookup) {
+        } else {
             for (const u64 location : locations)
-                (*emitter.fast_dispatch_table_lookup)(location) = {};
+                emitter.ClearFastDispatchEntry(location);
         }
     }
 
@@ -873,6 +883,7 @@ private:
     boost::icl::interval_set<u64> invalid_cache_ranges;
     // Only fastmem demotions are pending (EdenInvalidateRunning): the other members are not halted.
     bool eden_quiet_invalidation = false;
+    std::vector<u64> eden_demoted_locations;  // blocks of demoted fastmem sites, under invalidation_mutex
     std::mutex invalidation_mutex;
     std::shared_ptr<JitGroup> group;
     std::atomic<u32> eden_state{EdenOutside};
@@ -887,8 +898,12 @@ private:
 };
 
 
-extern "C" bool eden_jit_invalidate_running(unsigned long long pc) {
-    return eden_invalidate_running_hook && eden_invalidate_running_hook(pc);
+extern "C" unsigned long long eden_jit_empty_invalidations() {
+    return eden_empty_invalidations.load(std::memory_order_relaxed);
+}
+
+extern "C" bool eden_jit_invalidate_running(unsigned long long pc, unsigned long long location) {
+    return eden_invalidate_running_hook && eden_invalidate_running_hook(pc, location);
 }
 
 Jit::Jit(UserConfig conf)

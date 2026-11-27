@@ -159,6 +159,30 @@ public:
         return key.state.extended_dynamic_state != 0;
     }
 
+    /// (EglantinePS5) Whether a draw with this pipeline writes memory besides its render targets:
+    /// a stage stores to global memory, storage buffers or images, or transform feedback is on.
+    /// Later GPU work may read what such a draw writes, so it is never skipped while building.
+    [[nodiscard]] bool WritesMemory() const noexcept {
+        if (key.state.xfb_enabled != 0) {
+            return true;
+        }
+        for (const Shader::Info& info : stage_infos) {
+            if (info.stores_global_memory) {
+                return true;
+            }
+            for (const auto& desc : info.storage_buffers_descriptors) {
+                if (desc.is_written) return true;
+            }
+            for (const auto& desc : info.image_buffer_descriptors) {
+                if (desc.is_written) return true;
+            }
+            for (const auto& desc : info.image_descriptors) {
+                if (desc.is_written) return true;
+            }
+        }
+        return false;
+    }
+
     /// Switch 2 task/mesh pipeline: drawn with vkCmdDrawMeshTasksEXT.
     [[nodiscard]] bool IsMeshPipeline() const noexcept {
         return stage_infos[0].is_task || stage_infos[0].is_mesh;

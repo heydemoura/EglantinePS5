@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2020 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include <bit>
 
 #include "common/assert.h"
@@ -17,6 +18,7 @@
 #include "core/hle/kernel/k_interrupt_manager.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/k_scheduler.h"
+#include "core/hle/kernel/sched_trace.h"
 #include "core/hle/kernel/k_scoped_scheduler_lock_and_sleep.h"
 #include "core/hle/kernel/k_thread.h"
 #include "core/hle/kernel/kernel.h"
@@ -355,7 +357,8 @@ void KScheduler::SwitchThread(KernelCore& kernel, KThread* next_thread) {
         cur_process->AddCpuTime(tick_diff);
     }
     m_last_context_switch_time = cur_tick;
-    if (Nx2ThreadStats::g_enabled) {
+    SchedTrace::Add(1, u8(m_core_id), u32(cur_thread->GetThreadId()), u32(next_thread->GetThreadId()));
+    if (Nx2ThreadStats::g_enabled()) {
         Nx2ThreadStats::OnSwitch(cur_thread, next_thread, cur_tick, tick_diff);
     }
 
@@ -533,7 +536,13 @@ void KScheduler::OnThreadStateChanged(KernelCore& kernel, KThread* thread, Threa
     ASSERT(IsSchedulerLockedByCurrentThread(kernel));
     // Check if the state has changed, because if it hasn't there's nothing to do.
     if (const ThreadState cur_state = thread->GetRawState(); cur_state != old_state) {
-        if (Nx2ThreadStats::g_enabled) {
+        if (SchedTrace::Enabled() && (old_state & ThreadState::Mask) == ThreadState::Waiting &&
+            cur_state == ThreadState::Runnable) {
+            const KThread* const waker = GetCurrentThreadPointer(kernel);
+            SchedTrace::Add(2, u8(kernel.CurrentPhysicalCoreIndex()), waker ? u32(waker->GetThreadId()) : 0,
+                            u32(thread->GetThreadId()));
+        }
+        if (Nx2ThreadStats::g_enabled()) {
             Nx2ThreadStats::OnStateChanged(
                 thread, kernel.System().CoreTiming().GetClockTicks(),
                 (old_state & ThreadState::Mask) == ThreadState::Waiting,

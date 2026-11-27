@@ -23,6 +23,7 @@
 #include <cstdlib>
 #include <fmt/ranges.h>
 #include "common/assert.h"
+#include "core/arm/debug.h"
 #include "common/logging.h"
 #include "common/settings.h"
 #include "core/core.h"
@@ -269,7 +270,32 @@ void CountRequest(const std::string& service, u32 command, u32 type, u32 result)
 
 Result ServiceFrameworkBase::HandleSyncRequest(Kernel::KServerSession& session,
                                                HLERequestContext& ctx) {
+    // EDEN_NX2_IPC_SLOW_MS=<n>: one line for every request that took n ms or more, with how
+    // much of it was the wait for the service's lock.
+    static const long long slow_ms = [] {
+        const char* text = std::getenv("EDEN_NX2_IPC_SLOW_MS");
+        return text != nullptr ? std::strtoll(text, nullptr, 10) : 0LL;
+    }();
+    const auto slow_start = slow_ms > 0 ? std::chrono::steady_clock::now()
+                                        : std::chrono::steady_clock::time_point{};
     const auto guard = LockService();
+    const auto slow_locked = slow_ms > 0 ? std::chrono::steady_clock::now()
+                                         : std::chrono::steady_clock::time_point{};
+    SCOPE_EXIT {
+        if (slow_ms <= 0) {
+            return;
+        }
+        const auto ms = [](auto duration) {
+            return std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+        };
+        const auto now = std::chrono::steady_clock::now();
+        if (ms(now - slow_start) >= slow_ms) {
+            LOG_INFO(Service, "slow request {} command {} by thread {} '{}': {} ms, {} of it for the lock",
+                     service_name, ctx.GetCommand(), ctx.GetThread().GetThreadId(),
+                     Core::GetThreadName(&ctx.GetThread()).value_or(""), ms(now - slow_start),
+                     ms(slow_locked - slow_start));
+        }
+    };
     SCOPE_EXIT {
         const auto* cmd_buf = ctx.CommandBuffer();
         u32 result_word = 0;

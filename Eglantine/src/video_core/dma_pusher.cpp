@@ -2,6 +2,8 @@
 #else // PS5
 #include <chrono>
 #include <atomic>
+#include <exception>
+#include <pthread.h>
 #include "headless/performance.h"
 #endif // PS5
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
@@ -203,12 +205,37 @@ public:
     }
 
 private:
+#if defined(__PROSPERO__)
+    // The PS5's default thread stack is small, and the copier's guest reads can fault into the
+    // memory and crash handlers, which run on it (no sigaltstack here). Ocarina of Time died
+    // without a signal right as this thread first started, after its opening movie. 1 MiB like
+    // the GPU worker (gpu_thread.cpp).
+    SnapshotCopier() {
+        pthread_attr_t attributes;
+        if (pthread_attr_init(&attributes) || pthread_attr_setstacksize(&attributes, 1024 * 1024) ||
+            pthread_create(&native, &attributes, [](void* self) -> void* {
+                auto* copier = static_cast<SnapshotCopier*>(self);
+                copier->Loop(copier->stop.get_token());
+                return nullptr;
+            }, this)) {
+            std::terminate();
+        }
+        pthread_attr_destroy(&attributes);
+    }
+    ~SnapshotCopier() {
+        stop.request_stop();
+        wake.fetch_add(1, std::memory_order_seq_cst);
+        wake.notify_one();
+        pthread_join(native, nullptr);
+    }
+#else
     SnapshotCopier() : thread{[this](std::stop_token token) { Loop(token); }} {}
     ~SnapshotCopier() {
         thread.request_stop();
         wake.fetch_add(1, std::memory_order_seq_cst);
         wake.notify_one();
     }
+#endif
 
     void Loop(std::stop_token token) {
         Common::SetCurrentThreadName("GPUSnapshot");
@@ -259,7 +286,12 @@ private:
     alignas(64) std::atomic<u64> completed{};
     std::atomic<bool> sleeping{};
     std::atomic<u32> wake{};
+#if defined(__PROSPERO__)
+    std::stop_source stop;
+    pthread_t native{}; ///< started in the constructor's body, once every member exists
+#else
     std::jthread thread; ///< Last: it starts once the rest is constructed
+#endif
 };
 
 /// Waits for the snapshot copier's job on `list`, if any: the list's words are needed now, or

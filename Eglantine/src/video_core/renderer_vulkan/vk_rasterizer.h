@@ -338,6 +338,7 @@ private:
     std::unique_ptr<class OcarinaUpscaler> oot_live_dlss;
     bool oot_live_failed{};
     const char* oot_fallback_reason{};
+    bool oot_scaled_scene_logged{}; ///< FSR 3.1 from a scene below 1x was logged once
     u32 oot_fallback_repeats{};
     std::optional<u64> oot_dlss_frame;
     std::array<f32, 2> oot_jitter_applied{}; ///< in the viewport state now (render pixels)

@@ -36,18 +36,26 @@ inline constexpr std::string_view kRecordFile = "gameplay-record.txt";
 inline constexpr std::string_view kReplayFile = "gameplay-replay.txt";
 inline constexpr std::string_view kSessionFile = "gameplay-test.txt";
 
+// The files live in /data/eglantineps5 when a record or replay marker is there (it can be written
+// over FTP, unlike /app0), else in the app's folder.
+inline std::string GameplayFile(std::string_view name) {
+    const auto data = [](std::string_view file) { return std::string{kDataDir} + "/" + std::string{file}; };
+    static const bool in_data = FileExists(data(kReplayFile)) || FileExists(data(kRecordFile));
+    return in_data ? data(name) : AppFile(name);
+}
+
 enum class Mode : std::uint8_t { off, record, replay };
 
 // Chosen once, from the files present when the pad first asks. The banner is that first ask.
 inline Mode ModeOf() {
     static const Mode mode = [] {
-        const Mode found = FileExists(AppFile(kReplayFile))   ? Mode::replay
-                         : FileExists(AppFile(kRecordFile))   ? Mode::record
+        const Mode found = FileExists(GameplayFile(kReplayFile))   ? Mode::replay
+                         : FileExists(GameplayFile(kRecordFile))   ? Mode::record
                                                               : Mode::off;
         if (found != Mode::off)
             std::printf("EDEN_GAMEPLAY_TEST mode=%s file=%s\n",
                         found == Mode::replay ? "replay" : "record",
-                        AppFile(kSessionFile).c_str());
+                        GameplayFile(kSessionFile).c_str());
         return found;
     }();
     return mode;
@@ -89,7 +97,7 @@ inline void Record(const ps5::pad::Data& sample) {
     if (have_last && state == last) return;
     if (!opened) {
         opened = true;
-        session.open(AppFile(kSessionFile), std::ios::trunc);
+        session.open(GameplayFile(kSessionFile), std::ios::trunc);
         if (session) session << "# EDEN_GAMEPLAY_TEST v1 <frame> <buttons> <lx> <ly> <rx> <ry> <l2> <r2> <connected>\n";
     }
     if (!session) return;
@@ -115,10 +123,10 @@ struct Replay {
     bool Pull() {
         if (!opened) {
             opened = true;
-            in.open(AppFile(kSessionFile));
+            in.open(GameplayFile(kSessionFile));
             if (!in) {
                 ended = true;
-                std::printf("EDEN_GAMEPLAY_TEST missing file=%s\n", AppFile(kSessionFile).c_str());
+                std::printf("EDEN_GAMEPLAY_TEST missing file=%s\n", GameplayFile(kSessionFile).c_str());
             }
         }
         if (ended) return false;

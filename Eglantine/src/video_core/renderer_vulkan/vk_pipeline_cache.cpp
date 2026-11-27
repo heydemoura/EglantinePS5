@@ -652,9 +652,17 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
         .max_subgroup_size = device.GetMaxSubgroupSize(),
         .has_broken_robust =
             device.IsNvidia() && device.GetNvidiaArch() <= NvidiaArchitecture::Arch_Pascal,
+        // Mesa MR 45092 ("radv: Clear stale vertex user SGPR state when binding mesh shaders"),
+        // in 26.2.5. The workaround costs one SGPR read, so it applies to every older RADV.
+        .has_broken_mesh_user_sgprs = driver_id == VK_DRIVER_ID_MESA_RADV &&
+                                      device.GetDriverVersion() < VK_MAKE_VERSION(26, 2, 5),
         .min_ssbo_alignment = device.GetStorageBufferAlignment(),
         .max_user_clip_distances = device.GetMaxUserClipDistances()
     };
+    if (profile.has_broken_mesh_user_sgprs) {
+        LOG_INFO(Render_Vulkan, "RADV before 26.2.5: native mesh shaders read the grid size to "
+                                "avoid the stale mesh user SGPR hang");
+    }
     profile.support_cooperative_hmma =
         device.IsCooperativeHmmaSupported() && TestCooperativeHmma(device);
     profile.support_cooperative_hmma_16x16x16 =
@@ -2306,6 +2314,15 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) noexc
     if (!use_asynchronous_shaders) {
         return pipeline;
     }
+    // (EglantinePS5) EDEN_NX2_ASYNC_DRAWS_WAIT: 1, every draw waits for its pipeline (which the
+    // workers still build in parallel); w, only draws that write memory besides their render
+    // targets wait (GraphicsPipeline::WritesMemory), the others are skipped while they build.
+    // Read at each unbuilt pipeline: a title sets it once it is known, after the launcher's own.
+    if (const char* const wait = std::getenv("EDEN_NX2_ASYNC_DRAWS_WAIT")) {
+        if (wait[0] == '1' || (wait[0] == 'w' && pipeline->WritesMemory())) {
+            return pipeline;
+        }
+    }
     const auto& draw_state = maxwell3d->draw_manager.draw_state;
     const bool native = maxwell3d->GetNativeMacroEngine().native_turing;
     const NativePendingMode mode = native ? NativeMode() : NativePendingMode::Wait;
@@ -2885,7 +2902,7 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
         }
         env.Dump(hash, key.unique_hashes[index]);
     }
-    LOG_ERROR(Render_Vulkan, "{}", exception.what());
+    LOG_ERROR(Render_Vulkan, "Graphics pipeline {:016x}: {}", hash, exception.what());
     return nullptr;
 }
 

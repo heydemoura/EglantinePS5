@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <atomic>
 #include "performance.h"
 #include "image_pages.h"
 #include "dev_vulkan.h"
@@ -395,6 +396,11 @@ const RasterizerVulkan::MeshArena& RasterizerVulkan::AcquireMeshArena() {
     std::erase_if(mesh_arenas, [&](const MeshArena& arena) {
         return arena.counted && arena.size < mesh_arena_size;
     });
+    // An arena is made for every submission still pending, and the list never shrank: a burst of
+    // submissions left 11 arenas (700 MiB of device memory) behind in Ocarina of Time's forest on
+    // a 12 GiB pool. Two idle ones are kept; the GPU is done with the rest.
+    size_t idle_arenas{};
+    std::erase_if(mesh_arenas, [&](const MeshArena& arena) { return arena.counted && ++idle_arenas > 2; });
     auto it{std::ranges::find_if(mesh_arenas, [](const MeshArena& arena) { return arena.counted; })};
     if (it == mesh_arenas.end()) {
         const auto make_buffer = [&](u64 size, VkBufferUsageFlags usage, MemoryUsage memory) {
@@ -1384,6 +1390,23 @@ void TraceWindowTarget(const Tegra::Engines::Maxwell3D& maxwell3d, Tegra::Memory
 } // Anonymous namespace
 
 void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
+    // An indexed draw past the 128 MiB index binding (BufferCache::UpdateIndexBuffer) is dropped: its
+    // count register holds no real draw (Mario Kart World's race load: 559 million indices), and run
+    // on the GPU it kept the queue busy past the driver's 10 s limit and the device was lost.
+    if (is_indexed) {
+        const auto& index_buffer = maxwell3d->draw_manager.draw_state.index_buffer;
+        const u64 bytes = (u64{index_buffer.count} + u64{index_buffer.first}) *
+                          u64{index_buffer.FormatSizeInBytes()};
+        if (bytes > (u64{128} << 20)) {
+            static std::atomic<unsigned> dropped{0};
+            if (dropped.fetch_add(1, std::memory_order_relaxed) < 16) {
+                LOG_WARNING(Render_Vulkan,
+                            "Indexed draw of {} indices (first {}) dropped: past the index binding",
+                            index_buffer.count, index_buffer.first);
+            }
+            return;
+        }
+    }
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Draw};
     {
         // A draw's first and count can come from memory a skipped (rejected) compute program
@@ -3400,7 +3423,7 @@ void RasterizerVulkan::UpdateOcarinaJitter() {
         if (targets.depth_buffer_id) {
             const auto& depth = texture_cache.GetImageView(targets.depth_buffer_id);
             if (depth.size.width == oot_motion.extent.width &&
-                depth.size.height == oot_motion.extent.height && !depth.IsRescaled()) {
+                depth.size.height == oot_motion.extent.height) {
                 // Halton (2, 3) with AMD's phase count for the last FSR frame's scale.
                 const u32 index = static_cast<u32>(render_trace_frame % oot_jitter_phases) + 1;
                 want = {Halton(index, 2) - 0.5f, Halton(index, 3) - 0.5f};
@@ -3523,7 +3546,7 @@ bool RasterizerVulkan::TryOcarinaUpscale(const ComputePipeline& pipeline, bool r
     const bool native_resolution =
         oot_backend == VideoCommon::OcarinaUpscaleBackend::Dlss &&
         Settings::GetNvidiaDlssRuntimeSettings().quality == Settings::NvidiaDlssQuality::Native;
-    const bool upscale_4k = pass_1440p && !native_resolution;
+    bool upscale_4k = pass_1440p && !native_resolution;
     const auto read_tic = [this](u32 index) -> std::optional<Tegra::Texture::TICEntry> {
         const auto& table = kepler_compute->regs.tic;
         using Entry = Tegra::Texture::TICEntry;
@@ -3591,7 +3614,14 @@ bool RasterizerVulkan::TryOcarinaUpscale(const ComputePipeline& pipeline, bool r
     }
     auto& depth = texture_cache.GetImageView(images[0].id);
     const auto* backing = depth.BackingImage();
-    if (!backing || depth.IsRescaled() || depth.format != VideoCore::Surface::PixelFormat::D32_FLOAT ||
+    // Settings > Video > Resolution below 1x draws the scene smaller (Eden's rescaler): FSR 3.1 then
+    // reconstructs from the scaled scene. The game lights it in a compute pass that Eden keeps at
+    // full size, so the colour may be unscaled: the colour pass takes it at the scene's pixels.
+    const bool scene_scaled = depth.IsRescaled();
+    if (scene_scaled) {
+        upscale_4k = false; // the 4K composite takes the full-size 1440p scene
+    }
+    if (!backing || depth.format != VideoCore::Surface::PixelFormat::D32_FLOAT ||
         depth.range != VideoCommon::SubresourceRange{} || backing->info.num_samples != 1) {
         return fail("unsupported scene depth");
     }
@@ -3613,12 +3643,22 @@ bool RasterizerVulkan::TryOcarinaUpscale(const ComputePipeline& pipeline, bool r
                       : target.size.width == extent.width * 4 / 3 &&
                             target.size.height == extent.height * 4 / 3;
     if (!valid_extents || !color.BackingImage() || !target.BackingImage() ||
-        color.IsRescaled() || target.IsRescaled() ||
+        (color.IsRescaled() && !scene_scaled) ||
         color.Samples() != VK_SAMPLE_COUNT_1_BIT || target.Samples() != VK_SAMPLE_COUNT_1_BIT ||
         color.range != VideoCommon::SubresourceRange{} || target.range != VideoCommon::SubresourceRange{} ||
         color.format != PixelFormat::E5B9G9R9_FLOAT || target.format != PixelFormat::B10G11R11_FLOAT ||
         color.size.width != extent.width || color.size.height != extent.height ||
         color.ImageHandle() == target.ImageHandle() || depth.ImageHandle() == target.ImageHandle()) {
+        static bool described = false;
+        if (!std::exchange(described, true)) {
+            LOG_INFO(Render_Vulkan,
+                     "Ocarina temporal: upscale images: scene {}x{} scaled={} color {}x{} fmt={} scaled={} "
+                     "target {}x{} fmt={} scaled={} valid_extents={} pass_1440p={} native_size={}",
+                     extent.width, extent.height, scene_scaled, color.size.width, color.size.height,
+                     static_cast<u32>(color.format), color.IsRescaled(), target.size.width,
+                     target.size.height, static_cast<u32>(target.format), target.IsRescaled(),
+                     valid_extents, pass_1440p, native_size);
+        }
         return fail("unexpected upscale images");
     }
 
@@ -3646,17 +3686,28 @@ bool RasterizerVulkan::TryOcarinaUpscale(const ComputePipeline& pipeline, bool r
                 device, scheduler, descriptor_pool, compute_pass_descriptor_queue, memory_allocator,
                 staging_pool, *oot_backend);
         }
-        const VkExtent2D target_extent{target.size.width, target.size.height};
+        // The scene and the target as the GPU holds them: scaled when Eden's rescaler scaled them.
+        const auto& scaling = Settings::values.resolution_info;
+        const VkExtent2D render_extent =
+            scene_scaled ? VkExtent2D{scaling.ScaleUp(extent.width), scaling.ScaleUp(extent.height)} : extent;
+        const VkExtent2D target_extent =
+            target.IsRescaled() ? VkExtent2D{scaling.ScaleUp(target.size.width), scaling.ScaleUp(target.size.height)}
+                                : VkExtent2D{target.size.width, target.size.height};
+        if (scene_scaled && !std::exchange(oot_scaled_scene_logged, true)) {
+            LOG_INFO(Render_Vulkan, "Ocarina FSR 3.1 from a scaled scene: {}x{} -> {}x{} (target {})",
+                     render_extent.width, render_extent.height, target_extent.width,
+                     target_extent.height, target.IsRescaled() ? "scaled" : "full size");
+        }
         // The offset this frame's scene was drawn with (none when no scene draw was offset).
         std::array<f32, 2> jitter{};
         if (oot_jitter_frame == render_trace_frame) {
             jitter = oot_jitter_offset;
         }
-        const VkExtent2D output_extent = native_resolution ? extent
+        const VkExtent2D output_extent = native_resolution ? render_extent
                                          : upscale_4k      ? VkExtent2D{3840, 2160}
                                                            : target_extent;
         const bool recorded = oot_live_dlss->Record(color_view, depth.DepthView(), target_view,
-                                                   extent, output_extent, target_extent, oot_motion.current,
+                                                   render_extent, output_extent, target_extent, oot_motion.current,
                                                    oot_motion.previous, mesh, depth.ImageHandle(),
                                                    render_trace_frame, jitter);
         if (!recorded) {
@@ -3670,7 +3721,7 @@ bool RasterizerVulkan::TryOcarinaUpscale(const ComputePipeline& pipeline, bool r
         oot_dlss_frame = render_trace_frame;
         // AMD's jitter phase count for FSR: 8 * (output / render width)^2, so 18 for 1440p -> 4K
         // and 8 for native AA.
-        const f32 ratio = static_cast<f32>(output_extent.width) / static_cast<f32>(extent.width);
+        const f32 ratio = static_cast<f32>(output_extent.width) / static_cast<f32>(render_extent.width);
         oot_jitter_phases = std::max(1U, static_cast<u32>(8.0f * ratio * ratio));
         oot_fallback_reason = nullptr;
         return true;

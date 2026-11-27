@@ -165,13 +165,12 @@ std::int64_t reserve[ReserveBlocks];
 bool PackEnabled() noexcept; // packing (below)
 // The reserve kept, in blocks: EDEN_CRAM_RESERVE_MIB (up to 512), else 128 MiB while packing runs
 // (packing gives blocks back when the pool is short; MKW used none of the 512 MiB), else 512 MiB.
+// (EglantinePS5, e124268/77763f5) Read each time: a game's own default is set when it launches
+// (headless/main.cpp), after the service has started for the first guest range.
 std::size_t ReserveTarget() noexcept {
-    static const std::size_t blocks = [] {
-        const char* value = std::getenv("EDEN_CRAM_RESERVE_MIB");
-        const std::size_t mib = value != nullptr ? std::strtoull(value, nullptr, 10) : PackEnabled() ? 128 : 512;
-        return std::max<std::size_t>(1, std::min(ReserveBlocks, mib / (SparseSlot >> 20)));
-    }();
-    return blocks;
+    const char* value = std::getenv("EDEN_CRAM_RESERVE_MIB");
+    const std::size_t mib = value != nullptr ? std::strtoull(value, nullptr, 10) : PackEnabled() ? 128 : 512;
+    return std::max<std::size_t>(1, std::min(ReserveBlocks, mib / (SparseSlot >> 20)));
 }
 std::atomic<std::size_t> reserve_count{0};
 std::atomic_flag reserve_lock = ATOMIC_FLAG_INIT;
@@ -223,6 +222,28 @@ std::atomic<std::uint64_t> pack_gpu_skips{0}, pack_gpu_marked{0};
 // The caches' count misses what the command reader reads (command lists, draw arguments), and one
 // such unpack was enough for impossible draws.
 std::atomic<std::uint8_t>* gpu_touched = nullptr;
+// (EglantinePS5, 0db6014/5c4a499/ca5cc69/cde45a0.) Whether the slot must keep its access: it holds
+// pages DeviceMemoryManager maps for the GPU, which never go no-access or unmapped (Idle, packed,
+// in units): a GPU read there is a GPU page fault and the PS5 ends the process with no signal.
+// EDEN_CRAM_KEEP_GPU_MAPPED=0 lets them go like any other slot (Ocarina of Time sets it: its kills
+// were later traced to the driver's trim, headless/main.cpp). EDEN_CRAM_PACK_GPU=0 also keeps the
+// slots a GPU thread had to unpack (gpu_touched). Checked again under the slot's lock by whatever
+// takes the access; eden_guest_gpu_cached takes the lock once before it reads the page.
+bool GpuKeepsSlot(std::size_t slot) noexcept {
+    static const bool pack_gpu = [] {
+        const char* value = std::getenv("EDEN_CRAM_PACK_GPU");
+        return value == nullptr || value[0] != '0';
+    }();
+    if (slot >= gpu_cached_slots) return false;
+    if (auto* table = gpu_cached_table.load(std::memory_order_acquire);
+        table != nullptr && table[slot].load(std::memory_order_acquire) > 0) {
+        // (Read each time, like ReserveTarget: Ocarina of Time sets it when it launches.)
+        // EDEN_CRAM_PACK_GPU=0 keeps them too, as it did before.
+        const char* value = std::getenv("EDEN_CRAM_KEEP_GPU_MAPPED");
+        if (!pack_gpu || value == nullptr || value[0] != '0') return true;
+    }
+    return !pack_gpu && gpu_touched != nullptr && gpu_touched[slot].load(std::memory_order_acquire) != 0;
+}
 // Diagnostic: which threads touched packed slots (unpacks by thread name, 16 names at most).
 struct Unpacker {
     char name[24];
@@ -1216,12 +1237,10 @@ void FillReserve(std::size_t blocks = ReserveTarget()) noexcept {
 // World: every GPU hang came seconds after ~1.3 GB was packed). EDEN_CRAM_UNPACK_KEEP_MIB (default
 // 256, at most 512) sets how many are kept.
 std::size_t UnpackKeepTarget() noexcept {
-    static const std::size_t blocks = [] {
-        const char* value = std::getenv("EDEN_CRAM_UNPACK_KEEP_MIB");
-        const std::size_t mib = value != nullptr ? std::strtoull(value, nullptr, 10) : 256;
-        return std::min(UnpackKeepBlocks, mib / (SparseSlot >> 20));
-    }();
-    return blocks;
+    // (EglantinePS5) Read each time, like ReserveTarget: a game's own default is set when it launches.
+    const char* value = std::getenv("EDEN_CRAM_UNPACK_KEEP_MIB");
+    const std::size_t mib = value != nullptr ? std::strtoull(value, nullptr, 10) : 256;
+    return std::min(UnpackKeepBlocks, mib / (SparseSlot >> 20));
 }
 bool KeepForUnpack(std::int64_t physical) noexcept {
     Spin(unpack_keep_lock);
@@ -2139,6 +2158,27 @@ extern "C" void eden_guest_gpu_cached(const void* host, int delta) noexcept {
     }
     const std::size_t slot = (at - begin) / SparseSlot;
     if (slot < gpu_cached_slots) table[slot].fetch_add(delta, std::memory_order_acq_rel);
+    // (EglantinePS5) A page mapped for the GPU while its slot is Idle, packed or in units would reach
+    // the GPU with no access: a probe or pack under way finishes first (any later one sees the count,
+    // GpuKeepsSlot), then the page is read once here, on the mapping thread, so the fault handler
+    // brings it back before the GPU can read it.
+    if (delta > 0) {
+        if (range->state != nullptr && slot < (range->end - begin) / SparseSlot) {
+            LockSlot(*range, slot);
+            UnlockSlot(*range, slot, SlotState(*range, slot));
+        }
+        (void)*static_cast<const volatile std::uint8_t*>(host);
+    }
+}
+
+// (EglantinePS5, e34aca7) True when `host` lies in the guest's memory. A system call handed such a
+// pointer gets EFAULT where a slot is Idle, packed or a unit is away (the kernel does not run the
+// fault handler), so file I/O copies through a buffer of its own there (common/fs/file.h).
+extern "C" int eden_guest_memory_contains(const void* host) noexcept {
+    SparseRange* const range = guest_range.load(std::memory_order_acquire);
+    if (range == nullptr) return 0;
+    const auto at = reinterpret_cast<std::uintptr_t>(host);
+    return at >= range->begin.load(std::memory_order_relaxed) && at < range->end;
 }
 
 extern "C" unsigned eden_guest_memory_wanted(void) noexcept {
@@ -2517,12 +2557,12 @@ bool ScanShare(SparseRange& range, std::size_t keep, std::size_t other) noexcept
 // to come without packing too (the race-load event), and the hangs with GPU threads waiting for
 // memory went with the unpack reserve (EDEN_CRAM_UNPACK_KEEP_MIB).
 bool PackEnabled() noexcept {
-    static const bool on = [] {
-        const char* value = std::getenv("EDEN_CRAM_PACK");
-        return (value == nullptr || value[0] != '0') && &LZ4_compress_default != nullptr &&
-               &LZ4_decompress_safe != nullptr && &LZ4_compressBound != nullptr;
-    }();
-    return on;
+    static const bool lz4 = &LZ4_compress_default != nullptr && &LZ4_decompress_safe != nullptr &&
+                            &LZ4_compressBound != nullptr;
+    // (EglantinePS5) Read each time, like ReserveTarget: a game's own default is set when it launches
+    // (headless/main.cpp), after the service has started for the first guest range.
+    const char* value = std::getenv("EDEN_CRAM_PACK");
+    return lz4 && (value == nullptr || value[0] != '0');
 }
 constexpr std::size_t PackPerPass = 256;                       // 512 MiB of slots
 // EDEN_CRAM_PACK_BELOW_MIB / EDEN_CRAM_PACK_COLD_S: when packing starts (largest free block) and how long
@@ -2533,8 +2573,7 @@ std::size_t EnvOr(const char* name, std::size_t fallback) noexcept {
     return value != nullptr && *value ? static_cast<std::size_t>(std::strtoull(value, nullptr, 10)) : fallback;
 }
 std::size_t PackBelowLargest() noexcept {
-    static const std::size_t bytes = EnvOr("EDEN_CRAM_PACK_BELOW_MIB", 3072) << 20;
-    return bytes;
+    return EnvOr("EDEN_CRAM_PACK_BELOW_MIB", 3072) << 20; // (EglantinePS5: read each time, as ReserveTarget)
 }
 constexpr double PackMaxRatio = 0.6;
 std::vector<std::uint8_t> pack_times; // per slot, the scanner's: how often it was packed
@@ -2879,7 +2918,8 @@ std::size_t UnitSweep(SparseRange& range, std::uint32_t now, std::size_t idle_fo
             UnitSlot& state = unit_slots[slot];
             if (state.idle != 0 && now - state.idle_since >= idle_for && !(writes == SwapWrites::None && unit_poor[slot] != 0)) {
                 evicted += UnitsEvict(slot, writes, &blocks);
-            } else if (cool && (state.here & ~state.idle) != 0) {
+            } else if (cool && (state.here & ~state.idle) != 0 && !GpuKeepsSlot(slot)) {
+                // (EglantinePS5: a slot mapped for the GPU keeps the units it has back, GpuKeepsSlot.)
                 // Not while they are written: the sampled hash of the units with access must have
                 // stood still for ProbeColdSeconds, as a slot's must (ProbeSlot has why).
                 const std::uint32_t awake = state.here & ~state.idle;
@@ -2924,26 +2964,16 @@ bool PackSlot(SparseRange& range, std::size_t slot, Swap swap = Swap::No) noexce
 #ifdef PS5_NATIVE
     PackedSlot* const table = packed_slots.load(std::memory_order_acquire);
     if (table == nullptr) return false;
-    static const bool pack_gpu = [] {
-        const char* value = std::getenv("EDEN_CRAM_PACK_GPU");
-        return value == nullptr || value[0] != '0';
-    }();
-    if (auto* gpu_cached = gpu_cached_table.load(std::memory_order_acquire);
-        !pack_gpu && gpu_cached != nullptr && slot < gpu_cached_slots &&
-        gpu_cached[slot].load(std::memory_order_acquire) > 0) {
-        pack_gpu_skips.fetch_add(1, std::memory_order_relaxed);
-        return false;
-    }
-    if (!pack_gpu && gpu_touched != nullptr && slot < gpu_cached_slots &&
-        gpu_touched[slot].load(std::memory_order_acquire) != 0) {
+    if (GpuKeepsSlot(slot)) {
         pack_gpu_skips.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
     if (!TryLockSlot(range, slot)) return false;
     // Only a slot that is still what it was chosen for: Idle, where slots are made Idle (one touched
-    // since its caller listed it is in use again: Own or Clean), else Own.
+    // since its caller listed it is in use again: Own or Clean), else Own. (And not mapped for the
+    // GPU since: GpuKeepsSlot.)
     const std::uint8_t before = SlotState(range, slot);
-    if (before != (IdleEnabled() && idle_since != nullptr ? SlotIdle : SlotOwn)) {
+    if (before != (IdleEnabled() && idle_since != nullptr ? SlotIdle : SlotOwn) || GpuKeepsSlot(slot)) {
         UnlockSlot(range, slot, before);
         return false;
     }
@@ -3127,9 +3157,10 @@ bool ProbeSlot(SparseRange& range, std::size_t slot, std::uint32_t now) noexcept
     if (now - touch_since[slot].load(std::memory_order_relaxed) <
         (IdleBackoff() << std::min<unsigned>(touch_times[slot].load(std::memory_order_relaxed), 3)))
         return false;
-    if (!TryLockSlot(range, slot)) return false;
+    // (EglantinePS5) Never memory the GPU reads: GpuKeepsSlot, looked at again under the lock.
+    if (GpuKeepsSlot(slot) || !TryLockSlot(range, slot)) return false;
     const std::uint8_t locked = SlotState(range, slot);
-    const bool made = (locked == SlotOwn || locked == SlotClean) && MakeIdle(range, slot, now);
+    const bool made = (locked == SlotOwn || locked == SlotClean) && !GpuKeepsSlot(slot) && MakeIdle(range, slot, now);
     UnlockSlot(range, slot, made ? SlotIdle : locked);
     return made;
 }
@@ -4220,8 +4251,9 @@ namespace {
 std::atomic<std::size_t> pool_free_seen{0};
 std::atomic<std::uint64_t> pool_free_seen_ns{0};
 std::size_t KeepFreeMark() noexcept {
-    static const std::size_t bytes = EnvOr("EDEN_CRAM_KEEP_FREE_MIB", 512) << 20;
-    return bytes;
+    // (EglantinePS5) Read each time: per-title defaults are set once the game is known, after the
+    // keeper has started.
+    return EnvOr("EDEN_CRAM_KEEP_FREE_MIB", 512) << 20;
 }
 void KeepFree() noexcept {
 #ifdef PS5_NATIVE
@@ -4247,17 +4279,31 @@ void KeepFree() noexcept {
     // Packing in memory at once. To the swap store, when it may at all (EDEN_SWAP_KEEPER=1), only
     // when the pool has stayed under the mark for 3 s or has a quarter of it left: a race start
     // takes 2 GB and gives half of it back within seconds.
-    static const bool may_write = EnvOr("EDEN_SWAP_KEEPER", 0) != 0;
+    const bool may_write = EnvOr("EDEN_SWAP_KEEPER", 0) != 0; // (EglantinePS5) each time: per-title default
     const std::uint64_t now = SwapNow();
     if (below_since == 0) below_since = now;
     const bool write = may_write && (now - below_since >= 3'000'000'000ull || free_pieces < mark / 4);
-    (void)RecoverMemory(mark + (std::size_t{256} << 20) - free_pieces, false, true, write ? 2 : 1);
+    // (EglantinePS5) At most EDEN_SWAP_KEEPER_CHUNK_MIB (64) a call: the call holds pack_mutex, and
+    // a failed allocation's request waits for it. Asked for the whole 768 MiB at once, the keeper
+    // wrote 596 MiB in one call and Ocarina of Time's GPU thread waited 6 s for it.
+    static const std::size_t chunk = EnvOr("EDEN_SWAP_KEEPER_CHUNK_MIB", 64) << 20;
+    std::size_t want = mark + (std::size_t{256} << 20) - free_pieces;
+    if (chunk != 0) want = std::min(want, chunk);
+    (void)RecoverMemory(want, false, true, write ? 2 : 1);
 #endif
 }
 } // namespace
 
 // Waits for the scanner if it is packing (the driver's allocations).
-extern "C" std::size_t eden_memory_recover(std::size_t bytes) noexcept { return RecoverMemory(bytes, true); }
+// (EglantinePS5, 5863e62) The heap's empty pieces go back too when that was not enough
+// (headless/heap_arenas.inc; not for the heap's own requests, which hold its growth lock and use
+// eden_memory_recover_try).
+extern "C" [[gnu::weak]] std::size_t eden_heap_trim(void);
+extern "C" std::size_t eden_memory_recover(std::size_t bytes) noexcept {
+    std::size_t freed = RecoverMemory(bytes, true);
+    if (freed < bytes && &eden_heap_trim != nullptr) freed += eden_heap_trim();
+    return freed;
+}
 // Never waits: for the heap, which may hold its growth lock while the scanner allocates.
 extern "C" std::size_t eden_memory_recover_try(std::size_t bytes) noexcept { return RecoverMemory(bytes, false); }
 // What the pool has free in 2 MiB pieces, as the keeper counted it within the last half second; 0

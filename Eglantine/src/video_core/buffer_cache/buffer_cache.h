@@ -38,6 +38,10 @@
 
 namespace VideoCommon {
 
+// The most one staging buffer holds for a synchronous buffer download (DownloadBufferMemory,
+// DownloadBuffersMemory): larger transfers go in batches, each its own buffer.
+inline constexpr u64 DownloadBatchBytes = u64{32} << 20;
+
 using Core::DEVICE_PAGESIZE;
 
 template <class P>
@@ -199,7 +203,14 @@ void BufferCache<P>::TickFrame() {
         RunGarbageCollector(total_used_memory >= critical_memory);
     }
     ++frame_tick;
-    delayed_destruction_ring.Tick();
+    while (!retired_buffers.empty() && frame_tick - retired_buffers.front().frame >= TICKS_TO_DESTROY) {
+        if constexpr (requires { runtime.IsFree(u64{}); }) {
+            if (!runtime.IsFree(retired_buffers.front().tick)) {
+                break;
+            }
+        }
+        retired_buffers.pop_front();
+    }
 
     // Pages draws wrote: their early downloads, now that the frame's work is recorded.
     RecordEarlyDownloads();
@@ -963,7 +974,12 @@ void BufferCache<P>::NoteReadBackWrite(DAddr device_addr, u64 size) {
                 // The guest no longer reads it after its writes.
                 it->reads = 0;
             }
-            if (it->reads >= EarlyAfterReads &&
+            // EDEN_NX2_EARLY_DOWNLOADS=0: no early downloads (reads flush on demand), for A/B runs.
+            static const bool early_downloads = [] {
+                const char* value = std::getenv("EDEN_NX2_EARLY_DOWNLOADS");
+                return value == nullptr || value[0] != '0';
+            }();
+            if (early_downloads && it->reads >= EarlyAfterReads &&
                 std::ranges::find(early_pages, it->page) == early_pages.end()) {
                 early_pages.push_back(it->page);
             }
@@ -3118,6 +3134,8 @@ void BufferCache<P>::UpdateIndexBuffer() {
         }
         if (slot_buffers[inline_buffer_id].SizeBytes() < buffer_size) [[unlikely]] {
             ++buffer_deletions;
+            // Draws recorded but not yet submitted may still read the old one.
+            RetireBuffer(std::move(slot_buffers[inline_buffer_id]));
             slot_buffers.erase(inline_buffer_id);
             inline_buffer_id = CreateBuffer(0, buffer_size, false);
         }
@@ -3132,8 +3150,27 @@ void BufferCache<P>::UpdateIndexBuffer() {
     const GPUVAddr gpu_addr_begin = index_buffer_ref.StartAddress();
     const GPUVAddr gpu_addr_end = index_buffer_ref.EndAddress();
     const std::optional<DAddr> device_addr = gpu_memory->GpuToCpuAddress(gpu_addr_begin);
-    const u32 address_size = static_cast<u32>(gpu_addr_end - gpu_addr_begin);
-    const u32 draw_size = (index_buffer_ref.count + index_buffer_ref.first) * u32(index_buffer_ref.FormatSizeInBytes());
+    // Switch 2 titles leave the index limit at 0 (end below start: no bound), and the count and first
+    // registers can hold values no draw uses: Mario Kart World's race load came here with 1.8 billion
+    // indices, and the 32-bit products wrapped to a 2.9 GB "index buffer" that merged 101 buffers
+    // and asked the pool for 2.9 GB of staging at once (out of device memory every time). The span
+    // is worked out in 64 bits, an end below the start means no bound, and a binding is capped at
+    // 128 MiB (64 M 16-bit indices); indices past it read as out of bounds. (Old core patch 0056.)
+    constexpr u64 MaxIndexBinding = u64{128} << 20;
+    const u64 address_size64 = gpu_addr_end > gpu_addr_begin ? gpu_addr_end - gpu_addr_begin : ~u64{0};
+    const u64 draw_size64 = (u64{index_buffer_ref.count} + u64{index_buffer_ref.first}) *
+                            u64{index_buffer_ref.FormatSizeInBytes()};
+    const u64 wanted64 = (std::min)(address_size64, draw_size64);
+    if (wanted64 > MaxIndexBinding) {
+        static std::atomic<unsigned> clamped{0};
+        if (clamped.fetch_add(1, std::memory_order_relaxed) < 16) {
+            LOG_WARNING(HW_GPU, "Index buffer span of {} MiB (count {}, first {}) capped at {} MiB",
+                        wanted64 >> 20, index_buffer_ref.count, index_buffer_ref.first,
+                        MaxIndexBinding >> 20);
+        }
+    }
+    const u32 address_size = static_cast<u32>((std::min)(address_size64, MaxIndexBinding));
+    const u32 draw_size = static_cast<u32>((std::min)(draw_size64, MaxIndexBinding));
     const u32 size = (std::min)(address_size, draw_size);
     if (size == 0 || !device_addr) {
         channel_state->index_buffer = NULL_BINDING;
@@ -4075,15 +4112,6 @@ void BufferCache<P>::DownloadBuffersMemory(std::span<const BufferId> buffer_ids)
         return;
     }
     const StutterTrace::SiteScope site{StutterTrace::Site::BufferDownload};
-    auto download_staging = runtime.DownloadStagingBuffer(total_size_bytes);
-    for (Download& download : downloads) {
-        download.copy.dst_offset += download_staging.offset;
-        Buffer& buffer = slot_buffers[download.buffer_id];
-        buffer.MarkUsage(download.copy.src_offset, download.copy.size);
-        runtime.CopyBuffer(download_staging.buffer, buffer, std::span{&download.copy, 1}, true);
-    }
-    runtime.Finish();
-    const u8* const mapped_memory = download_staging.mapped_span.data();
     DAddr landing_begin = ~DAddr{0};
     DAddr landing_end = 0;
     for (const Download& download : downloads) {
@@ -4091,14 +4119,51 @@ void BufferCache<P>::DownloadBuffersMemory(std::span<const BufferId> buffer_ids)
         landing_begin = (std::min)(landing_begin, address);
         landing_end = (std::max)(landing_end, address + download.copy.size);
     }
-    const VideoCore::DownloadLanding landing{landing_begin, landing_end};
-    const Common::RangeSet<DAddr> cpu_written = PendingCpuWriteRanges();
+    // In staging batches of at most DownloadBatchBytes: one buffer for the whole transfer needed a
+    // contiguous block the shared pool no longer had (OoT on a standard PS5: a 288 MiB download
+    // refused with 1-4 MiB the largest free block, then a crash).
+    std::vector<Download> pieces;
+    pieces.reserve(downloads.size());
     for (const Download& download : downloads) {
-        const DAddr device_addr = slot_buffers[download.buffer_id].CpuAddr() + download.copy.src_offset;
-        WriteDownloadedMemory(
-            cpu_written, device_addr,
-            mapped_memory + (download.copy.dst_offset - download_staging.offset),
-            download.copy.size);
+        for (u64 done = 0; done < download.copy.size; done += DownloadBatchBytes) {
+            pieces.push_back({download.buffer_id,
+                              BufferCopy{
+                                  .src_offset = download.copy.src_offset + done,
+                                  .dst_offset = 0,
+                                  .size = (std::min)(DownloadBatchBytes, download.copy.size - done),
+                              }});
+        }
+    }
+    for (size_t first = 0; first < pieces.size();) {
+        u64 batch_bytes = 0;
+        size_t last = first;
+        while (last < pieces.size() &&
+               (last == first ||
+                batch_bytes + Common::AlignUp(pieces[last].copy.size, 64) <= DownloadBatchBytes)) {
+            pieces[last].copy.dst_offset = batch_bytes;
+            batch_bytes += Common::AlignUp(pieces[last].copy.size, 64);
+            ++last;
+        }
+        auto download_staging = runtime.DownloadStagingBuffer(batch_bytes);
+        for (size_t index = first; index < last; ++index) {
+            Download& piece = pieces[index];
+            piece.copy.dst_offset += download_staging.offset;
+            Buffer& buffer = slot_buffers[piece.buffer_id];
+            buffer.MarkUsage(piece.copy.src_offset, piece.copy.size);
+            runtime.CopyBuffer(download_staging.buffer, buffer, std::span{&piece.copy, 1}, true);
+        }
+        runtime.Finish();
+        const u8* const mapped_memory = download_staging.mapped_span.data();
+        const VideoCore::DownloadLanding landing{landing_begin, landing_end};
+        const Common::RangeSet<DAddr> cpu_written = PendingCpuWriteRanges();
+        for (size_t index = first; index < last; ++index) {
+            const Download& piece = pieces[index];
+            const DAddr device_addr = slot_buffers[piece.buffer_id].CpuAddr() + piece.copy.src_offset;
+            WriteDownloadedMemory(cpu_written, device_addr,
+                                  mapped_memory + (piece.copy.dst_offset - download_staging.offset),
+                                  piece.copy.size);
+        }
+        first = last;
     }
 }
 
@@ -4155,24 +4220,47 @@ void BufferCache<P>::DownloadBufferMemory(Buffer& buffer, DAddr device_addr, u64
         }
     }
     if constexpr (USE_MEMORY_MAPS) {
-        auto download_staging = runtime.DownloadStagingBuffer(total_size_bytes);
-        const u8* const mapped_memory = download_staging.mapped_span.data();
-        const std::span<BufferCopy> copies_span(copies.data(), copies.data() + copies.size());
-        for (BufferCopy& copy : copies) {
-            // Modify copies to have the staging offset in mind
-            copy.dst_offset += download_staging.offset;
-            buffer.MarkUsage(copy.src_offset, copy.size);
-        }
-        runtime.CopyBuffer(download_staging.buffer, buffer, copies_span, true);
-        runtime.Finish();
-        const VideoCore::DownloadLanding landing{landing_begin, landing_end};
-        const Common::RangeSet<DAddr> cpu_written = PendingCpuWriteRanges();
+        // In staging batches of at most DownloadBatchBytes (see DownloadBuffersMemory).
+        boost::container::small_vector<BufferCopy, 4> pieces;
         for (const BufferCopy& copy : copies) {
-            const DAddr copy_device_addr = buffer.CpuAddr() + copy.src_offset;
-            // Undo the modified offset
-            const u64 dst_offset = copy.dst_offset - download_staging.offset;
-            const u8* copy_mapped_memory = mapped_memory + dst_offset;
-            WriteDownloadedMemory(cpu_written, copy_device_addr, copy_mapped_memory, copy.size);
+            for (u64 done = 0; done < copy.size; done += DownloadBatchBytes) {
+                pieces.push_back(BufferCopy{
+                    .src_offset = copy.src_offset + done,
+                    .dst_offset = 0,
+                    .size = (std::min)(DownloadBatchBytes, copy.size - done),
+                });
+            }
+        }
+        for (size_t first = 0; first < pieces.size();) {
+            u64 batch_bytes = 0;
+            size_t last = first;
+            while (last < pieces.size() &&
+                   (last == first ||
+                    batch_bytes + Common::AlignUp(pieces[last].size, 64) <= DownloadBatchBytes)) {
+                pieces[last].dst_offset = batch_bytes;
+                batch_bytes += Common::AlignUp(pieces[last].size, 64);
+                ++last;
+            }
+            auto download_staging = runtime.DownloadStagingBuffer(batch_bytes);
+            const u8* const mapped_memory = download_staging.mapped_span.data();
+            const std::span<BufferCopy> batch(pieces.data() + first, last - first);
+            for (BufferCopy& copy : batch) {
+                // Modify copies to have the staging offset in mind
+                copy.dst_offset += download_staging.offset;
+                buffer.MarkUsage(copy.src_offset, copy.size);
+            }
+            runtime.CopyBuffer(download_staging.buffer, buffer, batch, true);
+            runtime.Finish();
+            const VideoCore::DownloadLanding landing{landing_begin, landing_end};
+            const Common::RangeSet<DAddr> cpu_written = PendingCpuWriteRanges();
+            for (const BufferCopy& copy : batch) {
+                const DAddr copy_device_addr = buffer.CpuAddr() + copy.src_offset;
+                // Undo the modified offset
+                const u64 dst_offset = copy.dst_offset - download_staging.offset;
+                WriteDownloadedMemory(cpu_written, copy_device_addr, mapped_memory + dst_offset,
+                                      copy.size);
+            }
+            first = last;
         }
     } else {
         const std::span<u8> immediate_buffer = ImmediateBuffer(largest_copy);
@@ -4185,6 +4273,15 @@ void BufferCache<P>::DownloadBufferMemory(Buffer& buffer, DAddr device_addr, u64
             WriteDownloadedMemory(cpu_written, copy_device_addr, immediate_buffer.data(), copy.size);
         }
     }
+}
+
+template <class P>
+void BufferCache<P>::RetireBuffer(Buffer&& buffer) {
+    u64 tick = 0;
+    if constexpr (requires { runtime.CurrentTick(); }) {
+        tick = runtime.CurrentTick();
+    }
+    retired_buffers.push_back({frame_tick, tick, std::move(buffer)});
 }
 
 template <class P>
@@ -4242,7 +4339,7 @@ void BufferCache<P>::DeleteBuffer(BufferId buffer_id, bool do_not_mark) {
 #ifdef YUZU_LEGACY
     if (!do_not_mark || !immediately_free)
 #endif
-        delayed_destruction_ring.Push(std::move(slot_buffers[buffer_id]));
+        RetireBuffer(std::move(slot_buffers[buffer_id]));
 
     slot_buffers.erase(buffer_id);
 

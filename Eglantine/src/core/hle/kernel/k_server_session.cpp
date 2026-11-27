@@ -1271,7 +1271,7 @@ void HoldHleReply(KernelCore& kernel, KThread* client_thread) {
         held = true;
         std::this_thread::yield();
     }
-    if (held && Nx2ThreadStats::g_enabled) {
+    if (held && Nx2ThreadStats::g_enabled()) {
         Nx2ThreadStats::AddHold(client_thread,
                                 std::chrono::duration_cast<std::chrono::nanoseconds>(
                                     std::chrono::steady_clock::now() - start)

@@ -113,7 +113,30 @@ ProcessMemoryUsage GetProcessMemoryUsage() {
     return usage;
 }
 
+#if defined(__PROSPERO__)
+extern "C" [[gnu::weak]] int32_t sceKernelAvailableDirectMemorySize(int64_t start, int64_t end,
+                                                                      size_t alignment,
+                                                                      int64_t* found_start,
+                                                                      size_t* found_size);
+extern "C" [[gnu::weak]] size_t sceKernelGetDirectMemorySize();
+#endif
+
 std::optional<u64> GetSystemCommitRoom() {
+#if defined(__PROSPERO__)
+    // The PS5's one pool holds the guest's memory, the heap and every device allocation, so the
+    // device budget (a fixed 6 GiB) says nothing of the room left: the largest free block of the
+    // pool does. Ocarina of Time died of VK_ERROR_OUT_OF_DEVICE_MEMORY with the texture cache
+    // still under its thresholds and 1-4 MiB left in the pool.
+    if (&sceKernelAvailableDirectMemorySize != nullptr && &sceKernelGetDirectMemorySize != nullptr) {
+        const size_t total = sceKernelGetDirectMemorySize();
+        int64_t start = 0;
+        size_t largest = 0;
+        if (total > 0 && sceKernelAvailableDirectMemorySize(0, static_cast<int64_t>(total), 2u << 20,
+                                                            &start, &largest) == 0) {
+            return largest;
+        }
+    }
+#endif
 #ifdef _WIN32
     PERFORMANCE_INFORMATION performance{};
     performance.cb = sizeof(performance);

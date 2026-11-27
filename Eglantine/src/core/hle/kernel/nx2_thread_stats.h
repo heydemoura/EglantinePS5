@@ -19,7 +19,11 @@ class KThread;
 // (CoreTiming::GetClockTicks) until the report converts them.
 namespace Kernel::Nx2ThreadStats {
 
-inline const bool g_enabled = std::getenv("EDEN_NX2_GUEST_THREAD_STATS") != nullptr;
+// Read on first use: the headless frontend applies env.txt after static initialisation.
+inline bool g_enabled() {
+    static const bool enabled = std::getenv("EDEN_NX2_GUEST_THREAD_STATS") != nullptr;
+    return enabled;
+}
 
 enum class Wait : u8 { Ipc, SyncObjects, Arbiter, CondVar, Lock, Sleep, Other, Count };
 inline constexpr size_t Waits = static_cast<size_t>(Wait::Count);

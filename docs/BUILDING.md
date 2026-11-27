@@ -245,3 +245,32 @@ To cut a release:
 4. Push a `vX.Y.Z` tag.
 5. Keep `build/symbols/EglantinePS5-vX.Y.Z.elf` from the build that was published (crash reports
    are read with it): download the tag run's `EglantinePS5-symbols` artifact before it expires.
+
+## Profile-guided optimisation (PS5)
+
+The emulator can be built with a profile recorded on the console. Ocarina of Time, running through
+Kokiri Forest with the camera turning, measured 31.4 to 32.9 FPS with one against 30.2 to 30.8
+without (standard PS5, 1x, 600-frame blocks).
+
+Record a profile:
+
+1. Fetch `compiler-rt/lib/profile` (the `InstrProfiling*` sources) and `compiler-rt/include/profile`
+   of LLVM 18.1.8 into `.deps/compiler-rt-18.1.8/profile` (the `.inc` files in a `profile/` folder
+   next to the sources).
+2. Build in a fresh build directory with `EDEN_PGO=generate` (the flags are cached at the first
+   configure, as `EDEN_CPU_PRESET`'s).
+3. Set `EDEN_PGO_DUMP_AT=<seconds>` in `/data/eglantineps5/env.txt`, play, and take
+   `logs/default.profraw` before the session ends (it is written again every 30 s).
+4. The console's runtime (`headless/pgo_runtime.c`) writes counters only: zero the four
+   `NumValueSites` bytes at offset 52 of each 64-byte data record, then
+   `llvm-profdata-18 merge -o game.profdata default.profraw`.
+
+Build with it, again in a fresh build directory:
+
+```bash
+EDEN_CPU_PRESET=zen2 EDEN_PGO=/path/to/game.profdata make package
+```
+
+A profile names the build's source paths (functions with internal linkage are keyed by their
+file), so it is only fully used by a build in the same location, and none is kept in the
+repository.

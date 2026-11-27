@@ -1028,6 +1028,28 @@ static void *eden_heap_emptiest_arena(const void *except) {
   return best;
 }
 
+/* The most arenas one thread makes: EDEN_HEAP_THREAD_ARENAS, or fewer with the env.txt switch
+ * EDEN_HEAP_THREAD_ARENAS_MAX (1..128). Arenas are only given back when empty, and threads that
+ * build shaders keep a few long-lived blocks in each: on a 12 GiB pool, OoT's eight driver
+ * threads held 317 arenas (634 MiB) for 125 MiB of blocks when the GPU ran out. Past the cap their
+ * requests go to the heap's shared spaces, which every thread reuses. */
+static unsigned eden_heap_thread_arena_cap(void) {
+  /* Read again until set: an arena can be made before main() applies env.txt. Only the path that
+   * makes a new arena asks, so the lookup is rare. */
+  static int cap = -1;
+  if (cap < 0) {
+    const char *value = getenv("EDEN_HEAP_THREAD_ARENAS_MAX");
+    if (value == NULL)
+      return EDEN_HEAP_THREAD_ARENAS;
+    long parsed = strtol(value, NULL, 10);
+    if (parsed < 1 || parsed > (long)EDEN_HEAP_THREAD_ARENAS)
+      parsed = EDEN_HEAP_THREAD_ARENAS;
+    fprintf(stderr, "EDEN_HEAP_THREAD_ARENAS_MAX %ld\n", parsed);
+    cap = (int)parsed;
+  }
+  return (unsigned)cap;
+}
+
 static void *eden_heap_arena_allocate(size_t count, size_t size, int zero) {
   void *arena = eden_heap_thread_arena();
   if (arena == NULL)
@@ -1078,7 +1100,7 @@ static void *eden_heap_arena_allocate(size_t count, size_t size, int zero) {
     if (self->name[0] == 0)
       self->name[0] = '?';
   }
-  void *fresh = self->owned < EDEN_HEAP_THREAD_ARENAS ? eden_heap_create_arena(0) : NULL;
+  void *fresh = self->owned < eden_heap_thread_arena_cap() ? eden_heap_create_arena(0) : NULL;
   if (fresh == NULL) {
     /* At a limit, or no memory for one: each look through the arenas costs a request to each,
      * so the next few requests go straight to the heap's spaces. */

@@ -77,6 +77,8 @@ public:
     static constexpr size_t fast_dispatch_ways = 4;
 
     void ClearFastDispatchTable();
+    // Drops `location` from every way of its fast dispatch set (the lookup returns way 0 only).
+    void ClearFastDispatchEntry(u64 location);
     void GenMemory128Accessors();
     void GenFastmemFallbacks();
     void GenTerminalHandlers();

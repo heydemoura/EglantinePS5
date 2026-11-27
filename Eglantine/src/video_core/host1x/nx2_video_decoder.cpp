@@ -1,8 +1,10 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <optional>
 #include <set>
@@ -19,6 +21,7 @@ extern "C" {
 #pragma GCC diagnostic ignored "-Wconversion"
 #endif
 
+#include <libavutil/cpu.h>
 #include <libavutil/hwcontext.h>
 #include <libswscale/swscale.h>
 
@@ -149,6 +152,19 @@ Nx2VideoDecoder::Nx2VideoDecoder(std::string_view mime) : impl{std::make_unique<
     if (gpu) {
         impl->hardware.emplace();
         impl->hardware->InitializeForDecoder(*impl->context, *impl->decoder);
+    }
+    if (!gpu && decoder_name == "libdav1d") {
+        // 0 lets dav1d count the CPUs itself, which the PS5's sandbox may not answer well, and
+        // 1080p60 AV1 movies (Ocarina of Time's opening) dropped ~16% of their frames.
+        // EDEN_NX2_VDEC_THREADS=<n> overrides the 6 threads (the CPUs left beside the pinned
+        // guest cores and GPU thread).
+        int threads = 6;
+        if (const char* value = std::getenv("EDEN_NX2_VDEC_THREADS")) {
+            threads = std::clamp(std::atoi(value), 0, 32);
+        }
+        context->thread_count = threads;
+        LOG_INFO(HW_GPU, "nx2 video: libdav1d gets {} threads; FFmpeg counts {} CPUs", threads,
+                 av_cpu_count());
     }
     impl->open = impl->context->OpenContext(*impl->decoder);
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(

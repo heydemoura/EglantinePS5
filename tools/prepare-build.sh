@@ -91,6 +91,14 @@ if [[ -f $radv_release/lib/libvulkan_radeon.ps5.a ]]; then
         step "RADV: geometry-shader compute passes for dropped draws changed"
         bash tools/build-radv-dependencies.sh
         rm -f build/radv-isolated/libvulkan_radeon.ps5.a
+    elif ! python3 -B tools/patch-radv-retire.py --check "$radv_release/EDEN_RETIRE_SHA256"; then
+        step "RADV: freed buffers held until the GPU has run earlier submissions changed"
+        bash tools/build-radv-dependencies.sh
+        rm -f build/radv-isolated/libvulkan_radeon.ps5.a
+    elif ! python3 -B tools/patch-radv-free-log.py --check "$radv_release/EDEN_FREE_LOG_SHA256"; then
+        step "RADV: the freed-memory log changed"
+        bash tools/build-radv-dependencies.sh
+        rm -f build/radv-isolated/libvulkan_radeon.ps5.a
     elif ! python3 -B tools/patch-radv-wsi.py --check "$radv_release/EDEN_WSI_SHA256"; then
         step "RADV: the display code's adaptation changed"
         bash tools/build-radv-dependencies.sh

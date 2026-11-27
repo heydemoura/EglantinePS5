@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <algorithm>
+#include <cstdint>
 #include <iterator>
 #include <memory>
 #include <optional>
@@ -159,6 +161,22 @@ public:
 
     bool TrySetSpan() noexcept {
         if (u8* ptr = m_memory->GetSpan(m_addr, this->size_bytes()); ptr) {
+            // EglantinePS5 (src/guest_memory_service.inc): the guest's memory may be packed or on
+            // probation (no access) 64 KiB at a time, or show the zero block read-only, and comes
+            // back on a fault. A span handed out here may reach a system call (a service passing it
+            // to write(2) or send(2)), where the kernel answers EFAULT instead of faulting. Each
+            // 16 KiB page is touched now, on this thread: read, or for a writable span an atomic
+            // or of 0 (a write that changes nothing and races with nothing).
+            const auto begin = reinterpret_cast<std::uintptr_t>(ptr);
+            const auto end = begin + this->size_bytes();
+            for (std::uintptr_t page = begin & ~std::uintptr_t{0x3FFF}; page < end; page += 0x4000) {
+                u8* const at = reinterpret_cast<u8*>(std::max(page, begin));
+                if constexpr (FLAGS & GuestMemoryFlags::Write) {
+                    __atomic_fetch_or(at, u8{0}, __ATOMIC_RELAXED);
+                } else {
+                    (void)*static_cast<volatile const u8*>(at);
+                }
+            }
             m_data_span = {reinterpret_cast<T*>(ptr), this->size()};
             m_span_valid = true;
             m_is_data_copy = false;

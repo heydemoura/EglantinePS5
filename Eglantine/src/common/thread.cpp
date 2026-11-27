@@ -684,11 +684,20 @@ void SetCurrentThreadPriority(ThreadPriority new_priority) {
 #endif
 }
 
+namespace {
+thread_local char t_thread_name[16]{};
+}
+
+const char* CurrentThreadName() {
+    return t_thread_name;
+}
+
 void SetCurrentThreadName(const char* name) {
 #if !defined(__PROSPERO__) // not PS5
 #else // PS5
     ::Eden::Performance::RegisterWorker(name);
 #endif // PS5
+    std::strncpy(t_thread_name, name, sizeof(t_thread_name) - 1);
 #ifdef _WIN32
     // Sets the debugger-visible name of the current thread (Windows 10+). Looked up at run time,
     // which also covers MinGW, whose headers may not declare it.

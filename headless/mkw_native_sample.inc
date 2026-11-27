@@ -154,6 +154,53 @@ void Register(const char* name) {
                 std::fwrite(samples.data(), sizeof(Sample), count, file);
                 std::fclose(file);
             }
+            // (EglantinePS5) The samples by JIT block: the share in compiled guest code and the 60
+            // hottest blocks with their guest location and host code, for the JIT's code quality.
+            {
+                struct Hot { unsigned long long entry, size, location, hits; };
+                const auto blocks_known = std::min<unsigned long long>(block_count.load(), blocks.size());
+                std::vector<Hot> sorted;
+                sorted.reserve(blocks_known);
+                for (unsigned long long b = 0; b < blocks_known; ++b) {
+                    const auto entry = blocks[b].entry.load(std::memory_order_acquire);
+                    if (entry) sorted.push_back({entry, blocks[b].size.load(), blocks[b].location.load(), 0});
+                }
+                std::sort(sorted.begin(), sorted.end(), [](const Hot& x, const Hot& y) { return x.entry < y.entry; });
+                unsigned long long in_jit = 0;
+                for (unsigned long long i = 0; i < count; ++i) {
+                    const auto pc = samples[i].pc.load();
+                    auto it = std::upper_bound(sorted.begin(), sorted.end(), pc,
+                                               [](unsigned long long v, const Hot& h) { return v < h.entry; });
+                    if (it == sorted.begin()) continue;
+                    --it;
+                    if (pc - it->entry < it->size) { ++it->hits; ++in_jit; }
+                }
+                std::vector<const Hot*> ranked;
+                for (const auto& h : sorted) if (h.hits) ranked.push_back(&h);
+                std::sort(ranked.begin(), ranked.end(), [](const Hot* x, const Hot* y) { return x->hits > y->hits; });
+                std::snprintf(path, sizeof(path), "/data/eglantineps5/logs/jit-hot-%u-%u.txt", unsigned(getpid()), arm.target);
+                if (auto* file = std::fopen(path, "w")) {
+                    std::fprintf(file, "samples %llu in_jit %llu blocks %llu\n", count, in_jit, blocks_known);
+                    for (std::size_t r = 0; r < ranked.size() && r < 60; ++r) {
+                        const Hot& h = *ranked[r];
+                        std::fprintf(file, "block location=%llx entry=%llx size=%llu hits=%llu code=", h.location, h.entry, h.size, h.hits);
+                        const auto* bytes = reinterpret_cast<const unsigned char*>(h.entry);
+                        for (unsigned long long k = 0; k < h.size && k < 8192; ++k) std::fprintf(file, "%02x", bytes[k]);
+                        std::fprintf(file, "\n");
+                    }
+                    // Where in each hot block the samples fell (offsets), for the hot instructions.
+                    for (std::size_t r = 0; r < ranked.size() && r < 60; ++r) {
+                        const Hot& h = *ranked[r];
+                        std::fprintf(file, "offsets location=%llx", h.location);
+                        for (unsigned long long i = 0; i < count; ++i) {
+                            const auto pc = samples[i].pc.load();
+                            if (pc >= h.entry && pc - h.entry < h.size) std::fprintf(file, " %llx", pc - h.entry);
+                        }
+                        std::fprintf(file, "\n");
+                    }
+                    std::fclose(file);
+                }
+            }
             state.store(3, std::memory_order_release);
         }
     }).detach();

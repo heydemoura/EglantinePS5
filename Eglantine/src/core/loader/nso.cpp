@@ -253,14 +253,24 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
     if (patched || full_image) {
 #endif // PS5
         std::span<u8> patchable_section(codeset.memory.data() + module_start, codeset.memory.size() - module_start);
+#if !defined(__PROSPERO__) // not PS5
         std::vector<u8> pi_header(sizeof(NSOHeader) + patchable_section.size());
+#else // PS5
+        // The PS5 image leaves the BSS out unless full_image. Built-in patches check that their
+        // state words in the BSS are addressable and zero ("timer state is outside BSS" skipped
+        // Dynamic FPS): the copy they see is padded with the zero BSS, and only the image's own
+        // bytes are copied back below.
+        std::vector<u8> pi_header(sizeof(NSOHeader) +
+                                  (std::max)(patchable_section.size(), std::size_t{image_size} - module_start));
+#endif // PS5
         std::memcpy(pi_header.data(), &nso_header, sizeof(NSOHeader));
         std::memcpy(pi_header.data() + sizeof(NSOHeader), patchable_section.data(),
                     patchable_section.size());
 
         pi_header = pm->PatchNSO(pi_header, name);
 
-        std::copy(pi_header.begin() + sizeof(NSOHeader), pi_header.end(), patchable_section.data());
+        std::copy(pi_header.begin() + sizeof(NSOHeader),
+                  pi_header.begin() + sizeof(NSOHeader) + patchable_section.size(), patchable_section.data());
     }
 
     // Mario Kart World selects a 1- or 2-vblank frame mode in its main loop. Force its native

@@ -341,7 +341,7 @@ public:
     std::mutex submit_mutex;
 
 private:
-    std::chrono::steady_clock::time_point last_flush{};
+    std::chrono::nanoseconds last_flush{}; ///< Common::g_wall_clock time (steady_clock is ~1 us here)
     bool flush_pending{};
     u64 record_serial{};    ///< Commands recorded
     u64 submitted_serial{}; ///< record_serial at the last Flush or Finish

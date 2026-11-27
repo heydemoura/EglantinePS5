@@ -30,6 +30,7 @@ extern "C" bool eden_vulkan_handoff_enabled();
 #include "common/logging.h"
 #include "common/settings.h"
 #include "common/dkb_cpu_trace.h"
+#include "common/cpu_features.h"
 #include "common/thread.h"
 #include "video_core/gpu_logging/gpu_logging.h"
 #include "video_core/nx2_profile.h"
@@ -344,7 +345,7 @@ u64 Scheduler::Flush(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore,
     }
     AllocateNewContext();
     submitted_serial = record_serial;
-    last_flush = std::chrono::steady_clock::now();
+    last_flush = Common::g_wall_clock.GetTimeNS();
     flush_pending = false;
     return signal_value;
 }
@@ -369,7 +370,7 @@ bool Scheduler::DeferFlush() {
         return s64{500};
     }();
     if (interval_us <= 0 || !VideoCommon::GpuSplit::OnBackThread() ||
-        std::chrono::steady_clock::now() - last_flush >= std::chrono::microseconds{interval_us}) {
+        Common::g_wall_clock.GetTimeNS() - last_flush >= std::chrono::microseconds{interval_us}) {
         return false;
     }
     flush_pending = true;
@@ -430,7 +431,7 @@ void Scheduler::Finish(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore,
     Wait(presubmit_tick);
     AllocateNewContext();
     submitted_serial = record_serial;
-    last_flush = std::chrono::steady_clock::now();
+    last_flush = Common::g_wall_clock.GetTimeNS();
     flush_pending = false;
     if (profile) {
         g_profile_finishes.fetch_add(1, std::memory_order_relaxed);

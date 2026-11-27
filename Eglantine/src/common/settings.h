@@ -320,7 +320,8 @@ struct Values {
                                               Category::CpuDebug};
 
     SwitchableSetting<bool> cpuopt_unsafe_host_mmu{linkage,
-#if !defined(__APPLE__) && !defined(__linux__) && !defined(__ANDROID__) && !defined(_WIN32)
+    // PS5: on, so Unsafe keeps the 64-bit fastmem window when one is requested (EDEN_FASTMEM64).
+#if !defined(__APPLE__) && !defined(__linux__) && !defined(__ANDROID__) && !defined(_WIN32) && !defined(__PROSPERO__)
                                         false,
 #else
                                         true,

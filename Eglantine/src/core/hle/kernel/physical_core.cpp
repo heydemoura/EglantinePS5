@@ -8,6 +8,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <x86intrin.h>
+#include <array>
+#include <atomic>
+#include <functional>
+#include <string>
 #include <chrono>
 #include <cstdlib>
 #include <thread>
@@ -16,9 +21,12 @@
 #include "common/settings.h"
 #include "common/thread.h"
 #include "core/core.h"
+#include "core/core_timing.h"
+#include "core/causal_delay.h"
 #include "core/debugger/debugger.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/k_thread.h"
+#include "core/hle/kernel/nx2_thread_stats.h"
 #include "core/hle/kernel/kernel.h"
 #include "core/hle/kernel/physical_core.h"
 #include "core/hle/kernel/svc.h"
@@ -114,7 +122,31 @@ void PhysicalCore::RunThread(KernelCore& kernel, Kernel::KThread* thread) {
                     thread->SetStepState(StepState::StepPerformed);
                 }
             } else {
+                // EDEN_NX2_GUEST_THREAD_STATS: the Run()'s time and exit, per guest thread and core.
+                const bool stats = Nx2ThreadStats::g_enabled();
+                u64 start = 0;
+                if (stats) {
+                    Nx2ThreadStats::BeginRun();
+                    start = system.CoreTiming().GetClockTicks();
+                }
+                const long causal_pct = Core::Causal::JitPercent();
+                const auto causal_start = causal_pct ? std::chrono::steady_clock::now()
+                                                     : std::chrono::steady_clock::time_point{};
                 hr = interface->RunThread(thread);
+                if (causal_pct) {
+                    Core::Causal::Spin(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                           std::chrono::steady_clock::now() - causal_start)
+                                           .count() *
+                                       causal_pct / 100);
+                }
+                if (stats) {
+                    const bool svc = True(hr & Core::HaltReason::SupervisorCall);
+                    Nx2ThreadStats::EndRun(thread, m_core_index, start, system.CoreTiming().GetClockTicks(),
+                                           svc ? Nx2ThreadStats::Exit::Svc
+                                           : True(hr & Core::HaltReason::BreakLoop) ? Nx2ThreadStats::Exit::Interrupt
+                                                                                   : Nx2ThreadStats::Exit::Other,
+                                           svc ? interface->GetSvcNumber() : 0, 0, 0, 0);
+                }
             }
 
             ExitContext();
@@ -170,7 +202,41 @@ void PhysicalCore::RunThread(KernelCore& kernel, Kernel::KThread* thread) {
         // Handle system calls.
         if (supervisor_call) {
             // Perform call.
-            Svc::Call(system, interface->GetSvcNumber());
+            Core::Causal::Spin(Core::Causal::SvcNs());
+            if (!Nx2ThreadStats::g_enabled()) {
+                Svc::Call(system, interface->GetSvcNumber());
+            } else {
+                // EDEN_NX2_GUEST_THREAD_STATS: per SVC, the calls and the TSC time of those that did
+                // not block (under 80 us: 128k ticks), every ~10 s.
+                static std::array<std::atomic<u64>, 256> calls{}, quick{}, ticks{};
+                static std::atomic<u64> next{};
+                const u32 number = interface->GetSvcNumber() & 0xff;
+                const u64 start = __rdtsc();
+                Svc::Call(system, number);
+                const u64 end = __rdtsc();
+                calls[number].fetch_add(1, std::memory_order_relaxed);
+                if (end - start < 128'000) {
+                    quick[number].fetch_add(1, std::memory_order_relaxed);
+                    ticks[number].fetch_add(end - start, std::memory_order_relaxed);
+                }
+                if (u64 due = next.load(); end >= due && next.compare_exchange_strong(due, end + 16'000'000'000ULL) && due != 0) {
+                    std::array<std::pair<u64, u32>, 256> order{};
+                    std::array<u64, 256> count{}, fast{};
+                    for (u32 k = 0; k < 256; ++k) {
+                        count[k] = calls[k].exchange(0);
+                        fast[k] = quick[k].exchange(0);
+                        order[k] = {ticks[k].exchange(0), k};
+                    }
+                    std::sort(order.begin(), order.end(), std::greater<>{});
+                    std::string line;
+                    for (int k = 0; k < 12 && order[k].first; ++k) {
+                        const auto [total, id] = order[k];
+                        line += fmt::format(" {:#x}:{}/{}x{:.2f}us", id, fast[id], count[id],
+                                            double(total) / 1596.3 / double(fast[id]));
+                    }
+                    LOG_INFO(Kernel_SVC, "SVC cost over ~10 s (id:unblocked/calls x mean us, unblocked only):{}", line);
+                }
+            }
             return;
         }
 

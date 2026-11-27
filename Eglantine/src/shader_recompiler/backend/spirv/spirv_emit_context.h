@@ -419,6 +419,7 @@ public:
     Id mesh_attributes{};
     Id mesh_map{};
     Id mesh_primitive_count{};
+    Id mesh_num_workgroups{}; ///< read only for Profile::has_broken_mesh_user_sgprs
     Id mesh_shared_u32{};   ///< pointer type to one workgroup word
     Id mesh_primitive_indices{};
     Id mesh_point_size{}; ///< PointSize output array of a mesh program, if any

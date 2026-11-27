@@ -197,7 +197,7 @@ BlockOfCode::BlockOfCode(RunCodeCallbacks cb, JitStateInfo jsi, size_t total_cod
     EnsureMemoryCommitted(PRELUDE_COMMIT_SIZE);
 #if !defined(__PROSPERO__) // not PS5
 #else // PS5
-    std::printf("EDEN_JIT_FEATURES mask=%x cache_bytes=%zu\n", unsigned(GetHostFeatures()), total_code_size);
+    std::fprintf(stderr, "EDEN_JIT_FEATURES mask=%x cache_bytes=%zu\n", unsigned(GetHostFeatures()), total_code_size);
 #endif // PS5
     GenRunCode(rcp);
 }

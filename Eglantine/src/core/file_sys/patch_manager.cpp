@@ -548,12 +548,13 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
 
     LOG_INFO(Loader, "Patching NSO for name={}, build_id={}", name, build_id);
 
+    // A title with no mod folder still gets its built-in patches (below): returning here left
+    // Ocarina of Time without Dynamic FPS on the PS5, so the game ran in slow motion under 30 FPS.
     const auto load_dir = GetModificationLoadRoot();
-    if (load_dir == nullptr) {
-        return nso;
+    std::vector<VirtualDir> patch_dirs;
+    if (load_dir != nullptr) {
+        patch_dirs = load_dir->GetSubdirectories();
     }
-
-    auto patch_dirs = load_dir->GetSubdirectories();
     std::sort(patch_dirs.begin(), patch_dirs.end(),
               [](const VirtualDir& l, const VirtualDir& r) { return l->GetName() < r->GetName(); });
     const auto patches = CollectPatches(patch_dirs, build_id);

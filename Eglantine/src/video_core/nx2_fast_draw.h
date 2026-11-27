@@ -113,6 +113,18 @@ inline thread_local bool t_serial_bumped{};
 /// keeps read their buffers again.
 inline std::atomic<u64> g_sync_serial{1};
 
+/// EDEN_NX2_FAST_DRAW_MORE=0: query reports, the macro data registers, the shader slots'
+/// register counts and the puller's semaphore releases and syncpoint increments end fast draw
+/// reuse again. In Ocarina of Time's forest they were most of the draws that took the full path
+/// for a "state change" (a full preparation is 18.6 us, a delta one 3.8).
+[[nodiscard]] inline bool More() {
+    static const bool on = [] {
+        const char* const value = std::getenv("EDEN_NX2_FAST_DRAW_MORE");
+        return value == nullptr || value[0] != '0';
+    }();
+    return on;
+}
+
 inline void NoteSync() {
     g_sync_serial.fetch_add(1, std::memory_order_relaxed);
 }

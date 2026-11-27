@@ -166,6 +166,18 @@ public:
         return invalidated;
     }
 
+    // Forgets the block compiled for `location` (a demoted fastmem site's block, whose PC range
+    // may no longer find it) and unlinks the sites that target it.
+    std::vector<u64> InvalidateLocation(IR::LocationDescriptor location) {
+        ++invalidations;
+        if (blocks.erase(location) == 0)
+            return {};
+        if (const auto waiting = sites.find(location); waiting != sites.end())
+            for (const Site& site : waiting->second)
+                Link(site, nullptr);
+        return {location.Value()};
+    }
+
     // With every member quiescent: forget all blocks and sites (their regions are reset too).
     void Clear() {
         ++invalidations;

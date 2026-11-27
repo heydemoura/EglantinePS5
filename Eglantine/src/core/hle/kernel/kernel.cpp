@@ -67,12 +67,20 @@ namespace Kernel {
 // Can only be used by a single implementation PER THREAD
 struct ThreadLocalData {
     std::optional<KThread> raw_thread;
-    KThread* current_thread = nullptr;
     KThread* thread = nullptr;
-    u8 host_thread_id = UINT8_MAX;
-    bool is_phantom_mode_for_singlecore = false;
     bool lock = false;
 };
+
+// What every kernel call reads (the current thread: 15 million reads a second in Ocarina of
+// Time), apart from the data above: a thread-local with a constructor is reached through an
+// initialisation check, itself another thread-local read, and each is a call where thread-locals
+// are emulated (the PS5 build). This one is constant-initialised.
+struct ThreadLocalHot {
+    KThread* current_thread = nullptr;
+    u8 host_thread_id = UINT8_MAX;
+    bool is_phantom_mode_for_singlecore = false;
+};
+static constinit thread_local ThreadLocalHot tls_hot{};
 
 struct KernelCore::Impl {
     static constexpr size_t ApplicationMemoryBlockSlabHeapSize = 20000;
@@ -521,17 +529,17 @@ struct KernelCore::Impl {
     /// Sets the host thread ID for the caller.
     u32 SetHostThreadId(std::size_t core_id) {
         // This should only be called during core init.
-        ASSERT(tls_data.host_thread_id == UINT8_MAX);
+        ASSERT(tls_hot.host_thread_id == UINT8_MAX);
 
         // The first four slots are reserved for CPU core threads
         ASSERT(core_id < Core::Hardware::NUM_CPU_CORES);
-        tls_data.host_thread_id = u8(core_id);
-        return tls_data.host_thread_id;
+        tls_hot.host_thread_id = u8(core_id);
+        return tls_hot.host_thread_id;
     }
 
     /// Gets the host thread ID for the caller
     u32 GetHostThreadId() const {
-        return tls_data.host_thread_id;
+        return tls_hot.host_thread_id;
     }
 
     // Gets the dummy KThread for the caller, allocating a new one if this is the first time
@@ -570,23 +578,25 @@ struct KernelCore::Impl {
 
     // Forces singlecore
     bool IsPhantomModeForSingleCore() const {
-        return tls_data.is_phantom_mode_for_singlecore;
+        return tls_hot.is_phantom_mode_for_singlecore;
     }
     void SetIsPhantomModeForSingleCore(bool value) {
         ASSERT(!is_multicore);
-        tls_data.is_phantom_mode_for_singlecore = value;
+        tls_hot.is_phantom_mode_for_singlecore = value;
     }
 
     bool IsShuttingDown() const {
         return is_shutting_down.load(std::memory_order_relaxed);
     }
 
-    KThread* GetCurrentEmuThread(ThreadLocalData& t) {
-        return t.current_thread ? t.current_thread : (t.current_thread = GetHostDummyThread(t, nullptr));
+    KThread* GetCurrentEmuThread() {
+        ThreadLocalHot& hot = tls_hot;
+        return hot.current_thread ? hot.current_thread
+                                  : (hot.current_thread = GetHostDummyThread(tls_data, nullptr));
     }
 
     void SetCurrentEmuThread(KThread* thread) {
-        tls_data.current_thread = thread;
+        tls_hot.current_thread = thread;
     }
 
     void DeriveInitialMemoryLayout() {
@@ -1304,7 +1314,7 @@ u32 KernelCore::GetCurrentHostThreadID() const {
 }
 
 KThread* KernelCore::GetCurrentEmuThread() const {
-    return impl->GetCurrentEmuThread(Impl::tls_data);
+    return impl->GetCurrentEmuThread();
 }
 
 void KernelCore::SetCurrentEmuThread(KThread* thread) {

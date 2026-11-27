@@ -12,6 +12,7 @@
 #include <array>
 #include <bit>
 #include <chrono>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -876,7 +877,16 @@ private:
 #else
     static constexpr size_t TICKS_TO_DESTROY = 8;
 #endif
-    DelayedDestructionRing<Buffer, TICKS_TO_DESTROY> delayed_destruction_ring;
+    // Buffers destroyed after TICKS_TO_DESTROY frames *and* once the GPU has run the tick that was
+    // being recorded when they went: frames alone let a buffer go while commands recorded before
+    // its deletion were still unsubmitted (GPU write faults in driver memory after long hitches).
+    struct RetiredBuffer {
+        u64 frame;
+        u64 tick;
+        Buffer buffer;
+    };
+    std::deque<RetiredBuffer> retired_buffers;
+    void RetireBuffer(Buffer&& buffer);
 
     const Tegra::Engines::Maxwell3D::DrawManager::IndirectParams* current_draw_indirect{};
 

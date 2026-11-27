@@ -128,7 +128,21 @@ StagingBufferPool::StagingBufferPool(const Device& device_, MemoryAllocator& mem
 
 StagingBufferPool::~StagingBufferPool() = default;
 
+// Its address, next to a caller's in the large-request line below, places the caller in the build's
+// ELF: caller - anchor + the anchor's ELF address.
+[[gnu::noinline]] static void StagingRequestAnchor() {}
+
 StagingBufferRef StagingBufferPool::Request(size_t size, MemoryUsage usage, bool deferred) {
+    // Requests of 64 MiB and more need that much contiguous memory in the shared pool: name the
+    // caller (OoT on a standard PS5: a 288 MiB download was refused, then the session crashed).
+    if (size >= (size_t{64} << 20)) {
+        static std::atomic<unsigned> large{0};
+        if (large.fetch_add(1, std::memory_order_relaxed) < 64) {
+            std::fprintf(stderr, "EDEN_STAGING_LARGE size=%zuMiB usage=%u deferred=%d caller=%p anchor=%p\n",
+                         size >> 20, unsigned(usage), int(deferred), __builtin_return_address(0),
+                         reinterpret_cast<void*>(&StagingRequestAnchor));
+        }
+    }
     if (!deferred && usage == MemoryUsage::Upload && size <= region_size) {
         return GetStreamBuffer(size);
     }
@@ -166,6 +180,21 @@ void StagingBufferPool::TickFrame() {
     ReleaseCache(MemoryUsage::Download);
     if (::Eden::Performance::GraphicsMemoryIsShort()) {
         ReleaseCompleted();
+        return;
+    }
+    // Large buffers (over 32 MiB) go as soon as the GPU is done with them. The console's one pool is
+    // shared with the game's memory: kept for 64 frames, idle ones held 0.5-0.9 GB in Ocarina of
+    // Time (uploads up to 288 MiB). Making one again costs less than the pool running out.
+    constexpr size_t KeepMaxLog2 = 25;
+    const auto idle = [this](const StagingBuffer& entry) {
+        return !entry.deferred && scheduler.IsFree(entry.tick);
+    };
+    for (StagingBuffersCache* const cache : {&device_local_cache, &upload_cache, &download_cache}) {
+        for (size_t level = KeepMaxLog2 + 1; level < NUM_LEVELS; ++level) {
+            if (!(*cache)[level].entries.empty()) {
+                ::Eden::StagingBuffers::ReleaseFrom((*cache)[level], idle);
+            }
+        }
     }
 }
 

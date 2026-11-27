@@ -208,7 +208,7 @@ bool AdjacentCpusShareCore() {
         if (others > 0 && (apart < 0 || others < apart)) apart = others;
     }
     const bool share = together > 0 && apart > 0 && together * 4 >= apart * 5;
-    std::printf("EDEN_WORKER_SMT cpus_0_1_ns=%lld cpus_0_2_ns=%lld share=%d\n", together, apart, share);
+    std::fprintf(stderr, "EDEN_WORKER_SMT cpus_0_1_ns=%lld cpus_0_2_ns=%lld share=%d\n", together, apart, share);
     return share;
 }
 std::array<unsigned, 5> worker_cpus{};
@@ -226,7 +226,7 @@ void CheckWorkerTopology() {
     // Probe once per process. Later games start from a launcher thread that the first game's
     // placement left on the secondary CPUs, where the probe finds too few cores.
     if (worker_topology_ready) {
-        std::printf("EDEN_WORKER_TOPOLOGY ready=1 cached=1 cpus=%u,%u,%u,%u,%u\n",
+        std::fprintf(stderr, "EDEN_WORKER_TOPOLOGY ready=1 cached=1 cpus=%u,%u,%u,%u,%u\n",
             worker_cpus[0], worker_cpus[1], worker_cpus[2], worker_cpus[3], worker_cpus[4]);
         return;
     }
@@ -301,9 +301,9 @@ void CheckWorkerTopology() {
             const bool pinned = std::find(worker_cpus.begin(), worker_cpus.end(), cpu) != worker_cpus.end();
             if (!pinned && cpu_core[cpu] != static_cast<int>(cores[4])) secondary_cpus |= 1ULL << cpu;
         }
-        std::printf("EDEN_WORKER_SECONDARY mask=%llx\n", secondary_cpus);
+        std::fprintf(stderr, "EDEN_WORKER_SECONDARY mask=%llx\n", secondary_cpus);
     }
-    std::printf("EDEN_WORKER_TOPOLOGY ready=%d distinct_cores=%u cpus=%u,%u,%u,%u,%u measured=%d\n",
+    std::fprintf(stderr, "EDEN_WORKER_TOPOLOGY ready=%d distinct_cores=%u cpus=%u,%u,%u,%u,%u measured=%d\n",
         worker_topology_ready, count, worker_cpus[0], worker_cpus[1], worker_cpus[2], worker_cpus[3], worker_cpus[4],
         static_cast<int>(measured));
 }
@@ -359,14 +359,46 @@ void PlaceSecondary(const char* name) {
         // keep the whole set (they may share the core with it).
         static std::atomic<bool> back_started{false};
         if (std::strcmp(name, "GPUBack") == 0) back_started.store(true, std::memory_order_relaxed);
-        static const unsigned long long forced_shared = [] {
+        static const unsigned long long forced_mask = [] {
             const char* value = std::getenv("EDEN_SECONDARY_MASK");
             return value != nullptr ? std::strtoull(value, nullptr, 16) : 0ULL;
         }();
+        // (EglantinePS5) EDEN_PS5_ONE_CLUSTER=1 (read at each placement: a title sets it once it is
+        // known): on the console's usual layout (secondary CPUs 1caa: guest cores 0-3 on 0, 2, 4, 6,
+        // the GPU thread on 8, its back on 10), guest cores 4 and 5 stay on the first cluster's other
+        // CPUs (1, 3, 5, 7) and every other secondary thread goes to the second cluster's spare CPUs
+        // (9, 11, 12), so the six guest cores share one L3. Ocarina of Time standing in Kokiri
+        // Forest: 40.7 to 41.3 FPS against 38.3 to 38.8, interleaved.
+        const char* const one_cluster = std::getenv("EDEN_PS5_ONE_CLUSTER");
+        if (one_cluster != nullptr && one_cluster[0] == '1' && secondary_cpus == 0x1caaULL &&
+            PlacementOverride(name) == 0) {
+            const bool guest = std::strcmp(name, "CPUCore_4") == 0 || std::strcmp(name, "CPUCore_5") == 0;
+            const bool back = std::strcmp(name, "GPUBack") == 0;
+            if (!back) {
+                cpuset_t mask{};
+                // EDEN_PS5_GUEST45_MASK and EDEN_SECONDARY_MASK (hex) replace the two sets for experiments.
+                const char* const guest_mask = std::getenv("EDEN_PS5_GUEST45_MASK");
+                const unsigned long long guest_cpus = guest_mask ? std::strtoull(guest_mask, nullptr, 16) : 0xaaULL;
+                const unsigned long long cpus_here = guest ? guest_cpus : (forced_mask ? forced_mask : 0x1a00ULL);
+                for (unsigned cpu = 0; cpu < 64; ++cpu)
+                    if (cpus_here & (1ULL << cpu)) CPU_SET(cpu, &mask);
+                const int result = cpuset_setaffinity(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, 8, &mask);
+                if (secondary_reports.fetch_add(1, std::memory_order_relaxed) < 64)
+                    std::fprintf(stderr, "EDEN_WORKER_PLACED name=%s mask=%llx error=%d one_cluster=1\n", name, cpus_here,
+                                 result ? errno : 0);
+                return;
+            }
+        }
+        const unsigned long long forced_shared = forced_mask;
         const unsigned long long shared =
             forced_shared != 0 ? forced_shared
-            : back_core >= 0 && back_started.load(std::memory_order_relaxed) ? secondary_cpus & ~(3ULL << back_core)
-                                                                             : secondary_cpus;
+            // The back's whole core is kept from the start. Kept only once the back existed, every
+            // thread placed before it (the Vulkan worker, shader compilers, texture decoder, audio,
+            // file system: mask 1caa) could still run on the back's CPU and its SMT sibling, and the
+            // back is the thread a heavy scene waits for (Ocarina of Time's forest: back 94% busy,
+            // 18.1 fps; 20.0 with mask 10aa for all of them).
+            : back_core >= 0 ? secondary_cpus & ~(3ULL << back_core)
+                             : secondary_cpus;
         static const long back_cpu = [] {
             const char* value = std::getenv("EDEN_BACK_CPU");
             return value != nullptr ? static_cast<long>(std::strtoul(value, nullptr, 10)) : long{back_core};
@@ -383,7 +415,7 @@ void PlaceSecondary(const char* name) {
         if (cpus & (1ULL << cpu)) CPU_SET(cpu, &mask);
     const int result = cpuset_setaffinity(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, 8, &mask);
     if (secondary_reports.fetch_add(1, std::memory_order_relaxed) < 64)
-        std::printf("EDEN_WORKER_PLACED name=%s mask=%llx error=%d\n", name, cpus, result ? errno : 0);
+        std::fprintf(stderr, "EDEN_WORKER_PLACED name=%s mask=%llx error=%d\n", name, cpus, result ? errno : 0);
 }
 void PinWorker(unsigned index, cpuset_t& affinity) {
     if (!worker_topology_ready || index >= worker_cpus.size()) return;
@@ -395,7 +427,7 @@ void PinWorker(unsigned index, cpuset_t& affinity) {
     cpuset_t one{}, verified{};
     CPU_SET(cpu, &one);
     if (cpuset_setaffinity(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, 8, &one)) {
-        std::printf("EDEN_WORKER_PIN name=%s error=%d\n", names[index], errno);
+        std::fprintf(stderr, "EDEN_WORKER_PIN name=%s error=%d\n", names[index], errno);
         return;
     }
     if (cpuset_getaffinity(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, 8, &verified) ||
@@ -405,7 +437,7 @@ void PinWorker(unsigned index, cpuset_t& affinity) {
         return;
     }
     affinity = verified;
-    std::printf("EDEN_WORKER_PIN name=%s cpu=%u verified=1\n", names[index], cpu);
+    std::fprintf(stderr, "EDEN_WORKER_PIN name=%s cpu=%u verified=1\n", names[index], cpu);
 }
 #endif
 bool cpu_clocks_valid = false;
@@ -497,7 +529,7 @@ void SetSecondaryPlacement(bool enabled) {
         mask = topology_allowed;
     }
     const int result = cpuset_setaffinity(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, 8, &mask);
-    std::printf("EDEN_WORKER_INHERIT enabled=%d mask=%llx error=%d\n", enabled,
+    std::fprintf(stderr, "EDEN_WORKER_INHERIT enabled=%d mask=%llx error=%d\n", enabled,
                 enabled ? secondary_cpus : 0ULL, result ? errno : 0);
 #else
     (void)enabled;
@@ -563,6 +595,10 @@ static void ReportFileHandles() {
 static std::atomic<unsigned long long> largest_free_block{0};
 // The driver's own buffer bytes (RADV's PS5 winsys counter, renamed by tools/isolate-radv.py).
 extern "C" unsigned long long eden_radv_private_radv_ps5_allocated_bytes __attribute__((weak));
+// RADV's per-priority report (tools/patch-radv-memory-report.py, RADV_PS5_MEMORY_REPORT=1). It ran
+// only on memory budget queries, and the texture collector now reads the pool instead.
+extern "C" void eden_radv_private_radv_ps5_memory_report(unsigned long long pool, unsigned long long available,
+                                                        unsigned long long driver) __attribute__((weak));
 static void RefreshFreeMemory() {
 #if defined(PS5_NATIVE) || defined(__linux__)
     Eden::HangStacks::Beat();
@@ -607,6 +643,10 @@ static void RefreshFreeMemory() {
                      &eden_radv_private_radv_ps5_allocated_bytes != nullptr
                          ? __atomic_load_n(&eden_radv_private_radv_ps5_allocated_bytes, __ATOMIC_RELAXED) >> 20 : 0ULL,
                      guest_held >> 20, guest_span >> 20);
+        if (&eden_radv_private_radv_ps5_memory_report != nullptr && &eden_radv_private_radv_ps5_allocated_bytes != nullptr)
+            eden_radv_private_radv_ps5_memory_report(
+                static_cast<unsigned long long>(total > 0 ? total : 0), largest,
+                __atomic_load_n(&eden_radv_private_radv_ps5_allocated_bytes, __ATOMIC_RELAXED));
         ReportHeap("every 20 s");
         ReportFileHandles();
         ::Kernel::Svc::MemoryStats::Report(stderr);
@@ -672,12 +712,25 @@ void ReportHeap(const char* why) {
                      eden_heap_arena_empty, eden_heap_arena_quarter,
                      ((held - large) > arenas ? (held - large) - arenas : 0) >> 20);
     }
-    if (eden_heap_sites_report) eden_heap_sites_report();
+    // The places that hold the heap, a measurement: it walks the table of followed blocks and
+    // writes some thirty lines, 0.8 s on the GPU thread that asks (the texture collector's "is
+    // memory short?"), and it came with every heap trim (each 2 s while the pool is short) and
+    // every 10 s: Ocarina of Time stopped drawing for 0.8 to 1.5 s each time. EDEN_HEAP_SITES=1
+    // has the reports carry it again.
+    static const bool sites = [] {
+        const char* const value = std::getenv("EDEN_HEAP_SITES");
+        return value != nullptr && value[0] == '1';
+    }();
+    if (eden_heap_sites_report && sites) eden_heap_sites_report();
 }
 
 std::size_t TrimHeap(const char* why) {
     if (!eden_heap_trim) return 0;
+    const long long start = NowNs();
     const std::size_t returned = eden_heap_trim();
+    // On the thread that asks "is memory short?" (the GPU thread): a slow trim is a frame held.
+    if (const long long ms = (NowNs() - start) / 1'000'000; ms >= 50)
+        std::fprintf(stderr, "EDEN_HEAP_TRIM took %lld ms for %zu MiB (%s)\n", ms, returned >> 20, why);
     if (returned != 0) {
         char text[160];
         std::snprintf(text, sizeof(text), "gave back %zu MiB: %s", returned >> 20, why);
@@ -970,9 +1023,6 @@ void RegisterWorker(const char* name) {
     MkwNativeSample::Register(name);
 #endif
     Eden::Crash::NameThread(name);  // a crash report names the thread
-#if defined(EDEN_DEV_PROFILE) && defined(PS5_NATIVE)
-    Eden::Stall::NoteThread(name);
-#endif
     for (unsigned i = 0; i < names.size(); ++i) {
         if (std::strcmp(name, names[i])) continue;
         Worker worker;

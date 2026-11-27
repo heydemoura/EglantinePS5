@@ -11,7 +11,9 @@
 
 #include "core/core.h"
 #include "core/hle/service/acc/profile_manager.h"
+#include "core/hle/kernel/k_event.h"
 #include "core/hle/service/ipc_helpers.h"
+#include "core/hle/service/kernel_helpers.h"
 #include "core/hle/service/prepo/prepo.h"
 #include "core/hle/service/server_manager.h"
 #include "core/hle/service/service.h"
@@ -25,10 +27,12 @@ namespace Service::PlayReport {
 class IPlayReportSession final : public ServiceFramework<IPlayReportSession> {
 public:
     explicit IPlayReportSession(Core::System& system_)
-        : ServiceFramework{system_, "prepo::IPlayReportSession"} {
+        : ServiceFramework{system_, "prepo::IPlayReportSession"},
+          service_context{system_, "prepo::IPlayReportSession"} {
+        event = service_context.CreateEvent("prepo::IPlayReportSession:Event");
         // clang-format off
         static const FunctionInfo functions[] = {
-            {0, &IPlayReportSession::Accept, "Unknown0"},
+            {0, &IPlayReportSession::GetEvent, "Unknown0"},
             {1, &IPlayReportSession::Accept, "Unknown1"},
             {2, &IPlayReportSession::Accept, "Unknown2"},
             {3, &IPlayReportSession::Accept, "Unknown3"},
@@ -41,12 +45,30 @@ public:
         RegisterHandlers(functions);
     }
 
+    ~IPlayReportSession() override {
+        service_context.CloseEvent(event);
+    }
+
 private:
     void Accept(HLERequestContext& ctx) {
         LOG_WARNING(Service_PREPO, "(STUBBED) session command {} called", ctx.GetCommand());
         IPC::ResponseBuilder rb{ctx, 2};
         rb.Push(ResultSuccess);
     }
+
+    // Ocarina of Time's PlayReporter thread waits on a handle right after this command; with
+    // none in the reply it waited on handle 0, got InvalidHandle and asked again 11,000 times a
+    // second, a guest core's worth. The event is never signalled: there is nothing to report.
+    void GetEvent(HLERequestContext& ctx) {
+        LOG_WARNING(Service_PREPO, "(STUBBED) session command {} called, returning an event",
+                    ctx.GetCommand());
+        IPC::ResponseBuilder rb{ctx, 2, 1};
+        rb.Push(ResultSuccess);
+        rb.PushCopyObjects(ctx, event->GetReadableEvent());
+    }
+
+    KernelHelpers::ServiceContext service_context;
+    Kernel::KEvent* event{};
 };
 
 class PlayReport final : public ServiceFramework<PlayReport> {

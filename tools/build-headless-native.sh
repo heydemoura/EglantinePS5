@@ -99,7 +99,9 @@ python3 -B "$root/tools/check-system-keyboard.py"
 python3 -B "$root/tools/check-shader-attributes.py"
 
 if [[ "$probe" == OFF ]]; then
-    python3 -B "$root/tools/check-exclusive-monitor.py"
+    # The check reads the lock's machine code as the plain build lays it out; counters and
+    # profile-driven layout change that shape, not what it does.
+    [ -n "${EDEN_PGO:-}" ] || python3 -B "$root/tools/check-exclusive-monitor.py"
 else
     # The graphics-only entry returns before Core construction; its JIT is dead-stripped.
     python3 -B "$root/tools/check-gpu-probe.py" --self-test

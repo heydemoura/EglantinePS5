@@ -758,6 +758,10 @@ msgstr "Loại tạo khung hình"
 msgid "Skip game anti-aliasing"
 msgstr "Bỏ qua khử răng cưa của trò chơi"
 
+#: pe/ui/settings.cpp
+msgid "AMD FSR 3.1"
+msgstr "AMD FSR 3.1"
+
 #: pe/ui/game_options.cpp, pe/ui/settings.cpp
 msgid "Frame generation"
 msgstr "Tạo khung hình"

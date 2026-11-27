@@ -44,6 +44,7 @@
 #include "video_core/nx2_fast_draw.h"
 #include "video_core/engines/maxwell_dma.h"
 #include "video_core/gpu.h"
+#include "video_core/nx2_back_watch.h"
 #include "video_core/pending_maps.h"
 #include "video_core/gpu_thread.h"
 #include "video_core/gpu_timestamp.h"
@@ -481,6 +482,7 @@ struct GPU::Impl {
                 }
                 auto& syncpoint_manager = system.Host1x().GetSyncpointManager();
                 const auto executer = [this, current_request_counter, composite_layers]() {
+                    VideoCommon::BackWatch::Step("composite: swap lock");
                     {
                         std::unique_lock<std::mutex> lk(request_swap_mutex);
                         if (--request_swap_counters[current_request_counter] != 0) {
@@ -488,7 +490,9 @@ struct GPU::Impl {
                         }
                         free_swap_counters.push_back(current_request_counter);
                     }
+                    VideoCommon::BackWatch::Step("composite");
                     renderer->Composite(composite_layers);
+                    VideoCommon::BackWatch::Step("composite: done");
                 };
                 for (size_t i = 0; i < num_fences; i++) {
                     syncpoint_manager.RegisterGuestAction(composite_fences[i].id,

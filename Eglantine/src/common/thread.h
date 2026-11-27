@@ -129,6 +129,8 @@ enum class ThreadPlacement : u32 {
 
 void SetCurrentThreadPriority(ThreadPriority new_priority);
 void SetCurrentThreadName(const char* name);
+/// The name SetCurrentThreadName last gave this thread ("" if none).
+const char* CurrentThreadName();
 void SetCurrentThreadToPerformanceCores();
 void SetCurrentThreadToEfficiencyCores();
 void SetCurrentThreadToBackgroundWork();

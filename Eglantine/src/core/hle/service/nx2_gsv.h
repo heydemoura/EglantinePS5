@@ -45,6 +45,7 @@
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/kernel.h"
 #include "core/hle/kernel/nx2_thread_stats.h"
+#include "core/hle/kernel/sched_trace.h"
 #include "core/hle/kernel/k_system_resource.h"
 #include "core/hle/kernel/k_memory_manager.h"
 #include "core/hle/kernel/k_page_group.h"
@@ -1822,7 +1823,8 @@ private:
     void PresentClientBuffer(HLERequestContext& ctx) {
         const auto* w = ctx.CommandBuffer();
         ++m_presents;
-        if (Kernel::Nx2ThreadStats::g_enabled) {
+        Kernel::SchedTrace::Add(3, 0, u32(ctx.GetThread().GetThreadId()), 0);
+        if (Kernel::Nx2ThreadStats::g_enabled()) {
             Kernel::Nx2ThreadStats::OnPresent(&ctx.GetThread());
         }
         if (Common::DkbFrameTrace::Enabled()) {
@@ -1942,6 +1944,7 @@ private:
                 m_stats.frame_us += frame;
                 m_stats.max_frame_us = (std::max)(m_stats.max_frame_us, frame);
                 m_stats.hitches += frame > 100'000 ? 1 : 0;
+                ++m_stats.ms_bins[(std::min)(frame / 1000, 127LL)];
             }
             m_stats.last_present = entered;
             if (++m_stats.presents == 600) {
@@ -1952,6 +1955,11 @@ private:
                          m_stats.frame_us / 599, m_stats.max_frame_us, m_stats.hitches,
                          m_stats.fence_us / 600, m_stats.max_fence_us, m_stats.composite_us / 600,
                          m_stats.pace_us / 600, m_stats.ran_ahead);
+                std::string bins;
+                for (size_t bin = 0; bin < m_stats.ms_bins.size(); ++bin)
+                    if (m_stats.ms_bins[bin] != 0)
+                        bins += fmt::format("{}{}:{}", bins.empty() ? "" : ",", bin, m_stats.ms_bins[bin]);
+                LOG_INFO(Service, "nx2:vi2 frame ms histogram: {}", bins);
                 m_stats = {.last_present = entered};
             }
         }
@@ -1970,6 +1978,8 @@ private:
         long long frame_us{}, fence_us{}, composite_us{}, pace_us{}, max_fence_us{};
         long long max_frame_us{}, hitches{};
         u32 presents{}, ran_ahead{};
+        // Frame times by the millisecond (the last bin: 127 ms and more), for percentiles.
+        std::array<u16, 128> ms_bins{};
         std::chrono::steady_clock::time_point last_present{};
     } m_stats{};
     u32 m_previous_fence_id{~0U}; // none yet (WaitForFrame ignores ids >= 192)
@@ -3574,6 +3584,8 @@ public:
             {814, &INx2GraphicsSystemSession::StubReplyZeroed, "Unknown814"},
             {861, &INx2GraphicsSystemSession::GetCpuImageDescriptor, "GetFeatureCpuImageDescriptor861"},
             {891, &INx2GraphicsSystemSession::CalculateChatImagePoolSize, "CalculateFeatureImagePoolSize891"},
+            // 903 follows 901/902 like 603 and 1003: Ocarina of Time sends it when its opening movie ends.
+            {903, &INx2GraphicsSystemSession::StubReplyZeroed, "Unknown903"},
             {1003, &INx2GraphicsSystemSession::StubReplyZeroed, "Unknown1003"},
             {1011, &INx2GraphicsSystemSession::StubReplyZeroed, "Unknown1011"},
             {1012, &INx2GraphicsSystemSession::StubReplyZeroed, "Unknown1012"},

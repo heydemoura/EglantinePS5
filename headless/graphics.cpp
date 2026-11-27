@@ -776,7 +776,7 @@ void GraphicsWindow::OnFrameDisplayed() {
                 if (Eden::Fastmem::Window64Base() != 0) {
                     char window64[1024];
                     Eden::Fastmem::Window64Report(window64, sizeof(window64));
-                    std::printf("%s\n", window64);
+                    std::fprintf(stderr, "%s\n", window64);  // stdout is not kept on the console
                 }
 #ifdef EDEN_DEV_PROFILE
                 // Composite runs on the GPU thread, so its owner CPU clock is valid here.

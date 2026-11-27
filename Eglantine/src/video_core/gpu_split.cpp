@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <ctime>
 #include <cstdlib>
 #include <optional>
 #include <thread>
@@ -18,12 +19,14 @@
 #include <windows.h>
 #endif
 #include <cstring>
+#include "video_core/nx2_back_watch.h"
 #include <string>
 
 #include "common/dkb_cpu_trace.h"
 #include "common/logging.h"
 #include "common/settings.h"
 #include "common/thread.h"
+#include "core/causal_delay.h"
 #include "core/core.h"
 #include "video_core/engines/engine_interface.h"
 #include "video_core/engines/maxwell_3d.h"
@@ -152,6 +155,40 @@ void GpuSplit::MaybeStart(Core::System& system_) {
     ring = std::make_unique<u64[]>(RingWords);
     ++starts; // Before the back starts: its holds name entries with it (EntryTag)
     back_thread = std::jthread([this](std::stop_token stop_token) { BackLoop(stop_token); });
+    if (BackWatch::on) {
+        std::thread{[this] {
+            u64 last = ~u64{0};
+            auto since = std::chrono::steady_clock::now();
+            bool reported = false;
+            for (;;) {
+                std::this_thread::sleep_for(std::chrono::milliseconds{10});
+                const u64 now_progress = BackWatch::progress.load(std::memory_order_relaxed);
+                const char* const step = BackWatch::step.load(std::memory_order_relaxed);
+                const auto now = std::chrono::steady_clock::now();
+                const auto stuck =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(now - since).count();
+                const bool idle = step[0] == 'i' && step[1] == 'd' && step[4] == 0;
+                if (now_progress != last || idle) {
+                    if (reported) {
+                        LOG_INFO(HW_GPU, "back moved again after {} ms", stuck);
+                    }
+                    last = now_progress;
+                    since = now;
+                    reported = false;
+                    continue;
+                }
+                if (stuck >= 120 && !reported) {
+                    reported = true;
+                    LOG_INFO(HW_GPU, "back stuck for {} ms at step '{}', entry {:#018x}, next word "
+                             "{:#018x}; published {} consumed {}",
+                             stuck, step, BackWatch::entry.load(std::memory_order_relaxed),
+                             BackWatch::entry_next.load(std::memory_order_relaxed),
+                             published.load(std::memory_order_relaxed),
+                             consumed.load(std::memory_order_relaxed));
+                }
+            }
+        }}.detach();
+    }
     active = true;
     const char* jit = std::getenv("EDEN_NX2_MME_JIT");
     front_macros = mode == '2' && (jit == nullptr || jit[0] != '0');
@@ -812,6 +849,7 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
                 // too, so the deferred submit can't overlap whatever the front does next.
                 if (!back_quiet.load(std::memory_order_relaxed)) {
                     if (idle_hook != nullptr) {
+                        BackWatch::Step("idle hook");
                         idle_hook(idle_argument);
                     }
                     back_quiet.store(true, std::memory_order_release);
@@ -828,7 +866,9 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
                 if (available == read_position && !stop_token.stop_requested() &&
                     !hook_requested.load(std::memory_order_seq_cst)) {
                     Count(g_acquire_stats.back_sleeps);
+                    BackWatch::Step("idle");
                     wake.wait(seen, std::memory_order_seq_cst);
+                    BackWatch::Step("woken");
                 }
                 back_waiting.store(false, std::memory_order_relaxed);
                 continue;
@@ -840,8 +880,31 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
         while (read_position != available) {
             const size_t index = read_position & RingMask;
             back_entry_start = read_position;
+            if (BackWatch::on) [[unlikely]] {
+                BackWatch::entry.store(ring[index], std::memory_order_relaxed);
+                BackWatch::entry_next.store(ring[(index + 1) & RingMask], std::memory_order_relaxed);
+                BackWatch::progress.fetch_add(1, std::memory_order_relaxed);
+                BackWatch::Step("entry");
+            }
+            // EDEN_CAUSAL_BACK_PCT=N: this thread's work N% slower (causal profiling).
+#if defined(__x86_64__)
+            static const long back_pct = Core::Causal::Read("EDEN_CAUSAL_BACK_PCT");
+#else
+            constexpr long back_pct = 0;
+#endif
+#if defined(__x86_64__)
+            const u64 tsc_start = back_pct > 0 ? __builtin_ia32_rdtsc() : 0;
+#endif
             const size_t size =
                 Execute(&ring[index], std::min<u64>(available - read_position, RingWords - index));
+#if defined(__x86_64__)
+            if (back_pct > 0) {
+                const u64 now = __builtin_ia32_rdtsc();
+                const u64 end = now + (now - tsc_start) * u64(back_pct) / 100;
+                while (__builtin_ia32_rdtsc() < end) {
+                }
+            }
+#endif
             read_position += size != 0 ? size : RingWords - index;
             if (hook_requested.load(std::memory_order_relaxed) &&
                 idle_hook != nullptr) [[unlikely]] {

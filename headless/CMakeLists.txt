@@ -50,6 +50,37 @@ endif()
 if(NOT PS5_NATIVE)
     target_link_options(dynarmic INTERFACE -fuse-ld=lld-18)
 endif()
+# Profile-guided optimisation (docs/BUILDING.md). EDEN_PGO=generate builds an instrumented
+# emulator whose counters headless/pgo_runtime.c writes on the console (EDEN_PGO_DUMP_AT in
+# env.txt); EDEN_PGO=<file.profdata> (llvm-profdata merge of that) optimises with them. The
+# flags are cached at the first configure, as EDEN_CPU_PRESET's.
+set(EDEN_PGO_TARGETS common core audio_core video_core hid_core input_common shader_recompiler dynarmic)
+if(PS5_NATIVE AND "$ENV{EDEN_PGO}" STREQUAL "generate")
+    set(profile_runtime "${PORT_ROOT}/.deps/compiler-rt-18.1.8/profile")
+    set(profile_sources InstrProfiling.c InstrProfilingBuffer.c InstrProfilingInternal.c InstrProfilingMerge.c
+        InstrProfilingValue.c InstrProfilingVersionVar.c InstrProfilingWriter.c)
+    list(TRANSFORM profile_sources PREPEND "${profile_runtime}/")
+    list(APPEND profile_sources "${CMAKE_CURRENT_LIST_DIR}/pgo_runtime.c")
+    target_sources(common PRIVATE ${profile_sources})
+    target_include_directories(common PRIVATE "${profile_runtime}")
+    # Not counted: the runtime itself, and the ZBIC decoder (zstd's sources in one unit), which
+    # reported corrupt data for a game's code when it was.
+    set_source_files_properties(${profile_sources} "${PROJECT_SOURCE_DIR}/src/common/zbic_compression.cpp"
+        TARGET_DIRECTORY common PROPERTIES COMPILE_OPTIONS "-fno-profile-generate;-w")
+    foreach(eden_target ${EDEN_PGO_TARGETS})
+        if(TARGET ${eden_target})
+            target_compile_options(${eden_target} PRIVATE -fprofile-generate)
+            target_compile_definitions(${eden_target} PRIVATE EDEN_PGO_GENERATE=1)
+        endif()
+    endforeach()
+elseif(PS5_NATIVE AND NOT "$ENV{EDEN_PGO}" STREQUAL "")
+    foreach(eden_target ${EDEN_PGO_TARGETS})
+        if(TARGET ${eden_target})
+            target_compile_options(${eden_target} PRIVATE "-fprofile-use=$ENV{EDEN_PGO}"
+                -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date -Wno-backend-plugin)
+        endif()
+    endforeach()
+endif()
 
 # Clang 18 does not accept the upstream GCC TLS-dialect flag. Use the same
 # compiler-rt emulated TLS configuration already qualified by G6 on PS5.

@@ -1171,6 +1171,17 @@ void A64EmitX64::EmitPatchMovRcx(CodePtr target_code_ptr) {
     code.EnsurePatchLocationSize(patch_location, 10);
 }
 
+void A64EmitX64::ClearFastDispatchEntry(u64 location) {
+    if (!fast_dispatch_table_lookup)
+        return;
+    FastDispatchEntry* const set = &(*fast_dispatch_table_lookup)(location);
+    for (size_t way = 0; way < fast_dispatch_set_size; ++way) {
+        if (set[way].location_descriptor == location) {
+            set[way] = {};
+        }
+    }
+}
+
 void A64EmitX64::Unpatch(const IR::LocationDescriptor& location) {
     EmitX64::Unpatch(location);
     if (conf.HasOptimization(OptimizationFlag::FastDispatch)) {
